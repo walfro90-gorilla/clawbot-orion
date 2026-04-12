@@ -28,6 +28,15 @@ async function toggleInbox(formData: FormData) {
   redirect("/dashboard/monitor")
 }
 
+async function toggleFollowup(formData: FormData) {
+  "use server"
+  const db      = createAdminClient()
+  const id      = formData.get("campaign_id") as string
+  const current = formData.get("current") === "true"
+  await db.from("campaigns").update({ follow_up_paused: !current }).eq("id", id)
+  redirect("/dashboard/monitor")
+}
+
 async function saveSearchConfig(formData: FormData) {
   "use server"
   const db = createAdminClient()
@@ -78,10 +87,11 @@ export default async function MonitorPage() {
     { data: activeAlerts },
   ] = await Promise.all([
     db.from("campaigns").select(`
-      id, name, is_active, batch_paused, search_paused,
+      id, name, is_active, batch_paused, search_paused, follow_up_paused,
       daily_invite_target, min_batch_gap_min, min_pending_threshold,
       search_gap_hours, schedule_start_hour, schedule_end_hour,
-      last_searched_at, last_batch_at, linkedin_account_id
+      last_searched_at, last_batch_at, last_followup_at,
+      follow_up_message, follow_up_delay_days, linkedin_account_id
     `).order("name"),
 
     db.from("linkedin_accounts").select(
@@ -97,7 +107,7 @@ export default async function MonitorPage() {
     ).order("created_at", { ascending: false }).limit(50),
   ])
 
-  // Alertas críticas
+  // Alertas críticas + pipeline data
   const [
     { count: leadsFailed },
     { count: leadsStale },
@@ -106,6 +116,8 @@ export default async function MonitorPage() {
     { count: repliesNew },
     { count: errorsToday },
     { count: leadsPending },
+    { data: pipelineRows },
+    { data: followupEligible },
   ] = await Promise.all([
     db.from("leads").select("id", { count: "exact", head: true }).eq("status", "failed"),
     db.from("leads").select("id", { count: "exact", head: true }).eq("status", "invite_sent").lt("sent_at", new Date(Date.now() - 7*24*60*60*1000).toISOString()),
@@ -114,6 +126,15 @@ export default async function MonitorPage() {
     db.from("leads").select("id", { count: "exact", head: true }).eq("status", "replied").gt("replied_at", new Date(Date.now() - 24*60*60*1000).toISOString()),
     db.from("scheduler_log").select("id", { count: "exact", head: true }).eq("status", "error").gt("created_at", new Date(Date.now() - 24*60*60*1000).toISOString()),
     db.from("leads").select("id", { count: "exact", head: true }).eq("status", "pending"),
+    // Pipeline: all leads grouped by campaign + status
+    db.from("leads").select("campaign_id, status"),
+    // Follow-up eligible: connected leads old enough, no follow_up_sent event yet
+    db.from("leads")
+      .select("id, campaign_id, full_name, sent_at, campaigns!inner(follow_up_delay_days, follow_up_message)")
+      .eq("status", "connected")
+      .not("campaigns.follow_up_message", "is", null)
+      .lte("sent_at", new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString()) // at least 3 days, campaigns filter at runtime
+      .limit(200),
   ])
 
   const campMap = Object.fromEntries((campaigns ?? []).map(c => [c.id, c]))
@@ -125,6 +146,29 @@ export default async function MonitorPage() {
   // Health score
   const criticalCount = (accountsBanned ?? 0) + (errorsToday ?? 0) + (accountsRateLimited ?? 0)
   const health = criticalCount === 0 ? "ok" : criticalCount <= 2 ? "warning" : "critical"
+
+  // Pipeline: aggregate lead counts per campaign per status
+  type StatusKey = "pending" | "invite_sent" | "connected" | "replied" | "failed" | "disqualified"
+  const pipeline: Record<string, Record<StatusKey, number>> = {}
+  for (const row of pipelineRows ?? []) {
+    if (!row.campaign_id) continue
+    if (!pipeline[row.campaign_id]) pipeline[row.campaign_id] = { pending: 0, invite_sent: 0, connected: 0, replied: 0, failed: 0, disqualified: 0 }
+    const s = row.status as StatusKey
+    if (s in pipeline[row.campaign_id]) pipeline[row.campaign_id][s]++
+  }
+
+  // Follow-up eligible: filter by campaign's actual delay_days
+  const followupByCampaign: Record<string, number> = {}
+  for (const lead of followupEligible ?? []) {
+    const cid = lead.campaign_id
+    if (!cid) continue
+    const camp = lead.campaigns as any
+    const delayDays = camp?.follow_up_delay_days ?? 3
+    const cutoff = new Date(Date.now() - delayDays * 24 * 60 * 60 * 1000)
+    if (new Date(lead.sent_at ?? 0) <= cutoff) {
+      followupByCampaign[cid] = (followupByCampaign[cid] ?? 0) + 1
+    }
+  }
 
   return (
     <div className="p-8 space-y-8">
@@ -169,6 +213,87 @@ export default async function MonitorPage() {
             <div className="text-gray-500 text-xs mt-0.5 leading-tight">{label}</div>
           </div>
         ))}
+      </div>
+
+      {/* ── Pipeline de Leads ─────────────────────────────────────────────────── */}
+      <div>
+        <h2 className="text-white font-semibold mb-3">Pipeline de Leads por Campaña</h2>
+        <div className="space-y-3">
+          {(campaigns ?? []).map(c => {
+            const p = pipeline[c.id] ?? { pending: 0, invite_sent: 0, connected: 0, replied: 0, failed: 0, disqualified: 0 }
+            const total = p.pending + p.invite_sent + p.connected + p.replied + p.failed + p.disqualified
+            const fuEligible = followupByCampaign[c.id] ?? 0
+            const acc = accounts?.find(a => a.id === c.linkedin_account_id)
+            const lastFollowup = minAgo(c.last_followup_at ?? null)
+
+            const stages = [
+              { key: "pending",      label: "En cola",    color: "text-gray-300",   bg: "bg-gray-500",    value: p.pending },
+              { key: "invite_sent",  label: "Inv. enviada",color: "text-blue-400",  bg: "bg-blue-500",    value: p.invite_sent },
+              { key: "connected",    label: "Conectado",   color: "text-green-400", bg: "bg-green-500",   value: p.connected },
+              { key: "replied",      label: "Respondió",   color: "text-orange-400",bg: "bg-orange-500",  value: p.replied },
+              { key: "failed",       label: "Falló",       color: "text-red-400",   bg: "bg-red-500",     value: p.failed },
+            ]
+
+            return (
+              <div key={c.id} className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-4">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="flex items-center gap-2">
+                    <span className={`w-2 h-2 rounded-full ${c.is_active ? "bg-green-400" : "bg-gray-600"}`} />
+                    <span className="text-white font-medium text-sm">{c.name}</span>
+                    {acc && (
+                      <span className="text-xs text-gray-500">· {acc.label}</span>
+                    )}
+                  </div>
+                  <span className="text-xs text-gray-500">{total} leads total</span>
+                </div>
+
+                {/* Funnel bars */}
+                <div className="grid grid-cols-5 gap-2">
+                  {stages.map(({ key, label, color, bg, value }) => {
+                    const pct = total > 0 ? Math.round(value / total * 100) : 0
+                    return (
+                      <div key={key} className="space-y-1.5">
+                        <div className="flex justify-between items-end">
+                          <span className={`text-lg font-bold ${color}`}>{value}</span>
+                          {pct > 0 && <span className="text-xs text-gray-600">{pct}%</span>}
+                        </div>
+                        <div className="w-full bg-gray-800 rounded-full h-1.5">
+                          <div className={`h-1.5 rounded-full ${bg}`} style={{ width: `${pct}%` }} />
+                        </div>
+                        <p className="text-xs text-gray-500 leading-tight">{label}</p>
+                      </div>
+                    )
+                  })}
+                </div>
+
+                {/* Follow-up queue indicator */}
+                {c.follow_up_message && (
+                  <div className={`flex items-center justify-between text-xs rounded-lg px-3 py-2 border ${
+                    fuEligible > 0 && !c.follow_up_paused
+                      ? "bg-amber-500/10 border-amber-500/30 text-amber-300"
+                      : "bg-gray-800/50 border-gray-700/50 text-gray-500"
+                  }`}>
+                    <div className="flex items-center gap-2">
+                      <span>💬 Follow-up</span>
+                      {c.follow_up_paused && <span className="text-yellow-500 font-medium">⏸ pausado</span>}
+                    </div>
+                    <div className="flex items-center gap-4">
+                      <span>
+                        <span className={fuEligible > 0 ? "text-amber-400 font-semibold" : ""}>{fuEligible}</span>
+                        {" "}en cola · delay: {c.follow_up_delay_days ?? 3}d
+                      </span>
+                      {lastFollowup !== null ? (
+                        <span className="text-gray-600">último: hace {lastFollowup}min</span>
+                      ) : (
+                        <span className="text-gray-600">nunca ejecutado</span>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
       </div>
 
       {/* ── Job Controls ─────────────────────────────────────────────────────── */}
@@ -302,6 +427,37 @@ export default async function MonitorPage() {
                       }
                     />
                   )}
+
+                  {/* FOLLOW-UP */}
+                  {c.follow_up_message && (() => {
+                    const lastFU = minAgo(c.last_followup_at ?? null)
+                    const fuElig = followupByCampaign[c.id] ?? 0
+                    return (
+                      <JobBlock
+                        label={`💬 Follow-up (${fuElig} en cola)`}
+                        color="amber"
+                        paused={c.follow_up_paused ?? false}
+                        lastRun={lastFU != null ? `hace ${lastFU} min` : "nunca"}
+                        cooldownMin={lastFU != null ? Math.max(0, 6*60 - lastFU) : null}
+                        runNowBtn={<RunNowBtn jobType="followup" campaignId={c.id} color="amber" />}
+                        toggleForm={
+                          <form action={toggleFollowup}>
+                            <input type="hidden" name="campaign_id" value={c.id} />
+                            <input type="hidden" name="current" value={String(c.follow_up_paused ?? false)} />
+                            <ToggleBtn paused={c.follow_up_paused ?? false} />
+                          </form>
+                        }
+                        configForm={
+                          <div className="mt-3 pt-3 border-t border-gray-700/50 text-xs text-gray-500 space-y-1">
+                            <p>Delay configurado: <span className="text-gray-300">{c.follow_up_delay_days ?? 3} días desde invite_sent</span></p>
+                            <p>Cap diario: <span className="text-gray-300">8 mensajes/cuenta/día</span></p>
+                            <p>Cap por ejecución: <span className="text-gray-300">4 mensajes/run</span></p>
+                            <p className="text-gray-600">Edita el mensaje y delay en la página de la campaña.</p>
+                          </div>
+                        }
+                      />
+                    )
+                  })()}
                 </div>
               </div>
             )
@@ -395,10 +551,11 @@ export default async function MonitorPage() {
                       </td>
                       <td className="px-4 py-2.5">
                         <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${
-                          log.job_type === "search" ? "bg-purple-500/20 text-purple-400" :
-                          log.job_type === "batch"  ? "bg-blue-500/20 text-blue-400" :
-                          log.job_type === "inbox"  ? "bg-teal-500/20 text-teal-400" :
-                                                      "bg-gray-700 text-gray-400"
+                          log.job_type === "search"   ? "bg-purple-500/20 text-purple-400" :
+                          log.job_type === "batch"    ? "bg-blue-500/20 text-blue-400" :
+                          log.job_type === "inbox"    ? "bg-teal-500/20 text-teal-400" :
+                          log.job_type === "followup" ? "bg-amber-500/20 text-amber-400" :
+                                                        "bg-gray-700 text-gray-400"
                         }`}>
                           {log.job_type}
                         </span>
@@ -484,7 +641,7 @@ export default async function MonitorPage() {
 
 function JobBlock({ label, color, paused, lastRun, cooldownMin, runNowBtn, toggleForm, configForm }: {
   label: string
-  color: "purple" | "blue" | "teal"
+  color: "purple" | "blue" | "teal" | "amber"
   paused: boolean
   lastRun: string
   cooldownMin: number | null
@@ -493,7 +650,7 @@ function JobBlock({ label, color, paused, lastRun, cooldownMin, runNowBtn, toggl
   configForm: React.ReactNode
 }) {
   const dotCls = paused ? "bg-yellow-400" : "bg-green-400 animate-pulse"
-  const labelCls = color === "purple" ? "text-purple-400" : color === "blue" ? "text-blue-400" : "text-teal-400"
+  const labelCls = { purple: "text-purple-400", blue: "text-blue-400", teal: "text-teal-400", amber: "text-amber-400" }[color]
 
   return (
     <div className="bg-gray-800/50 rounded-xl overflow-hidden">

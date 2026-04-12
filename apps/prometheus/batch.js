@@ -154,23 +154,43 @@ async function recordOutbound(leadId, accountId) {
 // ── Update lead status after worker run ──────────────────────────────────
 // Returns true if the batch should stop (e.g., captcha detected)
 async function updateLead(leadId, outcome, accountId) {
-  const statusMap = {
-    sent:         'invite_sent',  // invitación enviada (CRM stage 5)
-    staged:       'pending',      // keep pending — staging doesn't count as sent
-    dry_run:      'scraped',      // processed but not sent — won't be re-claimed
-    disqualified: 'disqualified',
-    captcha:      'pending',      // reset to pending — not the lead's fault
-    error:        'failed',
-    unknown:      'failed',
-  };
-
-  const updates = {
-    status: statusMap[outcome] ?? 'failed',
-  };
+  let newStatus = null;
 
   if (outcome === 'sent') {
-    updates.sent_at = new Date().toISOString();
+    newStatus = 'invite_sent';
+  } else if (outcome === 'staged') {
+    newStatus = 'pending';
+  } else if (outcome === 'dry_run') {
+    newStatus = 'scraped';
+  } else if (outcome === 'disqualified') {
+    newStatus = 'disqualified';
+  } else if (outcome === 'captcha') {
+    newStatus = 'pending'; // not the lead's fault — retry naturally
+  } else if (outcome === 'error' || outcome === 'unknown') {
+    // Retry logic: reset to pending up to 3 times before marking failed
+    const { data: current } = await supabase
+      .from('leads')
+      .select('retry_count')
+      .eq('id', leadId)
+      .single();
+
+    const retries = current?.retry_count ?? 0;
+    if (retries < 3) {
+      console.log(`[BATCH] Lead ${leadId} error — retry ${retries + 1}/3, resetting to pending.`);
+      await supabase.from('leads').update({
+        status:      'pending',
+        retry_count: retries + 1,
+      }).eq('id', leadId);
+      return false; // don't stop batch
+    }
+    newStatus = 'failed';
+    console.log(`[BATCH] Lead ${leadId} exhausted retries (${retries}) — marking failed.`);
+  } else {
+    newStatus = 'failed';
   }
+
+  const updates = { status: newStatus };
+  if (outcome === 'sent') updates.sent_at = new Date().toISOString();
 
   const { error } = await supabase
     .from('leads')

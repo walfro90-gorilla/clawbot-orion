@@ -42,6 +42,10 @@ const supabase = createClient(
 const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
 const sleep   = (ms)       => new Promise(r => setTimeout(r, ms));
 
+// ── Account locking — prevents two campaigns of the same account running in parallel ─
+// This is module-level so it persists across ticks within the same scheduler process.
+const accountLocks = new Set();
+
 /** Hora actual en Mexico City */
 function mxTime() {
   const now = new Date();
@@ -210,9 +214,10 @@ async function tick() {
   const { data: campaigns, error } = await supabase
     .from('campaigns')
     .select(`
-      id, name, batch_paused, search_paused, min_pending_threshold, daily_invite_target,
+      id, name, batch_paused, search_paused, follow_up_paused, min_pending_threshold, daily_invite_target,
       min_batch_gap_min, search_gap_hours, schedule_start_hour, schedule_end_hour,
-      last_searched_at, last_batch_at,
+      last_searched_at, last_batch_at, last_followup_at,
+      follow_up_message, follow_up_delay_days,
       search_keywords, search_location, search_count,
       linkedin_account_id,
       linkedin_accounts (
@@ -252,9 +257,31 @@ async function tick() {
 
     // ── Cookie staleness check (una vez por tick) ───────────────────────────
     for (const account of accountsSeen.values()) {
-      if (!account.li_at_cookie_updated_at) continue;
+      if (!account.li_at_cookie_updated_at) {
+        // Cookie nunca actualizada — siempre crear alerta
+        const { data: existing } = await supabase
+          .from('account_alerts')
+          .select('id')
+          .eq('linkedin_account_id', account.id)
+          .eq('alert_type', 'cookie_expiry')
+          .is('resolved_at', null)
+          .gte('created_at', new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString())
+          .maybeSingle();
+        if (!existing) {
+          console.warn(`[SCHEDULER] ⚠️  Cookie de "${account.label}" nunca fue registrada — verifica que li_at_cookie_updated_at esté seteado.`);
+          await createAlert(
+            account.id, null,
+            'cookie_expiry', 'warning',
+            `Cookie de LinkedIn de "${account.label}" no tiene fecha de actualización registrada. Actualízala en la sección Cuentas.`,
+            { account_label: account.label, days_old: null }
+          );
+        }
+        continue;
+      }
       const daysSince = (Date.now() - new Date(account.li_at_cookie_updated_at).getTime()) / (1000 * 60 * 60 * 24);
-      if (daysSince >= 25) {
+      // Umbrales: warning ≥ 30 días, critical ≥ 60 días
+      // LinkedIn li_at cookies duran ~1 año pero en automatización rotar cada 30-60 días reduce riesgo de detección
+      if (daysSince >= 30) {
         const { data: existing } = await supabase
           .from('account_alerts')
           .select('id')
@@ -265,11 +292,12 @@ async function tick() {
           .maybeSingle();
 
         if (!existing) {
-          console.warn(`[SCHEDULER] ⚠️  Cookie de "${account.label}" tiene ${Math.round(daysSince)} días — próxima a expirar.`);
+          const isCritical = daysSince >= 60;
+          console.warn(`[SCHEDULER] ⚠️  Cookie de "${account.label}" tiene ${Math.round(daysSince)} días — ${isCritical ? 'CRÍTICO' : 'advertencia'}.`);
           await createAlert(
             account.id, null,
-            'cookie_expiry', daysSince >= 28 ? 'critical' : 'warning',
-            `Cookie de LinkedIn de "${account.label}" tiene ${Math.round(daysSince)} días — renuévala pronto para evitar desconexión.`,
+            'cookie_expiry', isCritical ? 'critical' : 'warning',
+            `Cookie de LinkedIn de "${account.label}" tiene ${Math.round(daysSince)} días sin renovar. ${isCritical ? 'Riesgo alto de desconexión — renuévala ahora.' : 'Renuévala antes de los 60 días para mantener la automatización estable.'}`,
             { account_label: account.label, days_old: Math.round(daysSince) }
           );
         }
@@ -296,85 +324,111 @@ async function processCampaign(campaign) {
   const account = campaign.linkedin_accounts;
   const cid     = campaign.id;
   const cname   = campaign.name;
+  const accountId = account?.id;
 
   console.log(`\n[SCHEDULER] Campaña: "${cname}"`);
 
-  // Guard: horario específico de la campaña (puede diferir del global)
-  const campStartHour = campaign.schedule_start_hour ?? 9;
-  const campEndHour   = campaign.schedule_end_hour   ?? 19;
-  if (!isBusinessHours(campStartHour, campEndHour)) {
-    const { mxHour } = mxTime();
-    console.log(`[SCHEDULER] ⏰ "${cname}" fuera de su horario (${campStartHour}–${campEndHour}h, ahora ${mxHour}h MX) — skip.`);
+  // Guard: otra campaña del mismo account ya está en proceso este tick
+  if (accountId && accountLocks.has(accountId)) {
+    console.log(`[SCHEDULER] ⚠️  Cuenta "${account?.label}" ocupada (otra campaña en curso) — skip "${cname}".`);
+    await logJob({ campaignId: cid, accountId, jobType: 'tick', status: 'skipped', skipReason: 'account_locked' });
     return;
   }
+  if (accountId) accountLocks.add(accountId);
 
-  // Guard: campaña pausada manualmente (ambos jobs)
-  if (campaign.batch_paused && campaign.search_paused) {
-    console.log(`[SCHEDULER] ⏸  Campaña completamente pausada — skip.`);
-    await logJob({ campaignId: cid, jobType: 'tick', status: 'skipped', skipReason: 'campaign_paused' });
-    return;
-  }
+  try {
+    // Guard: horario específico de la campaña (puede diferir del global)
+    const campStartHour = campaign.schedule_start_hour ?? 9;
+    const campEndHour   = campaign.schedule_end_hour   ?? 19;
+    if (!isBusinessHours(campStartHour, campEndHour)) {
+      const { mxHour } = mxTime();
+      console.log(`[SCHEDULER] ⏰ "${cname}" fuera de su horario (${campStartHour}–${campEndHour}h, ahora ${mxHour}h MX) — skip.`);
+      return;
+    }
 
-  // Guard: sin cuenta asignada
-  if (!account) {
-    console.log(`[SCHEDULER] ⚠️  Sin cuenta LinkedIn — skip.`);
-    await logJob({ campaignId: cid, jobType: 'batch', status: 'skipped', skipReason: 'no_account' });
-    return;
-  }
+    // Guard: campaña pausada manualmente (ambos jobs)
+    if (campaign.batch_paused && campaign.search_paused) {
+      console.log(`[SCHEDULER] ⏸  Campaña completamente pausada — skip.`);
+      await logJob({ campaignId: cid, jobType: 'tick', status: 'skipped', skipReason: 'campaign_paused' });
+      return;
+    }
 
-  const accountId = account.id;
+    // Guard: sin cuenta asignada
+    if (!account) {
+      console.log(`[SCHEDULER] ⚠️  Sin cuenta LinkedIn — skip.`);
+      await logJob({ campaignId: cid, jobType: 'batch', status: 'skipped', skipReason: 'no_account' });
+      return;
+    }
 
-  // Guard: cuenta no activa
-  if (account.status !== 'active') {
-    console.log(`[SCHEDULER] ⛔ Cuenta "${account.label ?? accountId}" status=${account.status} — skip.`);
-    await logJob({ campaignId: cid, accountId, jobType: 'batch', status: 'skipped', skipReason: `account_${account.status}` });
-    return;
-  }
+    // Guard: cuenta no activa
+    if (account.status !== 'active') {
+      console.log(`[SCHEDULER] ⛔ Cuenta "${account.label ?? accountId}" status=${account.status} — skip.`);
+      await logJob({ campaignId: cid, accountId, jobType: 'batch', status: 'skipped', skipReason: `account_${account.status}` });
+      return;
+    }
 
-  // Guard: límite diario ya alcanzado
-  const { data: limitOk } = await supabase.rpc('check_daily_limit', { p_account_id: accountId });
-  if (!limitOk) {
-    console.log(`[SCHEDULER] 🛑 Límite diario alcanzado para "${account.label ?? accountId}".`);
-    await logJob({ campaignId: cid, accountId, jobType: 'batch', status: 'skipped', skipReason: 'daily_limit_reached' });
-    return;
-  }
+    // Guard: límite diario ya alcanzado
+    const { data: limitOk } = await supabase.rpc('check_daily_limit', { p_account_id: accountId });
+    if (!limitOk) {
+      console.log(`[SCHEDULER] 🛑 Límite diario alcanzado para "${account.label ?? accountId}".`);
+      await logJob({ campaignId: cid, accountId, jobType: 'batch', status: 'skipped', skipReason: 'daily_limit_reached' });
+      return;
+    }
 
-  // Contar pending leads
-  const { count: pendingCount } = await supabase
-    .from('leads')
-    .select('id', { count: 'exact', head: true })
-    .eq('campaign_id', cid)
-    .eq('status', 'pending');
+    // Contar pending leads
+    const { count: pendingCount } = await supabase
+      .from('leads')
+      .select('id', { count: 'exact', head: true })
+      .eq('campaign_id', cid)
+      .eq('status', 'pending');
 
-  console.log(`[SCHEDULER] Pending leads: ${pendingCount ?? 0} | Threshold: ${campaign.min_pending_threshold}`);
+    console.log(`[SCHEDULER] Pending leads: ${pendingCount ?? 0} | Threshold: ${campaign.min_pending_threshold}`);
 
-  // ── SEARCH: buscar más leads si están por debajo del umbral ─────────────────
-  const searchedHoursAgo = minutesSince(campaign.last_searched_at) / 60;
-  const needsSearch      = (pendingCount ?? 0) < campaign.min_pending_threshold;
-  const searchGapHours   = campaign.search_gap_hours ?? 20;
-  const searchCooldownOk = searchedHoursAgo > searchGapHours;
+    // ── SEARCH: buscar más leads si están por debajo del umbral ─────────────────
+    const searchedHoursAgo = minutesSince(campaign.last_searched_at) / 60;
+    const needsSearch      = (pendingCount ?? 0) < campaign.min_pending_threshold;
+    const searchGapHours   = campaign.search_gap_hours ?? 20;
+    const searchCooldownOk = searchedHoursAgo > searchGapHours;
 
-  if (campaign.search_paused) {
-    console.log(`[SCHEDULER] ⏸  Search pausado para esta campaña.`);
-  } else if (needsSearch && searchCooldownOk) {
-    await runSearchJob(campaign, accountId);
-  } else if (needsSearch && !searchCooldownOk) {
-    console.log(`[SCHEDULER] 🔍 Necesita leads pero último search fue hace ${searchedHoursAgo.toFixed(1)}h (gap: ${searchGapHours}h) — cooldown activo.`);
-  }
+    if (campaign.search_paused) {
+      console.log(`[SCHEDULER] ⏸  Search pausado para esta campaña.`);
+    } else if (needsSearch && searchCooldownOk) {
+      await runSearchJob(campaign, accountId);
+    } else if (needsSearch && !searchCooldownOk) {
+      console.log(`[SCHEDULER] 🔍 Necesita leads pero último search fue hace ${searchedHoursAgo.toFixed(1)}h (gap: ${searchGapHours}h) — cooldown activo.`);
+    }
 
-  // ── BATCH: contactar leads si hay pending y pasó el gap mínimo ──────────────
-  const batchGapOk   = minutesSince(campaign.last_batch_at) >= campaign.min_batch_gap_min;
-  const hasPending   = (pendingCount ?? 0) > 0;
+    // ── BATCH: contactar leads si hay pending y pasó el gap mínimo ──────────────
+    const batchGapOk = minutesSince(campaign.last_batch_at) >= campaign.min_batch_gap_min;
+    const hasPending = (pendingCount ?? 0) > 0;
 
-  if (campaign.batch_paused) {
-    console.log(`[SCHEDULER] ⏸  Batch pausado para esta campaña.`);
-  } else if (hasPending && batchGapOk) {
-    await runBatchJob(campaign, account);
-  } else if (hasPending && !batchGapOk) {
-    const remaining = Math.round(campaign.min_batch_gap_min - minutesSince(campaign.last_batch_at));
-    console.log(`[SCHEDULER] ⏳ Hay leads pero gap mínimo no cumplido — faltan ~${remaining} min.`);
-  } else if (!hasPending) {
-    console.log(`[SCHEDULER] 📭 Sin leads pending — nada que enviar.`);
+    if (campaign.batch_paused) {
+      console.log(`[SCHEDULER] ⏸  Batch pausado para esta campaña.`);
+    } else if (hasPending && batchGapOk) {
+      await runBatchJob(campaign, account);
+    } else if (hasPending && !batchGapOk) {
+      const remaining = Math.round(campaign.min_batch_gap_min - minutesSince(campaign.last_batch_at));
+      console.log(`[SCHEDULER] ⏳ Hay leads pero gap mínimo no cumplido — faltan ~${remaining} min.`);
+    } else if (!hasPending) {
+      console.log(`[SCHEDULER] 📭 Sin leads pending — nada que enviar.`);
+    }
+
+    // ── FOLLOW-UP: mensajes de seguimiento a leads conectados sin respuesta ──────
+    if (campaign.follow_up_message) {
+      // Gap mínimo entre runs de follow-up: 6h (no queremos correr esto en cada tick)
+      const followupGapOk = minutesSince(campaign.last_followup_at) >= 6 * 60;
+      if (campaign.follow_up_paused) {
+        console.log(`[SCHEDULER] ⏸  Follow-up pausado para esta campaña.`);
+      } else if (followupGapOk) {
+        await runFollowupJob(campaign, account);
+      } else {
+        const remaining = Math.round(6 * 60 - minutesSince(campaign.last_followup_at));
+        console.log(`[SCHEDULER] ⏳ Follow-up gap activo — faltan ~${remaining} min.`);
+      }
+    }
+  } finally {
+    // Siempre liberar el lock aunque haya error o return temprano
+    if (accountId) accountLocks.delete(accountId);
   }
 }
 
@@ -522,6 +576,62 @@ async function runBatchJob(campaign, account) {
         { account_label: account.label, campaign_name: campaign.name, exit_code: code, output_tail: lines.slice(-5).join('\n') }
       );
     }
+  }
+}
+
+// ── Follow-up job ─────────────────────────────────────────────────────────────
+
+async function runFollowupJob(campaign, account) {
+  console.log(`[SCHEDULER] 💬 Iniciando follow-up para "${campaign.name}"...`);
+
+  // Actualizar last_followup_at para respetar el gap mínimo
+  await supabase.from('campaigns').update({ last_followup_at: new Date().toISOString() }).eq('id', campaign.id);
+
+  await logJob({ campaignId: campaign.id, accountId: account.id, jobType: 'followup', status: 'started' });
+
+  if (!account.proxy_url) {
+    console.warn(`[SCHEDULER] ⚠️  Sin proxy para follow-up "${campaign.name}" — ban risk alto.`);
+  }
+
+  const t0 = Date.now();
+
+  if (DRY_RUN) {
+    console.log(`[SCHEDULER] [DRY_RUN] Simularía: node followup.js CAMPAIGN_ID=${campaign.id}`);
+    await logJob({ campaignId: campaign.id, accountId: account.id, jobType: 'followup', status: 'skipped', skipReason: 'dry_run' });
+    return;
+  }
+
+  const { code, lines } = await runScript('followup.js', {
+    CAMPAIGN_ID: campaign.id,
+    DRY_RUN:     'false',
+    LIVE_SEND:   String(LIVE_SEND),
+    LI_AT:       account.li_at_cookie,
+    ...(account.proxy_url ? { PROXY_URL: account.proxy_url } : {}),
+  });
+
+  const allOutput  = lines.join('\n');
+  const sentMatch  = allOutput.match(/Sent:\s*(\d+)/i);
+  const sent       = sentMatch ? parseInt(sentMatch[1]) : 0;
+  const durationMs = Date.now() - t0;
+
+  await logJob({
+    campaignId: campaign.id, accountId: account.id, jobType: 'followup',
+    status:     code === 0 ? 'completed' : (code === 2 ? 'captcha' : 'error'),
+    leadsSent:  sent, durationMs,
+    details:    { exit_code: code },
+  });
+
+  if (code === 2) {
+    console.error(`[SCHEDULER] ⛔ Captcha detectado en follow-up — cuenta: "${account.label}".`);
+    await supabase.from('linkedin_accounts').update({ status: 'rate_limited' }).eq('id', account.id);
+    await createAlert(
+      account.id, campaign.id,
+      'captcha', 'critical',
+      `Captcha detectado en cuenta "${account.label}" durante follow-up — campaña "${campaign.name}".`,
+      { account_label: account.label, campaign_name: campaign.name }
+    );
+  } else {
+    console.log(`[SCHEDULER] ✅ Follow-up done: ${sent} mensajes enviados (${(durationMs/1000).toFixed(1)}s)`);
   }
 }
 

@@ -3,10 +3,10 @@
 import { useState } from "react"
 
 interface RunNowBtnProps {
-  jobType: "search" | "batch" | "inbox"
+  jobType: "search" | "batch" | "inbox" | "followup"
   campaignId?: string
   accountId?: string
-  color?: "purple" | "blue" | "teal"
+  color?: "purple" | "blue" | "teal" | "amber"
 }
 
 export function RunNowBtn({ jobType, campaignId, accountId, color = "blue" }: RunNowBtnProps) {
@@ -19,6 +19,7 @@ export function RunNowBtn({ jobType, campaignId, accountId, color = "blue" }: Ru
     purple: "bg-purple-600/20 hover:bg-purple-600/40 text-purple-400 border-purple-500/30",
     blue:   "bg-blue-600/20 hover:bg-blue-600/40 text-blue-400 border-blue-500/30",
     teal:   "bg-teal-600/20 hover:bg-teal-600/40 text-teal-400 border-teal-500/30",
+    amber:  "bg-amber-600/20 hover:bg-amber-600/40 text-amber-400 border-amber-500/30",
   }[color]
 
   async function handleConfirm() {
@@ -47,7 +48,7 @@ export function RunNowBtn({ jobType, campaignId, accountId, color = "blue" }: Ru
     }
   }
 
-  const jobLabel = jobType === "search" ? "Search" : jobType === "batch" ? "Batch" : "Inbox"
+  const jobLabel = { search: "Search", batch: "Batch", inbox: "Inbox", followup: "Follow-up" }[jobType]
 
   return (
     <>

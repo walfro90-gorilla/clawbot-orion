@@ -141,6 +141,23 @@ async function markConnected(lead) {
   console.log(`[INBOX] ✓ Connected: ${lead.full_name}`)
 }
 
+// ── Slack notification (fire-and-forget) ─────────────────────────────────────
+function notifySlack(lead, messageText) {
+  const url = process.env.SLACK_WEBHOOK_URL
+  if (!url) return
+  const preview = (messageText ?? '').slice(0, 200)
+  const body = JSON.stringify({
+    text: `💬 *${lead.full_name}* respondió en LinkedIn!\n"${preview}"\n<${lead.linkedin_url}|Ver perfil en LinkedIn>`,
+  })
+  import('https').then(({ default: https }) => {
+    const parsed = new URL(url)
+    const req = https.request({ hostname: parsed.hostname, path: parsed.pathname, method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } }, () => {})
+    req.on('error', () => {})
+    req.write(body)
+    req.end()
+  }).catch(() => {})
+}
+
 async function markReplied(lead, messageText, threadId) {
   if (DRY_RUN) {
     console.log(`[INBOX][DRY] Replied: ${lead.full_name} — "${messageText?.slice(0, 60)}..."`)
@@ -187,6 +204,9 @@ async function markReplied(lead, messageText, threadId) {
   }
 
   console.log(`[INBOX] ✓ Replied: ${lead.full_name} — "${messageText?.slice(0, 60)}"`)
+
+  // Notify team on Slack (fire-and-forget — won't block or crash inbox)
+  notifySlack(lead, messageText)
 }
 
 // ── Paso 1: Notificaciones — detectar conexiones aceptadas ────────────────────
@@ -305,33 +325,104 @@ async function checkMessaging(page, leadMap, leads, stats, globalApiResponses) {
 
   console.log(`[INBOX] API responses after /messaging/: ${globalApiResponses.size}`)
 
-  // Buscar la respuesta GraphQL de messengerConversations capturada por el interceptor global
-  let convData = null
+  // ── Recolectar todas las conversaciones paginando via syncToken ──────────────
+  // LinkedIn devuelve máx. 20 por request; usamos el syncToken del metadata para
+  // hacer fetch directo a las páginas siguientes (más confiable que scroll DOM).
+  const allConversations = []
+  let firstPageUrl  = null
+  let firstPageJson = null
+
   for (const [url, json] of globalApiResponses) {
-    if (url.toLowerCase().includes('messengerconversations')) {
-      convData = json
+    const lurl = url.toLowerCase()
+    if (lurl.includes('messengerconversations') && !lurl.includes('presencestatus')) {
+      firstPageUrl  = url
+      firstPageJson = json
       break
     }
   }
 
-  if (!convData) {
+  if (!firstPageJson) {
     console.warn('[INBOX] No messengerConversations GraphQL response captured — skipping messaging check')
     return
   }
 
-  const conversations = convData?.data?.messengerConversationsBySyncToken?.elements
-    ?? convData?.data?.messengerConversationsByCategory?.elements
+  const page1Elements = firstPageJson?.data?.messengerConversationsBySyncToken?.elements
+    ?? firstPageJson?.data?.messengerConversationsByCategory?.elements
     ?? []
+  allConversations.push(...page1Elements)
+  console.log(`[INBOX] Page 1: ${page1Elements.length} conversations`)
 
-  console.log(`[INBOX] Conversations from GraphQL: ${conversations.length}`)
+  // Helper: build next-page URL by swapping syncToken in variables param
+  function buildNextPageUrl(baseUrl, newSyncToken) {
+    try {
+      const u = new URL(baseUrl)
+      const rawVars = u.searchParams.get('variables')
+      if (rawVars) {
+        const parsed = JSON.parse(rawVars)
+        parsed.syncToken = newSyncToken
+        u.searchParams.set('variables', JSON.stringify(parsed))
+        return u.toString()
+      }
+    } catch { /* fall through to regex */ }
+    // Regex fallback for non-standard formats
+    return baseUrl.replace(/"syncToken":"[^"]*"/, `"syncToken":"${newSyncToken}"`)
+  }
+
+  // Fetch páginas adicionales via syncToken (hasta 4 más = ~100 conversaciones total)
+  let nextSyncToken = firstPageJson?.data?.messengerConversationsBySyncToken?.metadata?.newSyncToken
+
+  for (let pageNum = 2; pageNum <= 5 && nextSyncToken && firstPageUrl; pageNum++) {
+    const nextUrl = buildNextPageUrl(firstPageUrl, nextSyncToken)
+
+    await page.waitForTimeout(randInt(1500, 3000))
+
+    const nextData = await page.evaluate(async (url) => {
+      try {
+        // CSRF token: JSESSIONID cookie tiene formato "ajax:TOKEN" — extraer solo TOKEN
+        const jsid = document.cookie.match(/JSESSIONID="?([^";\s]+)"?/)?.[1] ?? ''
+        const csrf = jsid.replace(/^ajax:/, '')
+        const resp = await fetch(url, {
+          method: 'GET',
+          credentials: 'include',
+          headers: {
+            'accept': 'application/vnd.linkedin.normalized+json+2.1',
+            'x-restli-protocol-version': '2.0.0',
+            'csrf-token': csrf,
+          },
+        })
+        if (!resp.ok) return { __status: resp.status }
+        return await resp.json()
+      } catch (e) {
+        return { __error: String(e) }
+      }
+    }, nextUrl)
+
+    if (nextData?.__error || nextData?.__status) {
+      console.log(`[INBOX] Page ${pageNum}: fetch stopped (${nextData.__error ?? 'HTTP ' + nextData.__status})`)
+      break
+    }
+
+    const nextElements = nextData?.data?.messengerConversationsBySyncToken?.elements ?? []
+    if (nextElements.length === 0) {
+      console.log(`[INBOX] Page ${pageNum}: no more conversations — end of list`)
+      break
+    }
+
+    allConversations.push(...nextElements)
+    nextSyncToken = nextData?.data?.messengerConversationsBySyncToken?.metadata?.newSyncToken
+    console.log(`[INBOX] Page ${pageNum}: +${nextElements.length} conversations (total: ${allConversations.length})`)
+    if (!nextSyncToken) break
+  }
+
+  console.log(`[INBOX] Total conversations fetched: ${allConversations.length}`)
 
   // Construir lookup por nombre completo para el matching de participantes GraphQL
   const leadNameMap = buildLeadNameMap(leads)
 
   // Ordenar: primero conversaciones con unread > 0
   const sorted = [
-    ...conversations.filter(c => (c.unreadCount ?? 0) > 0),
-    ...conversations.filter(c => (c.unreadCount ?? 0) === 0),
+    ...allConversations.filter(c => (c.unreadCount ?? 0) > 0),
+    ...allConversations.filter(c => (c.unreadCount ?? 0) === 0),
   ]
 
   let processed = 0

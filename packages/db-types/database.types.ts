@@ -256,10 +256,14 @@ export type Database = {
           batch_paused: boolean
           created_at: string | null
           daily_invite_target: number
+          follow_up_delay_days: number | null
+          follow_up_message: string | null
+          follow_up_paused: boolean | null
           gemini_system_prompt: string
           id: string
           is_active: boolean | null
           last_batch_at: string | null
+          last_followup_at: string | null
           last_searched_at: string | null
           linkedin_account_id: string | null
           min_batch_gap_min: number
@@ -281,10 +285,14 @@ export type Database = {
           batch_paused?: boolean
           created_at?: string | null
           daily_invite_target?: number
+          follow_up_delay_days?: number | null
+          follow_up_message?: string | null
+          follow_up_paused?: boolean | null
           gemini_system_prompt: string
           id?: string
           is_active?: boolean | null
           last_batch_at?: string | null
+          last_followup_at?: string | null
           last_searched_at?: string | null
           linkedin_account_id?: string | null
           min_batch_gap_min?: number
@@ -306,10 +314,14 @@ export type Database = {
           batch_paused?: boolean
           created_at?: string | null
           daily_invite_target?: number
+          follow_up_delay_days?: number | null
+          follow_up_message?: string | null
+          follow_up_paused?: boolean | null
           gemini_system_prompt?: string
           id?: string
           is_active?: boolean | null
           last_batch_at?: string | null
+          last_followup_at?: string | null
           last_searched_at?: string | null
           linkedin_account_id?: string | null
           min_batch_gap_min?: number

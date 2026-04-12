@@ -18,17 +18,30 @@ export default async function DashboardLayout({
   const admin = createAdminClient()
   const { data: profile } = await admin
     .from("profiles")
-    .select("email, role")
+    .select("email, role, linkedin_account_id")
     .eq("id", user.id)
     .single()
 
-  // Cargar alertas no resueltas (RLS filtra por cuentas del usuario)
-  const { data: alerts } = await supabase
-    .from("account_alerts")
-    .select("id, alert_type, severity, message, details, auto_paused, created_at, linkedin_account_id, campaign_id")
-    .is("resolved_at", null)
-    .order("created_at", { ascending: false })
-    .limit(20)
+  // Cargar alertas no resueltas y conteo de conversaciones no vistas en paralelo
+  const [{ data: alerts }, { count: unreadCount }] = await Promise.all([
+    supabase
+      .from("account_alerts")
+      .select("id, alert_type, severity, message, details, auto_paused, created_at, linkedin_account_id, campaign_id")
+      .is("resolved_at", null)
+      .order("created_at", { ascending: false })
+      .limit(20),
+    // Conversaciones activas (leads que han respondido) — muestra badge en sidebar
+    profile?.role === "user" && profile?.linkedin_account_id
+      ? admin
+          .from("conversations")
+          .select("id", { count: "exact", head: true })
+          .eq("linkedin_account_id", profile.linkedin_account_id)
+          .eq("status", "active")
+      : admin
+          .from("conversations")
+          .select("id", { count: "exact", head: true })
+          .eq("status", "active"),
+  ])
 
   const unresolvedAlerts = (alerts ?? []) as AccountAlert[]
 
@@ -38,8 +51,9 @@ export default async function DashboardLayout({
         email={profile?.email ?? user.email}
         role={profile?.role ?? "user"}
         alertCount={unresolvedAlerts.filter(a => a.severity === "critical").length}
+        unreadCount={unreadCount ?? 0}
       />
-      <main className="flex-1 overflow-auto">
+      <main className="flex-1 overflow-auto pt-12 sm:pt-0">
         <AlertBanner initialAlerts={unresolvedAlerts} />
         {children}
       </main>

@@ -8,12 +8,11 @@ import { createAdminClient } from "@/lib/supabase/admin"
 const PROMETHEUS_DIR = "/root/clawbot/apps/prometheus"
 
 // Cooldowns por tipo de job (ms)
-// inbox = 30 min: un usuario normal revisa mensajes max 2x/hora
-// batch/search = 5 min: proteger contra spam de triggers manuales
 const COOLDOWN_MS: Record<string, number> = {
-  inbox:  30 * 60 * 1000,
-  batch:   5 * 60 * 1000,
-  search:  5 * 60 * 1000,
+  inbox:    30 * 60 * 1000,
+  batch:     5 * 60 * 1000,
+  search:    5 * 60 * 1000,
+  followup: 60 * 60 * 1000, // 1h — follow-up no debe dispararse seguido
 }
 
 // Debounce en memoria — fallback; DB last_inbox_check_at es el check primario para inbox
@@ -21,9 +20,10 @@ const recentRuns = new Map<string, number>()
 
 // Whitelist de jobs permitidos — no usar dinámico para evitar injection
 function getScript(jobType: string): string | null {
-  if (jobType === "search") return "search.js"
-  if (jobType === "batch")  return "batch.js"
-  if (jobType === "inbox")  return "inbox.js"
+  if (jobType === "search")   return "search.js"
+  if (jobType === "batch")    return "batch.js"
+  if (jobType === "inbox")    return "inbox.js"
+  if (jobType === "followup") return "followup.js"
   return null
 }
 
@@ -52,14 +52,14 @@ export async function POST(req: NextRequest) {
   }
 
   // inbox puede ser disparado por cualquier usuario (role >= user)
-  // batch/search requieren al menos admin
+  // batch/search/followup requieren al menos admin
   const minRole = jobType === "inbox" ? 2 : 3
   if (userLevel < minRole) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 })
   }
 
-  if ((jobType === "search" || jobType === "batch") && !campaignId) {
-    return NextResponse.json({ error: "campaignId required for search/batch" }, { status: 400 })
+  if ((jobType === "search" || jobType === "batch" || jobType === "followup") && !campaignId) {
+    return NextResponse.json({ error: "campaignId required for this job type" }, { status: 400 })
   }
   if (jobType === "inbox" && !accountId) {
     return NextResponse.json({ error: "accountId required for inbox" }, { status: 400 })
@@ -111,7 +111,7 @@ export async function POST(req: NextRequest) {
   recentRuns.set(debounceKey, Date.now())
 
   // Build env vars — values are UUIDs (safe), job validated by whitelist
-  const envParts: string[] = ["MANUAL_RUN=true"]
+  const envParts: string[] = ["MANUAL_RUN=true", "DRY_RUN=false", "LIVE_SEND=true"]
   if (campaignId) envParts.push(`CAMPAIGN_ID=${campaignId}`)
   if (accountId)  envParts.push(`ACCOUNT_ID=${accountId}`)
   const envPrefix = envParts.join(" ")

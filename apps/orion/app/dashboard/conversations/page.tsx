@@ -2,6 +2,7 @@ import { createClient } from "@/lib/supabase/server"
 import { createAdminClient } from "@/lib/supabase/admin"
 import { getSessionUser } from "@/lib/auth/role"
 import { RefreshInboxBtn } from "@/components/refresh-inbox-btn"
+import { ReplyBtn } from "@/components/reply-btn"
 import Link from "next/link"
 
 export default async function ConversationsPage() {
@@ -107,6 +108,7 @@ export default async function ConversationsPage() {
                   <th className="px-4 py-3 text-left font-medium">Último mensaje</th>
                   <th className="px-4 py-3 text-left font-medium">Fecha respuesta</th>
                   <th className="px-4 py-3 text-left font-medium">Estado conv.</th>
+                  <th className="px-4 py-3 text-left font-medium">Acción</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-800">
@@ -153,6 +155,12 @@ export default async function ConversationsPage() {
                         <span className={`text-xs px-2 py-1 rounded-full border font-medium ${statusColors[c.status] ?? "bg-gray-500/15 text-gray-400 border-gray-500/30"}`}>
                           {statusLabels[c.status] ?? c.status ?? "—"}
                         </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <ReplyBtn
+                          leadId={c.lead_id}
+                          leadName={lead?.full_name ?? "Lead"}
+                        />
                       </td>
                     </tr>
                   )

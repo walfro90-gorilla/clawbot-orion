@@ -79,6 +79,14 @@ export default async function LeadsPage({
           <h1 className="text-2xl font-bold text-white">Leads</h1>
           <p className="text-gray-400 text-sm mt-0.5">{count ?? leadList.length} leads en total</p>
         </div>
+        {!isRestricted && (
+          <Link
+            href="/dashboard/leads/import"
+            className="px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-white text-sm font-medium rounded-lg transition-colors"
+          >
+            ↑ Importar CSV
+          </Link>
+        )}
       </div>
 
       {/* Filters */}

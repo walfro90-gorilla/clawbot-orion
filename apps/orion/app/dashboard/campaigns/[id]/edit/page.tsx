@@ -1,5 +1,6 @@
 import { createAdminClient } from "@/lib/supabase/admin"
 import { redirect, notFound } from "next/navigation"
+import DeleteCampaignBtn from "@/components/delete-campaign-btn"
 
 // ── Server Actions ─────────────────────────────────────────────────────────────
 
@@ -26,12 +27,15 @@ async function saveCampaign(formData: FormData) {
     title_blacklist:       parseList("title_blacklist"),
     batch_paused:          formData.get("batch_paused") === "true",
     search_paused:         formData.get("search_paused") === "true",
+    follow_up_paused:      formData.get("follow_up_paused") === "true",
     daily_invite_target:   Number(formData.get("daily_invite_target") || 8),
     min_batch_gap_min:     Number(formData.get("min_batch_gap_min") || 120),
     min_pending_threshold: Number(formData.get("min_pending_threshold") || 15),
     schedule_start_hour:   Number(formData.get("schedule_start_hour") || 9),
     schedule_end_hour:     Number(formData.get("schedule_end_hour") || 19),
     search_gap_hours:      Number(formData.get("search_gap_hours") || 20),
+    follow_up_message:     (formData.get("follow_up_message") as string) || null,
+    follow_up_delay_days:  Number(formData.get("follow_up_delay_days") || 3),
   }).eq("id", id)
 
   // ── Message template — upsert by campaign_id
@@ -94,12 +98,11 @@ export default async function CampaignEditPage({ params }: { params: Promise<{ i
           <p className="text-gray-400 text-sm mt-0.5">{c.name}</p>
         </div>
         {/* Delete */}
-        <form action={deleteCampaign}>
-          <input type="hidden" name="campaign_id" value={c.id} />
-          <button type="submit" className="px-3 py-1.5 text-xs bg-red-600/15 hover:bg-red-600/30 text-red-400 border border-red-500/30 rounded-lg transition-colors">
-            🗑 Eliminar campaña
-          </button>
-        </form>
+        <DeleteCampaignBtn
+          campaignId={c.id}
+          campaignName={c.name}
+          deleteAction={deleteCampaign}
+        />
       </div>
 
       <form action={saveCampaign} className="space-y-6">
@@ -179,6 +182,36 @@ export default async function CampaignEditPage({ params }: { params: Promise<{ i
                 className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-yellow-500 focus:ring-yellow-500" />
               <span className="text-sm text-gray-300">⏸ Pausar búsqueda de leads</span>
             </label>
+          </div>
+        </Section>
+
+        {/* ── FOLLOW-UP ───────────────────────────────────────────────── */}
+        <Section title="Mensaje de seguimiento" icon="💬"
+          description="Mensaje automático que se envía a leads que aceptaron la invitación pero no han respondido después de N días.">
+          <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-4 text-xs text-amber-300 space-y-1">
+            <p>El follow-up se envía <strong>una sola vez</strong> por lead. Si el lead ya respondió no se le envía. Déjalo vacío para desactivarlo.</p>
+          </div>
+          <Field label="Mensaje de seguimiento"
+            hint="Texto exacto que se enviará. Puedes usar variables de plantilla o redactarlo estático. Máx. 2000 caracteres.">
+            <textarea name="follow_up_message" rows={4}
+              defaultValue={c.follow_up_message ?? ""}
+              placeholder="Hola {nombre}, quería retomar el contacto. ¿Tienes unos minutos esta semana para una llamada rápida?"
+              className={inp} />
+          </Field>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Field label="Días de espera" hint="Días después del envío de invitación para enviar el follow-up.">
+              <input name="follow_up_delay_days" type="number" min="1" max="30"
+                defaultValue={c.follow_up_delay_days ?? 3} className={inp} />
+            </Field>
+            <div className="flex items-end pb-1">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input type="hidden" name="follow_up_paused" value="false" />
+                <input name="follow_up_paused" type="checkbox" value="true"
+                  defaultChecked={c.follow_up_paused ?? false}
+                  className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-yellow-500 focus:ring-yellow-500" />
+                <span className="text-sm text-gray-300">⏸ Pausar follow-up</span>
+              </label>
+            </div>
           </div>
         </Section>
 

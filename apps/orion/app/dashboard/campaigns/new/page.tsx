@@ -25,6 +25,9 @@ async function createCampaign(formData: FormData) {
     title_blacklist:       parseList("title_blacklist"),
     batch_paused:          false,
     search_paused:         false,
+    follow_up_paused:      false,
+    follow_up_message:     (formData.get("follow_up_message") as string) || null,
+    follow_up_delay_days:  Number(formData.get("follow_up_delay_days") || 3),
     daily_invite_target:   Number(formData.get("daily_invite_target") || 8),
     min_batch_gap_min:     Number(formData.get("min_batch_gap_min") || 120),
     min_pending_threshold: Number(formData.get("min_pending_threshold") || 15),
@@ -131,6 +134,25 @@ export default async function NewCampaignPage() {
             </Field>
             <Field label="Gap entre búsquedas (horas)" hint="Horas mínimas entre un search y el siguiente.">
               <input name="search_gap_hours" type="number" min="1" max="168" defaultValue={20} className={inp} />
+            </Field>
+          </div>
+        </Section>
+
+        {/* ── FOLLOW-UP ───────────────────────────────────────────────── */}
+        <Section title="Mensaje de seguimiento" icon="💬"
+          description="Mensaje automático que se envía a leads conectados que no han respondido después de N días.">
+          <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-4 text-xs text-amber-300 space-y-1">
+            <p>El follow-up se envía <strong>una sola vez</strong> por lead. Déjalo vacío para desactivarlo.</p>
+          </div>
+          <Field label="Mensaje de seguimiento"
+            hint="Texto exacto que se enviará. Máx. 2000 caracteres.">
+            <textarea name="follow_up_message" rows={4}
+              placeholder="Hola {nombre}, quería retomar el contacto. ¿Tienes unos minutos esta semana para una llamada rápida?"
+              className={inp} />
+          </Field>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Field label="Días de espera" hint="Días después de la invitación para enviar el follow-up.">
+              <input name="follow_up_delay_days" type="number" min="1" max="30" defaultValue={3} className={inp} />
             </Field>
           </div>
         </Section>
