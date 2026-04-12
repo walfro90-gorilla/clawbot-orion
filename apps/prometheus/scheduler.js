@@ -222,7 +222,8 @@ async function tick() {
       linkedin_account_id,
       linkedin_accounts (
         id, label, li_at_cookie, status, daily_connection_limit, proxy_url,
-        last_inbox_check_at, inbox_paused, inbox_gap_min, li_at_cookie_updated_at
+        last_inbox_check_at, inbox_paused, inbox_gap_min, li_at_cookie_updated_at,
+        warmup_status, warmup_started_at
       )
     `)
     .eq('is_active', true);
@@ -472,6 +473,10 @@ async function runSearchJob(campaign, accountId) {
   console.log(`[SCHEDULER] ✅ Search done: +${saved} leads (${(durationMs/1000).toFixed(1)}s)`);
 }
 
+// Warmup caps: limitan las invitaciones diarias según la temperatura de la cuenta
+// Esto es independiente del daily_invite_target de la campaña — se usa el mínimo de ambos.
+const WARMUP_CAPS = { cold: 3, warming: 8, warm: 15, hot: Infinity };
+
 // ── Batch job ─────────────────────────────────────────────────────────────────
 
 async function runBatchJob(campaign, account) {
@@ -483,15 +488,22 @@ async function runBatchJob(campaign, account) {
     .eq('date', new Date().toISOString().split('T')[0])
     .maybeSingle();
 
-  const sentToday   = (todayStats?.invites_sent ?? 0) + (todayStats?.messages_sent ?? 0);
-  const remaining   = Math.max(0, campaign.daily_invite_target - sentToday);
+  const sentToday    = (todayStats?.invites_sent ?? 0) + (todayStats?.messages_sent ?? 0);
+  const warmupCap    = WARMUP_CAPS[account.warmup_status ?? 'cold'] ?? 3;
+  const effectiveCap = Math.min(campaign.daily_invite_target, warmupCap);
+
+  if (warmupCap < campaign.daily_invite_target) {
+    console.log(`[SCHEDULER] 🌡️  Warmup cap activo: "${account.label}" es ${account.warmup_status ?? 'cold'} → max ${warmupCap}/día (campaña pide ${campaign.daily_invite_target}/día)`);
+  }
+
+  const remaining   = Math.max(0, effectiveCap - sentToday);
 
   if (remaining === 0) {
-    console.log(`[SCHEDULER] 🛑 daily_invite_target alcanzado (${campaign.daily_invite_target}/día).`);
+    console.log(`[SCHEDULER] 🛑 Cap diario alcanzado (${sentToday}/${effectiveCap} — warmup: ${account.warmup_status ?? 'cold'}).`);
     await logJob({
       campaignId: campaign.id, accountId: account.id, jobType: 'batch',
       status: 'skipped', skipReason: 'daily_target_reached',
-      details: { sent_today: sentToday, target: campaign.daily_invite_target },
+      details: { sent_today: sentToday, effective_cap: effectiveCap, warmup_status: account.warmup_status },
     });
     return;
   }

@@ -693,6 +693,8 @@ export type Database = {
           proxy_url: string | null
           status: string | null
           user_id: string | null
+          warmup_status: string
+          warmup_started_at: string | null
         }
         Insert: {
           created_at?: string | null
@@ -708,6 +710,8 @@ export type Database = {
           proxy_url?: string | null
           status?: string | null
           user_id?: string | null
+          warmup_status?: string
+          warmup_started_at?: string | null
         }
         Update: {
           created_at?: string | null
@@ -723,6 +727,8 @@ export type Database = {
           proxy_url?: string | null
           status?: string | null
           user_id?: string | null
+          warmup_status?: string
+          warmup_started_at?: string | null
         }
         Relationships: [
           {

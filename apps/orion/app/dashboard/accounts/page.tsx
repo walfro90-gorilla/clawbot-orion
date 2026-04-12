@@ -16,6 +16,10 @@ async function updateAccount(formData: FormData) {
 
   const assignedUserId = formData.get("assigned_user_id") as string | null
 
+  const newWarmupStatus = formData.get("warmup_status") as string
+  const { data: existingWarmup } = await admin.from("linkedin_accounts").select("warmup_status, warmup_started_at").eq("id", id).single()
+  const warmupChanged = existingWarmup?.warmup_status !== newWarmupStatus
+
   const { error } = await admin.from("linkedin_accounts").update({
     label:                  formData.get("label") as string || null,
     linkedin_profile_url:   formData.get("linkedin_profile_url") as string || null,
@@ -24,7 +28,10 @@ async function updateAccount(formData: FormData) {
     proxy_url:              formData.get("proxy_url") as string || null,
     li_at_cookie:           newCookie,
     user_id:                assignedUserId || null,
+    warmup_status:          newWarmupStatus || "cold",
     ...(cookieChanged ? { li_at_cookie_updated_at: new Date().toISOString() } : {}),
+    // Reset warmup_started_at when status changes to track progression
+    ...(warmupChanged ? { warmup_started_at: new Date().toISOString() } : {}),
   }).eq("id", id)
 
   if (error) console.error("[accounts] updateAccount error:", error.message)
@@ -81,6 +88,13 @@ export default async function AccountsPage() {
     disconnected: "bg-gray-500/15 text-gray-400 border-gray-500/30",
   }
 
+  const warmupMeta: Record<string, { icon: string; label: string; cap: string; color: string; bg: string; border: string }> = {
+    cold:    { icon: "❄️", label: "Fría",     cap: "máx 3/día",  color: "text-blue-400",   bg: "bg-blue-500/10",   border: "border-blue-500/30" },
+    warming: { icon: "🌡️", label: "Tibia",    cap: "máx 8/día",  color: "text-yellow-400", bg: "bg-yellow-500/10", border: "border-yellow-500/30" },
+    warm:    { icon: "☀️", label: "Cálida",   cap: "máx 15/día", color: "text-orange-400", bg: "bg-orange-500/10", border: "border-orange-500/30" },
+    hot:     { icon: "🔥", label: "Caliente", cap: "sin límite", color: "text-red-400",    bg: "bg-red-500/10",    border: "border-red-500/30" },
+  }
+
   return (
     <div className="p-8 space-y-8">
       <div>
@@ -96,6 +110,10 @@ export default async function AccountsPage() {
             ? Math.min(Math.round(((a.invites_sent_today ?? 0) + (a.messages_sent_today ?? 0)) / a.daily_connection_limit * 100), 100)
             : 0
           const assignedProfile = profiles?.find((p: any) => p.id === raw?.user_id)
+          const ws = warmupMeta[(raw as any)?.warmup_status ?? "cold"] ?? warmupMeta.cold
+          const warmupDays = (raw as any)?.warmup_started_at
+            ? Math.floor((Date.now() - new Date((raw as any).warmup_started_at).getTime()) / 86400000)
+            : null
           return (
             <div key={a.account_id} className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-4">
               <div className="flex items-start justify-between">
@@ -111,9 +129,14 @@ export default async function AccountsPage() {
                     }
                   </p>
                 </div>
-                <span className={`text-xs px-2 py-1 rounded-full border font-medium ${statusColors[a.status ?? ""] ?? statusColors.disconnected}`}>
-                  {a.status}
-                </span>
+                <div className="flex flex-col items-end gap-1.5">
+                  <span className={`text-xs px-2 py-1 rounded-full border font-medium ${statusColors[a.status ?? ""] ?? statusColors.disconnected}`}>
+                    {a.status}
+                  </span>
+                  <span className={`text-xs px-2 py-1 rounded-full border font-medium ${ws.bg} ${ws.color} ${ws.border}`}>
+                    {ws.icon} {ws.label}
+                  </span>
+                </div>
               </div>
 
               {/* Usage bar */}
@@ -140,6 +163,22 @@ export default async function AccountsPage() {
                   <div className="bg-gray-800/50 rounded px-2 py-1">
                     <div className="text-white font-medium">{a.errors_today ?? 0}</div>
                     <div className="text-gray-500">Errores</div>
+                  </div>
+                </div>
+
+                {/* Warmup info */}
+                <div className={`rounded-lg px-3 py-2 ${ws.bg} border ${ws.border} flex items-center justify-between`}>
+                  <div>
+                    <span className={`text-xs font-semibold ${ws.color}`}>{ws.icon} {ws.label} — {ws.cap}</span>
+                    {warmupDays !== null && (
+                      <span className="text-gray-500 text-xs ml-2">({warmupDays}d en este estado)</span>
+                    )}
+                  </div>
+                  <div className="text-gray-600 text-xs">
+                    {(raw as any)?.warmup_status === "cold" && "Calentamiento manual recomendado"}
+                    {(raw as any)?.warmup_status === "warming" && "Aumentar 1-2/día cada semana"}
+                    {(raw as any)?.warmup_status === "warm" && "Operación normal"}
+                    {(raw as any)?.warmup_status === "hot" && "Cuenta veterana"}
                   </div>
                 </div>
               </div>
@@ -171,7 +210,7 @@ export default async function AccountsPage() {
                     </div>
                   )}
                   <div className="space-y-1">
-                    <label className="block text-xs text-gray-400">Estado</label>
+                    <label className="block text-xs text-gray-400">Estado de conexión</label>
                     <select name="status" defaultValue={raw?.status ?? "active"}
                       className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
                       <option value="active">active</option>
@@ -179,6 +218,17 @@ export default async function AccountsPage() {
                       <option value="rate_limited">rate_limited</option>
                       <option value="banned">banned</option>
                     </select>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="block text-xs text-gray-400">Temperatura de cuenta (warmup)</label>
+                    <select name="warmup_status" defaultValue={(raw as any)?.warmup_status ?? "cold"}
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                      <option value="cold">❄️ Fría — nueva / sin historial (cap: 3/día)</option>
+                      <option value="warming">🌡️ Tibia — calentando 1-4 semanas (cap: 8/día)</option>
+                      <option value="warm">☀️ Cálida — activa 1-3 meses (cap: 15/día)</option>
+                      <option value="hot">🔥 Caliente — veterana 3+ meses (sin cap extra)</option>
+                    </select>
+                    <p className="text-gray-600 text-xs">El scheduler respeta este cap independiente del límite de campaña.</p>
                   </div>
                   <button type="submit" className="w-full py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium rounded-lg transition-colors">
                     Guardar cambios
