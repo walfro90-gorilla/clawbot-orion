@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Bash(npx playwright:*)",
+      "Bash(node gemini_test.js)",
+      "Bash(ls /root/prometheus-worker/*.js)",
+      "Bash(npm start:*)",
+      "Bash(node -e ':*)",
+      "Bash(TARGET_PROFILE=https://www.linkedin.com/in/edrosenthal-/ npm start)",
+      "Bash(TARGET_PROFILE=https://www.linkedin.com/in/frenchycannoli/ npm start)",
+      "Bash(TARGET_PROFILE=https://www.linkedin.com/in/daniel-delgado0611/ npm start)",
+      "Bash(TARGET_PROFILE=https://www.linkedin.com/in/mar%C3%ADa-luisa-hern%C3%A1ndez-mart%C3%ADnez-5498641a4/ npm start)",
+      "WebSearch",
+      "WebFetch(domain:supabase.com)",
+      "WebFetch(domain:github.com)",
+      "Read(//root/.claude/**)",
+      "mcp__supabase__list_tables",
+      "mcp__supabase__list_extensions",
+      "mcp__supabase__list_migrations",
+      "mcp__supabase__get_project_url",
+      "mcp__supabase__apply_migration",
+      "mcp__supabase__execute_sql"
+    ],
+    "additionalDirectories": [
+      "/root/prometheus-worker/.claude"
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "clawbot",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "prometheus": "node apps/prometheus/batch.js",
+    "search": "node apps/prometheus/search.js",
+    "orion": "npm run dev --workspace=apps/orion",
+    "types": "npm run generate --workspace=packages/db-types"
+  }
+}

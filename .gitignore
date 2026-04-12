@@ -1,0 +1,25 @@
+# env
+.env
+.env.local
+.env*.local
+
+# deps
+node_modules/
+.pnp
+.pnp.js
+
+# Next.js
+apps/orion/.next/
+apps/orion/out/
+
+# build
+dist/
+build/
+
+# debug screenshots (prometheus)
+apps/prometheus/*.png
+
+# misc
+.DS_Store
+*.log
+.turbo/
