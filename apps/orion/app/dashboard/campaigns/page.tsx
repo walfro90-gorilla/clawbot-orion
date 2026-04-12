@@ -31,11 +31,22 @@ async function updateSchedulerSettings(formData: FormData) {
 
 export default async function CampaignsPage() {
   const supabase = await createClient()
+  const { getSessionUser } = await import("@/lib/auth/role")
+  const me = await getSessionUser()
 
-  const { data } = await supabase
+  const isRestricted = me?.role === "user" || me?.role === "viewer"
+  const linkedAccountId = me?.linkedin_account_id ?? null
+
+  let campaignsQuery = supabase
     .from("v_campaign_stats")
     .select("*")
     .order("created_at", { ascending: false })
+
+  if (isRestricted && linkedAccountId) {
+    campaignsQuery = campaignsQuery.eq("linkedin_account_id", linkedAccountId)
+  }
+
+  const { data } = await campaignsQuery
 
   const campaigns = (data ?? []) as any[]
 

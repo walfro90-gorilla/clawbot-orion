@@ -1,12 +1,25 @@
 import { createClient } from "@/lib/supabase/server"
+import { getSessionUser } from "@/lib/auth/role"
 import type { CampaignStats, AccountToday } from "@clawbot/db-types"
 
 export default async function DashboardPage() {
   const supabase = await createClient()
+  const me = await getSessionUser()
+
+  const isRestricted = me?.role === "user" || me?.role === "viewer"
+  const linkedAccountId = me?.linkedin_account_id ?? null
+
+  let campaignsQuery = supabase.from("v_campaign_stats").select("*").order("created_at", { ascending: false })
+  let accountsQuery  = supabase.from("v_account_today").select("*")
+
+  if (isRestricted && linkedAccountId) {
+    campaignsQuery = campaignsQuery.eq("linkedin_account_id", linkedAccountId)
+    accountsQuery  = accountsQuery.eq("account_id", linkedAccountId)
+  }
 
   const [{ data: campaigns }, { data: accounts }] = await Promise.all([
-    supabase.from("v_campaign_stats").select("*").order("created_at", { ascending: false }),
-    supabase.from("v_account_today").select("*"),
+    campaignsQuery,
+    accountsQuery,
   ])
 
   const stats = campaigns as CampaignStats[] ?? []
