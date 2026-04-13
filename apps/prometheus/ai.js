@@ -97,3 +97,54 @@ export async function generateMessage(profileData, { retries = 3, retryDelayMs =
   }
   throw lastError;
 }
+
+// ── Generate AI reply draft using Gemini ──────────────────────────────────────
+// Called fire-and-forget from inbox.js when a lead replies.
+// The draft is stored in conversations.ai_reply_draft for human approval in Orion.
+export async function generateReplyDraft({ leadName, outboundHistory, inboundMessage, calUrl } = {}) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error('GEMINI_API_KEY not set');
+
+  const ai = new GoogleGenAI({ apiKey });
+
+  const historyBlock = outboundHistory?.length
+    ? outboundHistory.map(m => `- [Nosotros]: ${m}`).join('\n')
+    : '(sin historial previo)';
+
+  const calBlock = calUrl
+    ? `\nTenemos disponibilidad para una llamada en: ${calUrl}\nSi la conversación lo permite, invítale a agendar una llamada de 20 minutos usando ese link.`
+    : '';
+
+  const prompt = `Eres un SDR experto en ventas B2B, redactas respuestas naturales y humanas.
+
+El lead "${leadName ?? 'el lead'}" nos respondió en LinkedIn.
+
+Historial de mensajes que le enviamos:
+${historyBlock}
+
+Mensaje recibido del lead:
+"${inboundMessage ?? ''}"
+${calBlock}
+
+Redacta UN borrador de respuesta que:
+1. Reconozca su mensaje de forma genuina y personalizada (no genérica).
+2. Ofrezca valor concreto relacionado con lo que dijo.
+3. Sea breve y natural (máx 150 palabras). Sin lenguaje corporativo.
+4. Termine con una sola pregunta corta o un CTA claro.
+5. NO suene a plantilla.${calUrl ? '\n6. Incluya el link de Cal.com de forma natural si el contexto lo permite.' : ''}
+
+Responde ÚNICAMENTE con el texto del mensaje, sin comillas, sin prefijos, sin markdown.`;
+
+  const response = await ai.models.generateContent({
+    model: 'gemini-2.5-flash',
+    config: {
+      systemInstruction: 'Eres un SDR experto. Escribe respuestas de ventas breves, humanas y personalizadas.',
+      temperature: 0.85,
+      maxOutputTokens: 300,
+      thinkingConfig: { thinkingBudget: 0 },
+    },
+    contents: prompt,
+  });
+
+  return response.text.trim();
+}

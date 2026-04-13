@@ -3,6 +3,7 @@ import { createAdminClient } from "@/lib/supabase/admin"
 import { getSessionUser } from "@/lib/auth/role"
 import { RefreshInboxBtn } from "@/components/refresh-inbox-btn"
 import { ReplyBtn } from "@/components/reply-btn"
+import { ApproveDraftBtn } from "@/components/approve-draft-btn"
 import Link from "next/link"
 
 export default async function ConversationsPage() {
@@ -34,6 +35,7 @@ export default async function ConversationsPage() {
       last_message_text,
       last_message_at,
       inbox_checked_at,
+      ai_reply_draft,
       leads (
         id, full_name, linkedin_url, status,
         campaigns ( name )
@@ -108,7 +110,7 @@ export default async function ConversationsPage() {
                   <th className="px-4 py-3 text-left font-medium">Último mensaje</th>
                   <th className="px-4 py-3 text-left font-medium">Fecha respuesta</th>
                   <th className="px-4 py-3 text-left font-medium">Estado conv.</th>
-                  <th className="px-4 py-3 text-left font-medium">Acción</th>
+                  <th className="px-4 py-3 text-left font-medium">Acciones</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-800">
@@ -119,7 +121,7 @@ export default async function ConversationsPage() {
                     <tr key={c.id} className="hover:bg-gray-800/50 transition-colors">
                       <td className="px-4 py-3">
                         <Link
-                          href={`/dashboard/leads/${c.lead_id}`}
+                          href={`/dashboard/conversations/${c.lead_id}`}
                           className="text-white hover:text-blue-400 font-medium"
                         >
                           {lead?.full_name ?? "Sin nombre"}
@@ -133,15 +135,22 @@ export default async function ConversationsPage() {
                       <td className="px-4 py-3 text-gray-400 text-xs">
                         {campaign?.name ?? "—"}
                       </td>
-                      <td className="px-4 py-3 text-xs max-w-[320px]">
+                      <td className="px-4 py-3 text-xs max-w-[300px]">
                         {c.last_message_text ? (
-                          <Link href={`/dashboard/leads/${c.lead_id}`} className="group">
+                          <Link href={`/dashboard/conversations/${c.lead_id}`} className="group">
                             <span className="text-gray-200 group-hover:text-white line-clamp-2 leading-relaxed">
                               "{c.last_message_text.slice(0, 120)}{c.last_message_text.length > 120 ? "…" : ""}"
                             </span>
                           </Link>
                         ) : (
                           <span className="text-gray-600">—</span>
+                        )}
+                        {c.ai_reply_draft && (
+                          <div className="mt-1">
+                            <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-yellow-500/10 border border-yellow-500/20 text-yellow-400 font-medium">
+                              ✨ Draft IA listo
+                            </span>
+                          </div>
                         )}
                       </td>
                       <td className="px-4 py-3 text-gray-400 text-xs whitespace-nowrap">
@@ -157,10 +166,26 @@ export default async function ConversationsPage() {
                         </span>
                       </td>
                       <td className="px-4 py-3">
-                        <ReplyBtn
-                          leadId={c.lead_id}
-                          leadName={lead?.full_name ?? "Lead"}
-                        />
+                        <div className="flex flex-col gap-1.5">
+                          {c.ai_reply_draft ? (
+                            <ApproveDraftBtn
+                              leadId={c.lead_id}
+                              leadName={lead?.full_name ?? "Lead"}
+                              draft={c.ai_reply_draft}
+                            />
+                          ) : (
+                            <ReplyBtn
+                              leadId={c.lead_id}
+                              leadName={lead?.full_name ?? "Lead"}
+                            />
+                          )}
+                          <Link
+                            href={`/dashboard/conversations/${c.lead_id}`}
+                            className="text-[10px] text-gray-600 hover:text-gray-400 transition-colors text-center"
+                          >
+                            Ver hilo →
+                          </Link>
+                        </div>
                       </td>
                     </tr>
                   )

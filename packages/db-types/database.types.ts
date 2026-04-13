@@ -63,11 +63,25 @@ export type Database = {
             referencedColumns: ["id"]
           },
           {
+            foreignKeyName: "account_alerts_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "v_campaign_stats"
+            referencedColumns: ["campaign_id"]
+          },
+          {
             foreignKeyName: "account_alerts_linkedin_account_id_fkey"
             columns: ["linkedin_account_id"]
             isOneToOne: false
             referencedRelation: "linkedin_accounts"
             referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "account_alerts_linkedin_account_id_fkey"
+            columns: ["linkedin_account_id"]
+            isOneToOne: false
+            referencedRelation: "v_account_today"
+            referencedColumns: ["account_id"]
           },
         ]
       }
@@ -253,17 +267,21 @@ export type Database = {
       }
       campaigns: {
         Row: {
+          auto_dead_after_days: number | null
           batch_paused: boolean
           created_at: string | null
           daily_invite_target: number
           follow_up_delay_days: number | null
           follow_up_message: string | null
           follow_up_paused: boolean | null
+          follow_up_step2_delay_days: number | null
+          follow_up_step2_message: string | null
           gemini_system_prompt: string
           id: string
           is_active: boolean | null
           last_batch_at: string | null
           last_followup_at: string | null
+          last_followup2_at: string | null
           last_searched_at: string | null
           linkedin_account_id: string | null
           min_batch_gap_min: number
@@ -282,17 +300,21 @@ export type Database = {
           title_whitelist: string[] | null
         }
         Insert: {
+          auto_dead_after_days?: number | null
           batch_paused?: boolean
           created_at?: string | null
           daily_invite_target?: number
           follow_up_delay_days?: number | null
           follow_up_message?: string | null
           follow_up_paused?: boolean | null
+          follow_up_step2_delay_days?: number | null
+          follow_up_step2_message?: string | null
           gemini_system_prompt: string
           id?: string
           is_active?: boolean | null
           last_batch_at?: string | null
           last_followup_at?: string | null
+          last_followup2_at?: string | null
           last_searched_at?: string | null
           linkedin_account_id?: string | null
           min_batch_gap_min?: number
@@ -311,17 +333,21 @@ export type Database = {
           title_whitelist?: string[] | null
         }
         Update: {
+          auto_dead_after_days?: number | null
           batch_paused?: boolean
           created_at?: string | null
           daily_invite_target?: number
           follow_up_delay_days?: number | null
           follow_up_message?: string | null
           follow_up_paused?: boolean | null
+          follow_up_step2_delay_days?: number | null
+          follow_up_step2_message?: string | null
           gemini_system_prompt?: string
           id?: string
           is_active?: boolean | null
           last_batch_at?: string | null
           last_followup_at?: string | null
+          last_followup2_at?: string | null
           last_searched_at?: string | null
           linkedin_account_id?: string | null
           min_batch_gap_min?: number
@@ -402,6 +428,8 @@ export type Database = {
       }
       conversations: {
         Row: {
+          ai_draft_generated_at: string | null
+          ai_reply_draft: string | null
           created_at: string | null
           follow_up_count: number
           id: string
@@ -416,6 +444,8 @@ export type Database = {
           updated_at: string | null
         }
         Insert: {
+          ai_draft_generated_at?: string | null
+          ai_reply_draft?: string | null
           created_at?: string | null
           follow_up_count?: number
           id?: string
@@ -430,6 +460,8 @@ export type Database = {
           updated_at?: string | null
         }
         Update: {
+          ai_draft_generated_at?: string | null
+          ai_reply_draft?: string | null
           created_at?: string | null
           follow_up_count?: number
           id?: string
@@ -616,7 +648,10 @@ export type Database = {
           disqualification_reason: string | null
           full_name: string | null
           id: string
+          last_followup2_at: string | null
           linkedin_url: string
+          meeting_at: string | null
+          meeting_url: string | null
           next_action_at: string | null
           profile_data: Json | null
           replied_at: string | null
@@ -634,7 +669,10 @@ export type Database = {
           disqualification_reason?: string | null
           full_name?: string | null
           id?: string
+          last_followup2_at?: string | null
           linkedin_url: string
+          meeting_at?: string | null
+          meeting_url?: string | null
           next_action_at?: string | null
           profile_data?: Json | null
           replied_at?: string | null
@@ -652,7 +690,10 @@ export type Database = {
           disqualification_reason?: string | null
           full_name?: string | null
           id?: string
+          last_followup2_at?: string | null
           linkedin_url?: string
+          meeting_at?: string | null
+          meeting_url?: string | null
           next_action_at?: string | null
           profile_data?: Json | null
           replied_at?: string | null
@@ -680,6 +721,7 @@ export type Database = {
       }
       linkedin_accounts: {
         Row: {
+          cal_com_url: string | null
           created_at: string | null
           daily_connection_limit: number | null
           id: string
@@ -693,10 +735,11 @@ export type Database = {
           proxy_url: string | null
           status: string | null
           user_id: string | null
-          warmup_status: string
           warmup_started_at: string | null
+          warmup_status: string
         }
         Insert: {
+          cal_com_url?: string | null
           created_at?: string | null
           daily_connection_limit?: number | null
           id?: string
@@ -710,10 +753,11 @@ export type Database = {
           proxy_url?: string | null
           status?: string | null
           user_id?: string | null
-          warmup_status?: string
           warmup_started_at?: string | null
+          warmup_status?: string
         }
         Update: {
+          cal_com_url?: string | null
           created_at?: string | null
           daily_connection_limit?: number | null
           id?: string
@@ -727,8 +771,8 @@ export type Database = {
           proxy_url?: string | null
           status?: string | null
           user_id?: string | null
-          warmup_status?: string
           warmup_started_at?: string | null
+          warmup_status?: string
         }
         Relationships: [
           {
@@ -906,6 +950,13 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "linkedin_accounts"
             referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "profiles_linkedin_account_id_fkey"
+            columns: ["linkedin_account_id"]
+            isOneToOne: false
+            referencedRelation: "v_account_today"
+            referencedColumns: ["account_id"]
           },
         ]
       }
@@ -1192,12 +1243,6 @@ export type Database = {
           status: string | null
           worker_id: string | null
         }[]
-        SetofOptions: {
-          from: "*"
-          to: "messages_queue"
-          isOneToOne: false
-          isSetofReturn: true
-        }
       }
       claim_next_lead: {
         Args: { p_campaign_id: string }
@@ -1210,7 +1255,10 @@ export type Database = {
           disqualification_reason: string | null
           full_name: string | null
           id: string
+          last_followup2_at: string | null
           linkedin_url: string
+          meeting_at: string | null
+          meeting_url: string | null
           next_action_at: string | null
           profile_data: Json | null
           replied_at: string | null
@@ -1219,12 +1267,6 @@ export type Database = {
           sent_at: string | null
           status: string | null
         }[]
-        SetofOptions: {
-          from: "*"
-          to: "leads"
-          isOneToOne: false
-          isSetofReturn: true
-        }
       }
       get_campaign_account: {
         Args: { p_campaign_id: string }
@@ -1252,18 +1294,13 @@ export type Database = {
           status: string | null
           worker_id: string | null
         }[]
-        SetofOptions: {
-          from: "*"
-          to: "messages_queue"
-          isOneToOne: false
-          isSetofReturn: true
-        }
       }
       increment_daily_activity: {
         Args: { p_account_id: string; p_field: string }
         Returns: undefined
       }
-      show_limit: { Args: never; Returns: number }
+      is_admin_or_above: { Args: Record<PropertyKey, never>; Returns: boolean }
+      show_limit: { Args: Record<PropertyKey, never>; Returns: number }
       show_trgm: { Args: { "": string }; Returns: string[] }
       unaccent: { Args: { "": string }; Returns: string }
     }
@@ -1398,3 +1435,10 @@ export const Constants = {
     Enums: {},
   },
 } as const
+
+// ── Extended types used by Orion pages ────────────────────────────────────────
+
+export type AccountToday     = Database["public"]["Views"]["v_account_today"]["Row"]
+export type LeadPipeline     = Database["public"]["Views"]["v_lead_pipeline"]["Row"]
+export type Campaign         = Database["public"]["Tables"]["campaigns"]["Row"]
+export type LeadStatusConfig = Database["public"]["Tables"]["lead_status_config"]["Row"]

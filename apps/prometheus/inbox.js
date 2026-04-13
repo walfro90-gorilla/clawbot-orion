@@ -20,6 +20,7 @@ import { chromium } from 'playwright-extra'
 import StealthPlugin from 'puppeteer-extra-plugin-stealth'
 import dotenv from 'dotenv'
 import { supabase } from './lib/supabase.js'
+import { generateReplyDraft } from './ai.js'
 
 dotenv.config()
 chromium.use(StealthPlugin())
@@ -209,6 +210,70 @@ async function markReplied(lead, messageText, threadId) {
   notifySlack(lead, messageText)
 }
 
+// ── Generate AI reply draft (fire-and-forget) ─────────────────────────────────
+// Llamado después de markReplied(). Genera un borrador con Gemini y lo guarda en
+// conversations.ai_reply_draft para aprobación humana en Orion.
+async function generateDraftAsync(lead, inboundMessageText) {
+  try {
+    // Obtener historial de mensajes salientes para dar contexto a Gemini
+    const { data: conv } = await supabase
+      .from('conversations')
+      .select('id')
+      .eq('lead_id', lead.id)
+      .maybeSingle()
+
+    let outboundHistory = []
+    if (conv?.id) {
+      const { data: events } = await supabase
+        .from('conversation_events')
+        .select('content, direction')
+        .eq('conversation_id', conv.id)
+        .eq('direction', 'outbound')
+        .order('sent_at', { ascending: true })
+      outboundHistory = (events ?? []).map(e => e.content).filter(Boolean)
+    }
+
+    // Obtener cal_com_url de la cuenta LinkedIn (vía campaña)
+    const { data: campaign } = await supabase
+      .from('campaigns')
+      .select('linkedin_account_id')
+      .eq('id', lead.campaign_id)
+      .single()
+
+    let calUrl = null
+    if (campaign?.linkedin_account_id) {
+      const { data: acct } = await supabase
+        .from('linkedin_accounts')
+        .select('cal_com_url')
+        .eq('id', campaign.linkedin_account_id)
+        .single()
+      calUrl = acct?.cal_com_url ?? null
+    }
+
+    const draft = await generateReplyDraft({
+      leadName:        lead.full_name,
+      outboundHistory,
+      inboundMessage:  inboundMessageText,
+      calUrl,
+    })
+
+    if (!draft) return
+
+    // Guardar borrador en la conversation
+    await supabase
+      .from('conversations')
+      .update({
+        ai_reply_draft:        draft,
+        ai_draft_generated_at: new Date().toISOString(),
+      })
+      .eq('lead_id', lead.id)
+
+    console.log(`[INBOX] 🤖 AI draft generado para "${lead.full_name}" (${draft.length} chars)`)
+  } catch (err) {
+    console.warn(`[INBOX] AI draft failed for "${lead.full_name}":`, err.message)
+  }
+}
+
 // ── Paso 1: Notificaciones — detectar conexiones aceptadas ────────────────────
 async function checkNotifications(page, leadMap, stats) {
   console.log('[INBOX] → Checking notifications...')
@@ -274,6 +339,8 @@ async function checkNotifications(page, leadMap, stats) {
       await markReplied(lead, previewText ?? '[Replied — open LinkedIn for full message]', null)
       stats.replied++
       leadMap.set(profileUrl, { ...lead, status: 'replied' })
+      // Fire-and-forget: generate AI reply draft
+      generateDraftAsync(lead, previewText).catch(() => {})
     } else if (lead.status === 'invite_sent') {
       await markConnected(lead)
       leadMap.set(profileUrl, { ...lead, status: 'connected' })
@@ -562,6 +629,8 @@ async function checkMessaging(page, leadMap, leads, stats, globalApiResponses) {
 
     await markReplied(matchedLead, messageText, threadId)
     stats.replied++
+    // Fire-and-forget: generate AI reply draft
+    generateDraftAsync(matchedLead, messageText).catch(() => {})
 
     // Actualizar el leadMap para no reprocesar
     const profileUrl = normalizeLinkedInUrl(matchedLead.linkedin_url)

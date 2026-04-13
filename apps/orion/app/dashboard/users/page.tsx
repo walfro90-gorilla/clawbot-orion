@@ -29,6 +29,20 @@ async function createUser(formData: FormData) {
       company_name:        company || null,
       linkedin_account_id: linkedAccountId || null,
     })
+
+    // Sync linkedin_accounts.user_id so RLS policies work correctly.
+    // Clear any previous ownership first, then assign the new one.
+    if (linkedAccountId) {
+      // Remove this user from any other account they were previously assigned to
+      await admin.from("linkedin_accounts")
+        .update({ user_id: null })
+        .eq("user_id", data.user.id)
+        .neq("id", linkedAccountId)
+      // Assign the selected account to this user
+      await admin.from("linkedin_accounts")
+        .update({ user_id: data.user.id })
+        .eq("id", linkedAccountId)
+    }
   }
   redirect("/dashboard/users")
 }
@@ -47,6 +61,18 @@ async function updateUser(formData: FormData) {
     company_name:        company || null,
     linkedin_account_id: linkedAccountId || null,
   }).eq("id", userId)
+
+  // Sync linkedin_accounts.user_id so RLS policies work correctly.
+  // Always clear previous ownership for this user, then assign the new account.
+  await admin.from("linkedin_accounts")
+    .update({ user_id: null })
+    .eq("user_id", userId)
+
+  if (linkedAccountId) {
+    await admin.from("linkedin_accounts")
+      .update({ user_id: userId })
+      .eq("id", linkedAccountId)
+  }
 
   // Optionally update password
   if (newPassword && newPassword.trim().length >= 6) {

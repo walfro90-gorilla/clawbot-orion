@@ -8,6 +8,7 @@ const NAV = [
   { href: "/dashboard",                   label: "Dashboard",  icon: "⚡", adminOnly: false },
   { href: "/dashboard/leads",             label: "Leads",      icon: "👥", adminOnly: false },
   { href: "/dashboard/conversations",     label: "Mensajes",   icon: "💬", adminOnly: false },
+  { href: "/dashboard/meetings",          label: "Reuniones",  icon: "📅", adminOnly: false },
   { href: "/dashboard/campaigns",         label: "Campañas",   icon: "🎯", adminOnly: false },
   { href: "/dashboard/accounts",          label: "Cuentas LI", icon: "🔗", adminOnly: true  },
   { href: "/dashboard/activity",          label: "Actividad",  icon: "📋", adminOnly: false },

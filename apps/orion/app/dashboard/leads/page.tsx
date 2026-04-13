@@ -62,15 +62,48 @@ export default async function LeadsPage({
   const campList  = campaigns as Campaign[] ?? []
   const leadList  = leads as LeadPipeline[] ?? []
 
-  // Fetch conversations for leads on this page (to show reply preview)
+  // Fetch conversations for leads on this page (to show reply preview + draft badge)
   const leadIds = leadList.map(l => l.id).filter(Boolean) as string[]
   const { data: convos } = leadIds.length > 0
     ? await supabase
         .from("conversations")
-        .select("lead_id, last_message_text, last_message_at, status")
+        .select("lead_id, last_message_text, last_message_at, status, ai_reply_draft")
         .in("lead_id", leadIds)
     : { data: [] }
   const convoMap = new Map((convos ?? []).map((c: any) => [c.lead_id, c]))
+
+  // Helper: days elapsed since a date
+  function daysAgo(dateStr: string | null | undefined): number | null {
+    if (!dateStr) return null
+    return Math.floor((Date.now() - new Date(dateStr).getTime()) / 86_400_000)
+  }
+
+  // Message sequence steps per status (which automated messages have been sent)
+  const SEQUENCE_STEPS = [
+    { status: "invite_sent",     short: "Inv",  title: "Invitación enviada"   },
+    { status: "connected",       short: "Cnx",  title: "Conexión aceptada"    },
+    { status: "follow_up_sent",  short: "FU1",  title: "Follow-up 1 enviado"  },
+    { status: "follow_up_sent_2",short: "FU2",  title: "Follow-up 2 enviado"  },
+    { status: "replied",         short: "Rep",  title: "Respondió"            },
+    { status: "meeting_booked",  short: "Mtg",  title: "Reunión agendada"     },
+  ]
+
+  const STATUS_ORDER: Record<string, number> = {
+    scraped: 0, pending: 0, processing: 0, disqualified: 0,
+    invite_sent: 1, connected: 2, follow_up_sent: 3, follow_up_sent_2: 4,
+    replied: 5, meeting_booked: 6, dead: -1, failed: -1,
+  }
+
+  // "Alert" statuses where lead is stuck long enough to flag
+  function stuckAlert(lead: LeadPipeline): { days: number; level: "warn" | "danger" } | null {
+    const ord = STATUS_ORDER[lead.status ?? ""] ?? 0
+    if (ord <= 0 || ord >= 5) return null // don't alert on terminal/replied stages
+    const days = daysAgo(lead.sent_at)
+    if (days === null) return null
+    if (days > 20) return { days, level: "danger" }
+    if (days > 10) return { days, level: "warn" }
+    return null
+  }
 
   return (
     <div className="p-8 space-y-6">
@@ -156,60 +189,98 @@ export default async function LeadsPage({
           <thead>
             <tr className="border-b border-gray-800 text-gray-400 text-xs uppercase tracking-wider">
               <th className="px-4 py-3 text-left font-medium">Nombre</th>
-              <th className="px-4 py-3 text-left font-medium">Cargo</th>
               <th className="px-4 py-3 text-left font-medium">Estado</th>
+              <th className="px-4 py-3 text-left font-medium">Secuencia</th>
               <th className="px-4 py-3 text-left font-medium">Campaña</th>
-              <th className="px-4 py-3 text-left font-medium">Enviado</th>
               <th className="px-4 py-3 text-left font-medium">Último mensaje</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-800">
             {leadList.length === 0 ? (
               <tr>
-                <td colSpan={6} className="px-4 py-10 text-center text-gray-500">
+                <td colSpan={5} className="px-4 py-10 text-center text-gray-500">
                   No hay leads con estos filtros.
                 </td>
               </tr>
             ) : (
               leadList.map((lead) => {
-                const convo = convoMap.get(lead.id as string)
+                const convo   = convoMap.get(lead.id as string)
+                const ord     = STATUS_ORDER[lead.status ?? ""] ?? 0
+                const alert   = stuckAlert(lead)
+                const days    = daysAgo(lead.sent_at)
                 return (
-                <tr key={lead.id} className="hover:bg-gray-800/50 transition-colors">
+                <tr key={lead.id} className={`hover:bg-gray-800/50 transition-colors ${
+                  alert?.level === "danger" ? "bg-red-950/20" : alert?.level === "warn" ? "bg-yellow-950/20" : ""
+                }`}>
                   <td className="px-4 py-3">
-                    <Link href={`/dashboard/leads/${lead.id}`} className="text-white hover:text-blue-400 font-medium">
+                    <Link href={`/dashboard/leads/${lead.id}`} className="text-white hover:text-blue-400 font-medium text-sm">
                       {lead.full_name ?? "Sin nombre"}
                     </Link>
-                    <div className="text-gray-500 text-xs mt-0.5 truncate max-w-[200px]">
-                      {lead.linkedin_url?.replace("https://www.linkedin.com/in/", "")}
+                    <div className="text-gray-500 text-xs mt-0.5 truncate max-w-[180px]">
+                      {(lead.profile_data as any)?.headline ?? lead.linkedin_url?.replace("https://www.linkedin.com/in/", "")}
                     </div>
-                  </td>
-                  <td className="px-4 py-3 text-gray-300 max-w-[200px]">
-                    <div className="truncate text-xs">{(lead.profile_data as any)?.headline ?? "—"}</div>
+                    {alert && (
+                      <div className={`text-[10px] mt-0.5 font-medium ${alert.level === "danger" ? "text-red-400" : "text-yellow-400"}`}>
+                        ⚠ {alert.days}d sin respuesta
+                      </div>
+                    )}
                   </td>
                   <td className="px-4 py-3">
                     <StatusBadge status={lead.status} configs={statuses} size="sm" />
+                    {days !== null && ord > 0 && ord < 5 && (
+                      <div className="text-gray-600 text-[10px] mt-1">hace {days}d</div>
+                    )}
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="flex items-center gap-1">
+                      {SEQUENCE_STEPS.map((step, i) => {
+                        const reached = ord >= STATUS_ORDER[step.status]
+                        const current = lead.status === step.status
+                        return (
+                          <span
+                            key={step.status}
+                            title={step.title}
+                            className={`text-[9px] font-bold px-1 py-0.5 rounded ${
+                              lead.status === "dead" && STATUS_ORDER[step.status] > ord
+                                ? "bg-gray-800 text-gray-700"
+                                : reached
+                                  ? current
+                                    ? "bg-blue-600 text-white"
+                                    : "bg-gray-700 text-gray-300"
+                                  : "bg-gray-800 text-gray-700"
+                            }`}
+                          >
+                            {step.short}
+                          </span>
+                        )
+                      })}
+                    </div>
+                    {convo?.ai_reply_draft && (
+                      <div className="mt-1 text-[10px] text-yellow-400 font-medium">✨ Draft IA listo</div>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-gray-400 text-xs">{lead.campaign_name ?? "—"}</td>
-                  <td className="px-4 py-3 text-gray-400 text-xs whitespace-nowrap">
-                    {lead.sent_at ? new Date(lead.sent_at).toLocaleDateString("es-MX") : "—"}
-                  </td>
-                  <td className="px-4 py-3 text-xs max-w-[250px]">
+                  <td className="px-4 py-3 text-xs max-w-[240px]">
                     {convo ? (
-                      <Link href={`/dashboard/leads/${lead.id}`} className="block group">
-                        <span className="text-green-400 font-medium">💬 Respondió</span>
+                      <Link href={`/dashboard/conversations/${lead.id}`} className="block group">
+                        <span className="text-green-400 font-medium text-[11px]">💬 Respondió</span>
                         {convo.last_message_text && (
-                          <div className="text-gray-400 truncate mt-0.5 group-hover:text-gray-300">
+                          <div className="text-gray-400 truncate mt-0.5 group-hover:text-gray-300 text-[11px]">
                             "{convo.last_message_text.slice(0, 60)}{convo.last_message_text.length > 60 ? "…" : ""}"
                           </div>
                         )}
                         {convo.last_message_at && (
-                          <div className="text-gray-600 mt-0.5">
+                          <div className="text-gray-600 mt-0.5 text-[10px]">
                             {new Date(convo.last_message_at).toLocaleDateString("es-MX")}
                           </div>
                         )}
                       </Link>
+                    ) : lead.sent_at ? (
+                      <span className="text-gray-600 text-[11px]">
+                        Enviado {new Date(lead.sent_at).toLocaleDateString("es-MX")}
+                      </span>
                     ) : (
-                      <span className="text-gray-600">—</span>
+                      <span className="text-gray-700">—</span>
                     )}
                   </td>
                 </tr>

@@ -91,6 +91,24 @@ export default async function DashboardPage() {
     { leads: 0, invited: 0, replied: 0, meetings: 0 }
   )
 
+  // ── Pipeline funnel: lead counts per status ───────────────────────────────
+  let pipelineQuery = admin
+    .from("leads")
+    .select("status, campaign_id")
+
+  if (isRestricted && linkedAccountId) {
+    const { data: acctCamps } = await admin
+      .from("campaigns").select("id").eq("linkedin_account_id", linkedAccountId)
+    const ids = (acctCamps ?? []).map((c: any) => c.id)
+    if (ids.length > 0) pipelineQuery = pipelineQuery.in("campaign_id", ids)
+  }
+
+  const { data: pipelineRaw } = await pipelineQuery
+  const pipelineCounts: Record<string, number> = {}
+  for (const l of pipelineRaw ?? []) {
+    pipelineCounts[l.status ?? "unknown"] = (pipelineCounts[l.status ?? "unknown"] ?? 0) + 1
+  }
+
   const criticalAlerts = activeAlerts.filter(a => a.severity === "critical")
   const warningAlerts  = activeAlerts.filter(a => a.severity === "warning")
 
@@ -132,6 +150,9 @@ export default async function DashboardPage() {
         <KpiCard label="Respondieron" value={totals.replied}  color="orange" icon="📩" />
         <KpiCard label="Reuniones"    value={totals.meetings} color="green"  icon="📅" />
       </div>
+
+      {/* ── Pipeline Funnel ──────────────────────────────────────────────────── */}
+      <PipelineFunnel counts={pipelineCounts} />
 
       {/* ── Cookie health monitor ─────────────────────────────────────────────── */}
       {rawAccs.length > 0 && (
@@ -370,6 +391,79 @@ function AccountCard({ account: a }: { account: AccountToday }) {
         </div>
       </div>
     </div>
+  )
+}
+
+// ── Pipeline Funnel ───────────────────────────────────────────────────────────
+
+const FUNNEL_STAGES = [
+  { value: "pending",          label: "En cola",    icon: "⏳", color: "#64748b" },
+  { value: "invite_sent",      label: "Invitados",  icon: "✉️", color: "#60a5fa" },
+  { value: "connected",        label: "Conectados", icon: "🤝", color: "#34d399" },
+  { value: "follow_up_sent",   label: "FU1",        icon: "📨", color: "#818cf8" },
+  { value: "follow_up_sent_2", label: "FU2",        icon: "📩", color: "#c084fc" },
+  { value: "replied",          label: "Respondió",  icon: "💬", color: "#fb923c" },
+  { value: "meeting_booked",   label: "Reunión",    icon: "📅", color: "#facc15" },
+  { value: "dead",             label: "Perdidos",   icon: "💀", color: "#6b7280" },
+]
+
+function PipelineFunnel({ counts }: { counts: Record<string, number> }) {
+  const activeStages = FUNNEL_STAGES.filter(s => s.value !== "dead")
+  const maxVal = Math.max(...activeStages.map(s => counts[s.value] ?? 0), 1)
+  const dead = counts["dead"] ?? 0
+  const disq = counts["disqualified"] ?? 0
+
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">Pipeline de leads</h2>
+        <Link href="/dashboard/leads" className="text-xs text-blue-400 hover:text-blue-300">Ver todos →</Link>
+      </div>
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-2">
+        {activeStages.map((stage, i) => {
+          const val  = counts[stage.value] ?? 0
+          const prev = i > 0 ? (counts[activeStages[i - 1].value] ?? 0) : null
+          const pct  = Math.round((val / maxVal) * 100)
+          const conv = prev !== null && prev > 0 ? Math.round((val / prev) * 100) : null
+          return (
+            <Link key={stage.value} href={`/dashboard/leads?status=${stage.value}`}
+              className="flex items-center gap-3 group hover:bg-gray-800/40 rounded-lg px-2 py-1.5 -mx-2 transition-colors">
+              <div className="w-20 text-right text-xs text-gray-400 shrink-0">
+                <span className="text-[10px]">{stage.icon}</span> {stage.label}
+              </div>
+              <div className="flex-1 h-5 bg-gray-800 rounded-full overflow-hidden">
+                <div
+                  className="h-full rounded-full transition-all"
+                  style={{ width: `${pct}%`, backgroundColor: stage.color, opacity: val === 0 ? 0.2 : 0.8 }}
+                />
+              </div>
+              <div className="w-8 text-right text-sm font-bold text-white shrink-0">{val}</div>
+              <div className="w-12 text-right shrink-0">
+                {conv !== null ? (
+                  <span className={`text-[10px] font-medium ${conv >= 50 ? "text-green-400" : conv >= 20 ? "text-yellow-400" : "text-red-400"}`}>
+                    {conv}%
+                  </span>
+                ) : <span className="text-[10px] text-gray-700">—</span>}
+              </div>
+            </Link>
+          )
+        })}
+        {(dead > 0 || disq > 0) && (
+          <div className="border-t border-gray-800 pt-2 mt-2 flex gap-4 text-xs text-gray-500 px-2">
+            {dead > 0 && (
+              <Link href="/dashboard/leads?status=dead" className="hover:text-gray-300 transition-colors">
+                💀 {dead} perdidos
+              </Link>
+            )}
+            {disq > 0 && (
+              <Link href="/dashboard/leads?status=disqualified" className="hover:text-gray-300 transition-colors">
+                🚫 {disq} descalificados
+              </Link>
+            )}
+          </div>
+        )}
+      </div>
+    </section>
   )
 }
 

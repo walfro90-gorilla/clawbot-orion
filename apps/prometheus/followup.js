@@ -26,9 +26,10 @@ import { supabase, logActivity, incrementDaily } from './lib/supabase.js'
 dotenv.config()
 chromium.use(StealthPlugin())
 
-const CAMPAIGN_ID = process.env.CAMPAIGN_ID
-const DRY_RUN     = process.env.DRY_RUN !== 'false'
-const LIVE_SEND   = process.env.LIVE_SEND === 'true'
+const CAMPAIGN_ID    = process.env.CAMPAIGN_ID
+const DRY_RUN        = process.env.DRY_RUN !== 'false'
+const LIVE_SEND      = process.env.LIVE_SEND === 'true'
+const FOLLOW_UP_STEP = parseInt(process.env.FOLLOW_UP_STEP ?? '1') // 1 or 2
 
 const MAX_FOLLOWUPS_PER_RUN = 4   // máx follow-ups por ejecución (anti-ban)
 const MAX_FOLLOWUPS_PER_DAY = 8   // cap diario por cuenta (suma de todas las ejecuciones del día)
@@ -73,6 +74,7 @@ async function loadCampaign() {
     .from('campaigns')
     .select(`
       id, name, follow_up_message, follow_up_delay_days, follow_up_paused,
+      follow_up_step2_message, follow_up_step2_delay_days,
       linkedin_account_id,
       linkedin_accounts (
         id, label, li_at_cookie, proxy_url, status
@@ -83,65 +85,87 @@ async function loadCampaign() {
     .single()
 
   if (error || !data) throw new Error(`Campaign not found: ${error?.message}`)
-  if (!data.follow_up_message) throw new Error('No follow_up_message set for this campaign — skipping.')
   if (data.follow_up_paused) throw new Error('Follow-up paused for this campaign — skipping.')
+
+  // Validate that the message for this step exists
+  if (FOLLOW_UP_STEP === 1 && !data.follow_up_message) {
+    throw new Error('No follow_up_message set for this campaign — skipping.')
+  }
+  if (FOLLOW_UP_STEP === 2 && !data.follow_up_step2_message) {
+    throw new Error('No follow_up_step2_message set — skipping step 2.')
+  }
+
   return data
 }
 
 // ── Load leads eligible for follow-up ────────────────────────────────────────
 async function loadFollowupLeads(campaign) {
-  const delayDays = campaign.follow_up_delay_days ?? 3
+  const isStep2 = FOLLOW_UP_STEP === 2
+
+  // Step 1: leads that are 'connected' and sent_at > delayDays ago
+  // Step 2: leads that are 'follow_up_sent' and sent_at > step2_delay_days ago, last_followup2_at is null
+  const delayDays = isStep2
+    ? (campaign.follow_up_step2_delay_days ?? 12)
+    : (campaign.follow_up_delay_days ?? 3)
   const cutoff    = new Date(Date.now() - delayDays * 24 * 60 * 60 * 1000).toISOString()
 
-  // Leads connected + sent invite at least delayDays ago
-  const { data: leads, error } = await supabase
+  console.log(`[FOLLOWUP] Step ${FOLLOW_UP_STEP} — delay=${delayDays}d, cutoff=${cutoff.split('T')[0]}`)
+
+  let query = supabase
     .from('leads')
-    .select('id, full_name, linkedin_url, sent_at, status')
+    .select('id, full_name, linkedin_url, sent_at, status, last_followup2_at')
     .eq('campaign_id', CAMPAIGN_ID)
-    .eq('status', 'connected')
     .lte('sent_at', cutoff)
     .order('sent_at', { ascending: true })
-    .limit(20) // load extra to filter out already-sent below
+    .limit(20)
 
+  if (isStep2) {
+    // Step 2: leads in 'follow_up_sent' status that haven't received step 2 yet
+    query = query.eq('status', 'follow_up_sent').is('last_followup2_at', null)
+  } else {
+    // Step 1: leads that accepted (connected) but haven't responded
+    query = query.eq('status', 'connected')
+  }
+
+  const { data: leads, error } = await query
   if (error) throw new Error(`Could not load leads: ${error.message}`)
   if (!leads?.length) return []
 
-  // Filter out leads that already have a follow_up_sent event
-  const leadIds = leads.map(l => l.id)
-
-  // Get conversation_ids for these leads
-  const { data: convs } = await supabase
-    .from('conversations')
-    .select('id, lead_id')
-    .in('lead_id', leadIds)
-
-  const convByLead = new Map((convs ?? []).map(c => [c.lead_id, c.id]))
-  const convIds    = (convs ?? []).map(c => c.id)
-
+  // For step 1: filter out leads that already have a follow_up_sent event
   let alreadySentLeadIds = new Set()
-  if (convIds.length > 0) {
-    const { data: events } = await supabase
-      .from('conversation_events')
-      .select('conversation_id')
-      .in('conversation_id', convIds)
-      .eq('event_type', 'follow_up_sent')
 
-    // Map conv_id back to lead_id
-    const convToLead = new Map((convs ?? []).map(c => [c.id, c.lead_id]))
-    for (const ev of (events ?? [])) {
-      const leadId = convToLead.get(ev.conversation_id)
-      if (leadId) alreadySentLeadIds.add(leadId)
+  if (!isStep2) {
+    const leadIds = leads.map(l => l.id)
+    const { data: convs } = await supabase
+      .from('conversations')
+      .select('id, lead_id')
+      .in('lead_id', leadIds)
+
+    const convIds = (convs ?? []).map(c => c.id)
+    if (convIds.length > 0) {
+      const { data: events } = await supabase
+        .from('conversation_events')
+        .select('conversation_id')
+        .in('conversation_id', convIds)
+        .eq('event_type', 'follow_up_sent')
+
+      const convToLead = new Map((convs ?? []).map(c => [c.id, c.lead_id]))
+      for (const ev of (events ?? [])) {
+        const leadId = convToLead.get(ev.conversation_id)
+        if (leadId) alreadySentLeadIds.add(leadId)
+      }
     }
   }
 
-  // Check daily cap: count follow_up_sent events from today across ALL conversations of this account
+  // Daily cap check (applies to both steps)
   const todayStart = new Date()
   todayStart.setHours(0, 0, 0, 0)
+  const eventType = isStep2 ? 'follow_up_sent_2' : 'follow_up_sent'
 
   const { count: sentToday } = await supabase
     .from('conversation_events')
     .select('id', { count: 'exact', head: true })
-    .eq('event_type', 'follow_up_sent')
+    .eq('event_type', eventType)
     .eq('direction', 'outbound')
     .gte('sent_at', todayStart.toISOString())
 
@@ -162,6 +186,9 @@ async function loadFollowupLeads(campaign) {
 // ── Record follow-up sent in conversation_events ──────────────────────────────
 async function recordFollowUp(lead, message) {
   const accountId = process.env.ACCOUNT_ID_RESOLVED
+  const isStep2   = FOLLOW_UP_STEP === 2
+  const eventType = isStep2 ? 'follow_up_sent_2' : 'follow_up_sent'
+  const now       = new Date().toISOString()
 
   // Upsert conversation
   const { data: conv } = await supabase
@@ -180,13 +207,24 @@ async function recordFollowUp(lead, message) {
 
   await supabase.from('conversation_events').insert({
     conversation_id: conv.id,
-    event_type:      'follow_up_sent',
+    event_type:      eventType,
     direction:       'outbound',
     content:         message.slice(0, 4000),
-    sent_at:         new Date().toISOString(),
+    sent_at:         now,
   })
 
-  console.log(`[FOLLOWUP] ✅ Recorded follow_up_sent for "${lead.full_name}"`)
+  // For step 2: update lead status and last_followup2_at
+  if (isStep2) {
+    await supabase.from('leads').update({
+      status:            'follow_up_sent_2',
+      last_followup2_at: now,
+    }).eq('id', lead.id)
+  } else {
+    // Step 1: update lead status to follow_up_sent
+    await supabase.from('leads').update({ status: 'follow_up_sent' }).eq('id', lead.id)
+  }
+
+  console.log(`[FOLLOWUP] ✅ Recorded ${eventType} for "${lead.full_name}"`)
 }
 
 // ── Navigate to profile and send message ─────────────────────────────────────
@@ -313,7 +351,7 @@ async function run() {
     process.exit(1)
   }
 
-  console.log(`[FOLLOWUP] Starting follow-up job for campaign ${CAMPAIGN_ID}`)
+  console.log(`[FOLLOWUP] Starting follow-up job for campaign ${CAMPAIGN_ID} (step ${FOLLOW_UP_STEP})`)
   console.log(`[FOLLOWUP] DRY_RUN=${DRY_RUN} | LIVE_SEND=${LIVE_SEND}`)
 
   const campaign = await loadCampaign()
@@ -325,6 +363,11 @@ async function run() {
   // Make account ID available to recordFollowUp()
   process.env.ACCOUNT_ID_RESOLVED = account.id
 
+  // Select message based on step
+  const followUpMessage = FOLLOW_UP_STEP === 2
+    ? campaign.follow_up_step2_message
+    : campaign.follow_up_message
+
   const leads = await loadFollowupLeads(campaign)
 
   if (leads.length === 0) {
@@ -334,7 +377,7 @@ async function run() {
   }
 
   if (DRY_RUN) {
-    console.log(`[FOLLOWUP] [DRY_RUN] Would send follow-ups to ${leads.length} leads:`)
+    console.log(`[FOLLOWUP] [DRY_RUN] Would send step ${FOLLOW_UP_STEP} follow-ups to ${leads.length} leads:`)
     for (const l of leads) console.log(`  - ${l.full_name} (${l.linkedin_url}) sent_at=${l.sent_at}`)
     console.log('[FOLLOWUP] Sent: 0')
     process.exit(0)
@@ -393,7 +436,7 @@ async function run() {
       console.log(`\n[FOLLOWUP] ─── ${lead.full_name} (${sentCount + 1}/${leads.length}) ───`)
 
       try {
-        const outcome = await sendFollowUp(page, lead, campaign.follow_up_message)
+        const outcome = await sendFollowUp(page, lead, followUpMessage)
 
         if (outcome === 'captcha') {
           console.error('[FOLLOWUP] ⛔ Captcha — stopping.')
@@ -404,7 +447,7 @@ async function run() {
 
         if (outcome === 'sent') {
           if (LIVE_SEND) {
-            await recordFollowUp(lead, campaign.follow_up_message)
+            await recordFollowUp(lead, followUpMessage)
             await logActivity(account.id, 'message_sent', { lead_id: lead.id, campaign_id: CAMPAIGN_ID, type: 'follow_up' })
             await incrementDaily(account.id, 'messages_sent')
           }

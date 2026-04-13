@@ -34,8 +34,11 @@ async function saveCampaign(formData: FormData) {
     schedule_start_hour:   Number(formData.get("schedule_start_hour") || 9),
     schedule_end_hour:     Number(formData.get("schedule_end_hour") || 19),
     search_gap_hours:      Number(formData.get("search_gap_hours") || 20),
-    follow_up_message:     (formData.get("follow_up_message") as string) || null,
-    follow_up_delay_days:  Number(formData.get("follow_up_delay_days") || 3),
+    follow_up_message:          (formData.get("follow_up_message") as string) || null,
+    follow_up_delay_days:       Number(formData.get("follow_up_delay_days") || 3),
+    follow_up_step2_message:    (formData.get("follow_up_step2_message") as string) || null,
+    follow_up_step2_delay_days: Number(formData.get("follow_up_step2_delay_days") || 12),
+    auto_dead_after_days:       Number(formData.get("auto_dead_after_days") || 21),
   }).eq("id", id)
 
   // ── Message template — upsert by campaign_id
@@ -186,34 +189,63 @@ export default async function CampaignEditPage({ params }: { params: Promise<{ i
         </Section>
 
         {/* ── FOLLOW-UP ───────────────────────────────────────────────── */}
-        <Section title="Mensaje de seguimiento" icon="💬"
-          description="Mensaje automático que se envía a leads que aceptaron la invitación pero no han respondido después de N días.">
+        <Section title="Seguimiento automático" icon="💬"
+          description="Mensajes automáticos a leads que aceptaron la invitación pero no han respondido. Máximo 2 seguimientos por lead.">
           <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-4 text-xs text-amber-300 space-y-1">
-            <p>El follow-up se envía <strong>una sola vez</strong> por lead. Si el lead ya respondió no se le envía. Déjalo vacío para desactivarlo.</p>
+            <p>Cada follow-up se envía <strong>solo una vez</strong> por lead. Si el lead responde en cualquier momento no se le envía el siguiente. Déjalo vacío para desactivarlo.</p>
           </div>
-          <Field label="Mensaje de seguimiento"
-            hint="Texto exacto que se enviará. Puedes usar variables de plantilla o redactarlo estático. Máx. 2000 caracteres.">
-            <textarea name="follow_up_message" rows={4}
-              defaultValue={c.follow_up_message ?? ""}
-              placeholder="Hola {nombre}, quería retomar el contacto. ¿Tienes unos minutos esta semana para una llamada rápida?"
-              className={inp} />
-          </Field>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Field label="Días de espera" hint="Días después del envío de invitación para enviar el follow-up.">
-              <input name="follow_up_delay_days" type="number" min="1" max="30"
-                defaultValue={c.follow_up_delay_days ?? 3} className={inp} />
+
+          {/* Step 1 */}
+          <div className="space-y-3">
+            <p className="text-gray-400 text-xs font-semibold uppercase tracking-wide">Seguimiento 1 (día {(c as any).follow_up_delay_days ?? 3})</p>
+            <Field label="Mensaje de seguimiento 1"
+              hint="Texto exacto. Menciona valor concreto. Máx. 2000 caracteres.">
+              <textarea name="follow_up_message" rows={3}
+                defaultValue={c.follow_up_message ?? ""}
+                placeholder="Hola {nombre}, quería retomar el contacto. ¿Tienes unos minutos esta semana?"
+                className={inp} />
             </Field>
-            <div className="flex items-end pb-1">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input type="hidden" name="follow_up_paused" value="false" />
-                <input name="follow_up_paused" type="checkbox" value="true"
-                  defaultChecked={c.follow_up_paused ?? false}
-                  className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-yellow-500 focus:ring-yellow-500" />
-                <span className="text-sm text-gray-300">⏸ Pausar follow-up</span>
-              </label>
-            </div>
+            <Field label="Días de espera (step 1)" hint="Días después del envío de invitación para enviar el primer seguimiento.">
+              <input name="follow_up_delay_days" type="number" min="1" max="30"
+                defaultValue={(c as any).follow_up_delay_days ?? 5} className={inp} />
+            </Field>
+          </div>
+
+          {/* Step 2 */}
+          <div className="space-y-3 pt-2 border-t border-gray-800">
+            <p className="text-gray-400 text-xs font-semibold uppercase tracking-wide">Seguimiento 2 (día {(c as any).follow_up_step2_delay_days ?? 12}) — opcional</p>
+            <Field label="Mensaje de seguimiento 2"
+              hint="Se envía a leads que recibieron el seguimiento 1 pero tampoco respondieron. Déjalo vacío para no enviar.">
+              <textarea name="follow_up_step2_message" rows={3}
+                defaultValue={(c as any).follow_up_step2_message ?? ""}
+                placeholder="Hola de nuevo {nombre}. Sé que estás ocupado — ¿te viene bien 15 min esta semana para conversar?"
+                className={inp} />
+            </Field>
+            <Field label="Días de espera (step 2)" hint="Días desde el envío de la invitación original para enviar el segundo seguimiento.">
+              <input name="follow_up_step2_delay_days" type="number" min="5" max="60"
+                defaultValue={(c as any).follow_up_step2_delay_days ?? 12} className={inp} />
+            </Field>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Field label="Días hasta marcar como Perdido" hint="Días tras el último follow-up sin respuesta para auto-marcar como dead. Default: 21.">
+              <input name="auto_dead_after_days" type="number" min="7" max="90"
+                defaultValue={(c as any).auto_dead_after_days ?? 21} className={inp} />
+            </Field>
+          </div>
+
+          <div className="flex items-end pb-1">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input type="hidden" name="follow_up_paused" value="false" />
+              <input name="follow_up_paused" type="checkbox" value="true"
+                defaultChecked={c.follow_up_paused ?? false}
+                className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-yellow-500 focus:ring-yellow-500" />
+              <span className="text-sm text-gray-300">⏸ Pausar todos los seguimientos</span>
+            </label>
           </div>
         </Section>
+
+
 
         {/* ── BÚSQUEDA ────────────────────────────────────────────────── */}
         <Section title="Búsqueda en LinkedIn" icon="🔍" description="Parámetros para el scraper de perfiles.">

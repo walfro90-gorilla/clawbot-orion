@@ -216,8 +216,10 @@ async function tick() {
     .select(`
       id, name, batch_paused, search_paused, follow_up_paused, min_pending_threshold, daily_invite_target,
       min_batch_gap_min, search_gap_hours, schedule_start_hour, schedule_end_hour,
-      last_searched_at, last_batch_at, last_followup_at,
+      last_searched_at, last_batch_at, last_followup_at, last_followup2_at,
       follow_up_message, follow_up_delay_days,
+      follow_up_step2_message, follow_up_step2_delay_days,
+      auto_dead_after_days,
       search_keywords, search_location, search_count,
       linkedin_account_id,
       linkedin_accounts (
@@ -414,22 +416,117 @@ async function processCampaign(campaign) {
       console.log(`[SCHEDULER] 📭 Sin leads pending — nada que enviar.`);
     }
 
-    // ── FOLLOW-UP: mensajes de seguimiento a leads conectados sin respuesta ──────
+    // ── FOLLOW-UP step 1: mensajes de seguimiento a leads conectados sin respuesta ──
     if (campaign.follow_up_message) {
-      // Gap mínimo entre runs de follow-up: 6h (no queremos correr esto en cada tick)
+      // Gap mínimo entre runs de follow-up: 6h
       const followupGapOk = minutesSince(campaign.last_followup_at) >= 6 * 60;
       if (campaign.follow_up_paused) {
         console.log(`[SCHEDULER] ⏸  Follow-up pausado para esta campaña.`);
       } else if (followupGapOk) {
-        await runFollowupJob(campaign, account);
+        await runFollowupJob(campaign, account, 1);
       } else {
         const remaining = Math.round(6 * 60 - minutesSince(campaign.last_followup_at));
-        console.log(`[SCHEDULER] ⏳ Follow-up gap activo — faltan ~${remaining} min.`);
+        console.log(`[SCHEDULER] ⏳ Follow-up step 1 gap activo — faltan ~${remaining} min.`);
       }
     }
+
+    // ── FOLLOW-UP step 2: segundo seguimiento a leads que recibieron step 1 ──────
+    if (campaign.follow_up_step2_message && !campaign.follow_up_paused) {
+      const followup2GapOk = minutesSince(campaign.last_followup2_at) >= 8 * 60; // 8h gap
+      if (followup2GapOk) {
+        await runFollowupJob(campaign, account, 2);
+      } else {
+        const remaining = Math.round(8 * 60 - minutesSince(campaign.last_followup2_at));
+        console.log(`[SCHEDULER] ⏳ Follow-up step 2 gap activo — faltan ~${remaining} min.`);
+      }
+    }
+
+    // ── GHOST: marcar como muertos los leads que no respondieron tras FU2 ────────
+    await runGhostJob(campaign);
+
   } finally {
     // Siempre liberar el lock aunque haya error o return temprano
     if (accountId) accountLocks.delete(accountId);
+  }
+}
+
+// ── Ghost job — auto-dead leads sin respuesta después del último follow-up ────
+//
+// Reglas:
+//   FU2 enviado (follow_up_sent_2) + last_followup2_at > auto_dead_after_days → dead
+//   FU1 enviado (follow_up_sent)  + sin FU2 configurado + last_followup_at > (auto_dead_after_days + 7) → dead
+//   invite_sent sin conexión aceptada en 30 días → dead (ghosted antes de conectar)
+//
+async function runGhostJob(campaign) {
+  const deadDays  = campaign.auto_dead_after_days ?? 21;
+  const cid       = campaign.id;
+  const now       = new Date();
+
+  // Helper: timestamp of X days ago
+  const daysAgo = (d) => new Date(now - d * 86400000).toISOString();
+
+  let ghosted = 0;
+
+  // ── Case 1: follow_up_sent_2 + no reply after deadDays ─────────────────────
+  const { data: fu2Leads } = await supabase
+    .from('leads')
+    .select('id, full_name')
+    .eq('campaign_id', cid)
+    .eq('status', 'follow_up_sent_2')
+    .lte('last_followup2_at', daysAgo(deadDays));
+
+  if (fu2Leads?.length) {
+    const ids = fu2Leads.map(l => l.id);
+    await supabase.from('leads').update({
+      status:      'dead',
+      dead_reason: `ghosted_after_fu2 — sin respuesta ${deadDays}d tras último follow-up`,
+    }).in('id', ids);
+    ghosted += ids.length;
+    console.log(`[SCHEDULER] 💀 Ghost job: ${ids.length} leads → dead (FU2 sin respuesta en ${deadDays}d) — "${campaign.name}"`);
+  }
+
+  // ── Case 2: follow_up_sent (sin FU2 configurado) + no reply after deadDays+7 ─
+  if (!campaign.follow_up_step2_message) {
+    const fu1DeadDays = deadDays + 7;
+    const { data: fu1Leads } = await supabase
+      .from('leads')
+      .select('id, full_name, sent_at')
+      .eq('campaign_id', cid)
+      .eq('status', 'follow_up_sent')
+      .lte('sent_at', daysAgo(fu1DeadDays));
+
+    if (fu1Leads?.length) {
+      const ids = fu1Leads.map(l => l.id);
+      await supabase.from('leads').update({
+        status:      'dead',
+        dead_reason: `ghosted_after_fu1 — sin respuesta ${fu1DeadDays}d tras último follow-up`,
+      }).in('id', ids);
+      ghosted += ids.length;
+      console.log(`[SCHEDULER] 💀 Ghost job: ${ids.length} leads → dead (FU1 sin respuesta en ${fu1DeadDays}d) — "${campaign.name}"`);
+    }
+  }
+
+  // ── Case 3: invite_sent + 30 días sin aceptar ────────────────────────────────
+  const INVITE_EXPIRE_DAYS = 30;
+  const { data: inviteLeads } = await supabase
+    .from('leads')
+    .select('id, full_name')
+    .eq('campaign_id', cid)
+    .eq('status', 'invite_sent')
+    .lte('sent_at', daysAgo(INVITE_EXPIRE_DAYS));
+
+  if (inviteLeads?.length) {
+    const ids = inviteLeads.map(l => l.id);
+    await supabase.from('leads').update({
+      status:      'dead',
+      dead_reason: `invite_expired — invitación sin aceptar en ${INVITE_EXPIRE_DAYS} días`,
+    }).in('id', ids);
+    ghosted += ids.length;
+    console.log(`[SCHEDULER] 💀 Ghost job: ${ids.length} leads → dead (invite expirada ${INVITE_EXPIRE_DAYS}d) — "${campaign.name}"`);
+  }
+
+  if (ghosted === 0) {
+    console.log(`[SCHEDULER] 👻 Ghost job: sin leads para marcar como muertos — "${campaign.name}"`);
   }
 }
 
@@ -593,31 +690,34 @@ async function runBatchJob(campaign, account) {
 
 // ── Follow-up job ─────────────────────────────────────────────────────────────
 
-async function runFollowupJob(campaign, account) {
-  console.log(`[SCHEDULER] 💬 Iniciando follow-up para "${campaign.name}"...`);
+async function runFollowupJob(campaign, account, step = 1) {
+  const jobType = step === 2 ? 'followup_2' : 'followup';
+  console.log(`[SCHEDULER] 💬 Iniciando follow-up step ${step} para "${campaign.name}"...`);
 
-  // Actualizar last_followup_at para respetar el gap mínimo
-  await supabase.from('campaigns').update({ last_followup_at: new Date().toISOString() }).eq('id', campaign.id);
+  // Actualizar timestamp del step correspondiente
+  const tsField = step === 2 ? 'last_followup2_at' : 'last_followup_at';
+  await supabase.from('campaigns').update({ [tsField]: new Date().toISOString() }).eq('id', campaign.id);
 
-  await logJob({ campaignId: campaign.id, accountId: account.id, jobType: 'followup', status: 'started' });
+  await logJob({ campaignId: campaign.id, accountId: account.id, jobType, status: 'started' });
 
   if (!account.proxy_url) {
-    console.warn(`[SCHEDULER] ⚠️  Sin proxy para follow-up "${campaign.name}" — ban risk alto.`);
+    console.warn(`[SCHEDULER] ⚠️  Sin proxy para follow-up step ${step} "${campaign.name}" — ban risk alto.`);
   }
 
   const t0 = Date.now();
 
   if (DRY_RUN) {
-    console.log(`[SCHEDULER] [DRY_RUN] Simularía: node followup.js CAMPAIGN_ID=${campaign.id}`);
-    await logJob({ campaignId: campaign.id, accountId: account.id, jobType: 'followup', status: 'skipped', skipReason: 'dry_run' });
+    console.log(`[SCHEDULER] [DRY_RUN] Simularía: node followup.js CAMPAIGN_ID=${campaign.id} FOLLOW_UP_STEP=${step}`);
+    await logJob({ campaignId: campaign.id, accountId: account.id, jobType, status: 'skipped', skipReason: 'dry_run' });
     return;
   }
 
   const { code, lines } = await runScript('followup.js', {
-    CAMPAIGN_ID: campaign.id,
-    DRY_RUN:     'false',
-    LIVE_SEND:   String(LIVE_SEND),
-    LI_AT:       account.li_at_cookie,
+    CAMPAIGN_ID:    campaign.id,
+    FOLLOW_UP_STEP: String(step),
+    DRY_RUN:        'false',
+    LIVE_SEND:      String(LIVE_SEND),
+    LI_AT:          account.li_at_cookie,
     ...(account.proxy_url ? { PROXY_URL: account.proxy_url } : {}),
   });
 
@@ -627,23 +727,23 @@ async function runFollowupJob(campaign, account) {
   const durationMs = Date.now() - t0;
 
   await logJob({
-    campaignId: campaign.id, accountId: account.id, jobType: 'followup',
+    campaignId: campaign.id, accountId: account.id, jobType,
     status:     code === 0 ? 'completed' : (code === 2 ? 'captcha' : 'error'),
     leadsSent:  sent, durationMs,
-    details:    { exit_code: code },
+    details:    { exit_code: code, step },
   });
 
   if (code === 2) {
-    console.error(`[SCHEDULER] ⛔ Captcha detectado en follow-up — cuenta: "${account.label}".`);
+    console.error(`[SCHEDULER] ⛔ Captcha detectado en follow-up step ${step} — cuenta: "${account.label}".`);
     await supabase.from('linkedin_accounts').update({ status: 'rate_limited' }).eq('id', account.id);
     await createAlert(
       account.id, campaign.id,
       'captcha', 'critical',
-      `Captcha detectado en cuenta "${account.label}" durante follow-up — campaña "${campaign.name}".`,
-      { account_label: account.label, campaign_name: campaign.name }
+      `Captcha detectado en cuenta "${account.label}" durante follow-up step ${step} — campaña "${campaign.name}".`,
+      { account_label: account.label, campaign_name: campaign.name, step }
     );
   } else {
-    console.log(`[SCHEDULER] ✅ Follow-up done: ${sent} mensajes enviados (${(durationMs/1000).toFixed(1)}s)`);
+    console.log(`[SCHEDULER] ✅ Follow-up step ${step} done: ${sent} mensajes enviados (${(durationMs/1000).toFixed(1)}s)`);
   }
 }
 

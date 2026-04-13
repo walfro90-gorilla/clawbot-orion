@@ -27,6 +27,7 @@ async function updateAccount(formData: FormData) {
     status:                 formData.get("status") as string,
     proxy_url:              formData.get("proxy_url") as string || null,
     li_at_cookie:           newCookie,
+    cal_com_url:            formData.get("cal_com_url") as string || null,
     user_id:                assignedUserId || null,
     warmup_status:          newWarmupStatus || "cold",
     ...(cookieChanged ? { li_at_cookie_updated_at: new Date().toISOString() } : {}),
@@ -35,6 +36,17 @@ async function updateAccount(formData: FormData) {
   }).eq("id", id)
 
   if (error) console.error("[accounts] updateAccount error:", error.message)
+
+  // Si la cookie cambió, auto-resolver alertas de cookie_expiry para esta cuenta
+  if (cookieChanged) {
+    await admin.from("account_alerts").update({
+      resolved_at: new Date().toISOString(),
+      resolved_by: "auto — cookie updated via Orion",
+    })
+      .eq("linkedin_account_id", id)
+      .eq("alert_type", "cookie_expiry")
+      .is("resolved_at", null)
+  }
 
   redirect("/dashboard/accounts")
 }
@@ -195,6 +207,7 @@ export default async function AccountsPage() {
                   <Field name="li_at_cookie" label="li_at Cookie" defaultValue={raw?.li_at_cookie ?? ""} placeholder="Pegar cookie aquí" />
                   <Field name="daily_connection_limit" label="Límite diario" defaultValue={String(raw?.daily_connection_limit ?? 20)} type="number" />
                   <Field name="proxy_url" label="Proxy URL (opcional)" defaultValue={raw?.proxy_url ?? ""} placeholder="http://user:pass@host:port" />
+                  <Field name="cal_com_url" label="Link de Cal.com" defaultValue={(raw as any)?.cal_com_url ?? ""} placeholder="https://cal.com/josh" />
                   {isAdmin && profiles && profiles.length > 0 && (
                     <div className="space-y-1">
                       <label className="block text-xs text-gray-400">Usuario asignado</label>
