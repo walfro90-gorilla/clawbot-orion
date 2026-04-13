@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Orion — ClawBot CRM",
+  title: "Orion — CRM para LinkedIn",
   description: "Panel de administración de campañas LinkedIn",
 };
 

@@ -925,6 +925,7 @@ export type Database = {
           email: string
           id: string
           linkedin_account_id: string | null
+          onboarded_at: string | null
           role: string
         }
         Insert: {
@@ -933,6 +934,7 @@ export type Database = {
           email: string
           id: string
           linkedin_account_id?: string | null
+          onboarded_at?: string | null
           role?: string
         }
         Update: {
@@ -941,6 +943,7 @@ export type Database = {
           email?: string
           id?: string
           linkedin_account_id?: string | null
+          onboarded_at?: string | null
           role?: string
         }
         Relationships: [

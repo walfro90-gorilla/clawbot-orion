@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server"
 import { redirect } from "next/navigation"
 import { Sidebar } from "@/components/sidebar"
 import { AlertBanner } from "@/components/alert-banner"
+import { GuidedTour } from "@/components/guided-tour"
 import type { AccountAlert } from "@/components/alert-banner"
 
 export default async function DashboardLayout({
@@ -18,7 +19,7 @@ export default async function DashboardLayout({
   const admin = createAdminClient()
   const { data: profile } = await admin
     .from("profiles")
-    .select("email, role, linkedin_account_id")
+    .select("email, role, linkedin_account_id, onboarded_at")
     .eq("id", user.id)
     .single()
 
@@ -44,6 +45,7 @@ export default async function DashboardLayout({
   ])
 
   const unresolvedAlerts = (alerts ?? []) as AccountAlert[]
+  const showTour = !profile?.onboarded_at
 
   return (
     <div className="flex min-h-screen bg-gray-950">
@@ -57,6 +59,7 @@ export default async function DashboardLayout({
         <AlertBanner initialAlerts={unresolvedAlerts} />
         {children}
       </main>
+      {showTour && <GuidedTour show={true} role={profile?.role ?? "user"} />}
     </div>
   )
 }
