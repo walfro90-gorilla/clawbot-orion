@@ -2,20 +2,26 @@ import { createClient } from "@/lib/supabase/server"
 import { createAdminClient } from "@/lib/supabase/admin"
 import { redirect } from "next/navigation"
 
-async function saveCalUrl(formData: FormData) {
+async function saveSettings(formData: FormData) {
   "use server"
   const admin  = createAdminClient()
   const id     = formData.get("account_id") as string
-  const calUrl = (formData.get("cal_com_url") as string).trim() || null
-
   if (!id) return
+
+  const calUrl      = (formData.get("cal_com_url") as string).trim() || null
+  const delayMinRaw = formData.get("reply_delay_min") as string
+  const delayMaxRaw = formData.get("reply_delay_max") as string
 
   const { error } = await admin
     .from("linkedin_accounts")
-    .update({ cal_com_url: calUrl })
+    .update({
+      cal_com_url:     calUrl,
+      reply_delay_min: delayMinRaw ? parseInt(delayMinRaw) : null,
+      reply_delay_max: delayMaxRaw ? parseInt(delayMaxRaw) : null,
+    })
     .eq("id", id)
 
-  if (error) console.error("[settings] saveCalUrl error:", error.message)
+  if (error) console.error("[settings] saveSettings error:", error.message)
   redirect("/dashboard/settings?saved=1")
 }
 
@@ -36,9 +42,21 @@ export default async function SettingsPage({
   // Find the LinkedIn account assigned to this user
   const { data: account } = await admin
     .from("linkedin_accounts")
-    .select("id, label, linkedin_profile_url, cal_com_url, li_at_cookie_updated_at, warmup_status, status")
+    .select("id, label, linkedin_profile_url, cal_com_url, li_at_cookie_updated_at, warmup_status, status, reply_delay_min, reply_delay_max")
     .eq("user_id", user.id)
     .maybeSingle()
+
+  // Delay efectivo que se usará (override manual o default por warmup)
+  const WARMUP_DELAYS: Record<string, { min: number; max: number }> = {
+    cold:    { min: 60, max: 90 },
+    warming: { min: 25, max: 45 },
+    warm:    { min: 8,  max: 20 },
+    hot:     { min: 1,  max: 5  },
+  }
+  const warmupDefault = WARMUP_DELAYS[account?.warmup_status ?? "warm"]
+  const effectiveDelay = (account?.reply_delay_min != null && account?.reply_delay_max != null)
+    ? { min: account.reply_delay_min, max: account.reply_delay_max, isCustom: true }
+    : { ...warmupDefault, isCustom: false }
 
   // Cookie freshness
   const cookieDays = account?.li_at_cookie_updated_at
@@ -123,14 +141,14 @@ export default async function SettingsPage({
           )}
 
           {/* Cal.com section */}
-          <form action={saveCalUrl} className="space-y-4 pt-1 border-t border-gray-700">
+          <form action={saveSettings} className="space-y-5 pt-1 border-t border-gray-700">
             <input type="hidden" name="account_id" value={account.id} />
 
+            {/* Cal.com */}
             <div>
               <h2 className="text-gray-50 font-medium mb-1">Enlace de agenda Cal.com</h2>
               <p className="text-gray-500 text-xs mb-3">
-                La IA incluirá este link en la conversación cuando el lead esté listo para agendar una reunión.
-                Asegúrate de que sea un enlace directo a tu disponibilidad (Ej: 20 min).
+                La IA incluirá este link cuando el lead esté listo para agendar. Usa un enlace directo (ej: 20 min).
               </p>
               <input
                 type="url"
@@ -149,11 +167,53 @@ export default async function SettingsPage({
               )}
             </div>
 
+            {/* Velocidad de respuesta IA */}
+            <div className="pt-3 border-t border-gray-700/60">
+              <h2 className="text-gray-50 font-medium mb-1">Velocidad de respuesta IA</h2>
+              <p className="text-gray-500 text-xs mb-3">
+                Cuánto tarda el sistema en responder después de que un lead escribe.
+                Si lo dejas vacío, se usa el default según la temperatura de tu cuenta
+                ({ws.icon} {ws.label} → {warmupDefault.min}-{warmupDefault.max} min automático).
+              </p>
+
+              <div className={`mb-3 px-3 py-2 rounded-lg text-xs ${
+                effectiveDelay.isCustom
+                  ? "bg-blue-500/10 border border-blue-500/20 text-blue-400"
+                  : "bg-gray-800 border border-gray-700 text-gray-400"
+              }`}>
+                {effectiveDelay.isCustom
+                  ? `⚙️ Override manual activo: ${effectiveDelay.min}-${effectiveDelay.max} min`
+                  : `🤖 Automático por temperatura: ${effectiveDelay.min}-${effectiveDelay.max} min`}
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="block text-xs text-gray-400">Mínimo (minutos)</label>
+                  <input
+                    type="number" name="reply_delay_min" min="1" max="120"
+                    defaultValue={(account as any).reply_delay_min ?? ""}
+                    placeholder={`Auto: ${warmupDefault.min}`}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-50 placeholder-gray-600 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="block text-xs text-gray-400">Máximo (minutos)</label>
+                  <input
+                    type="number" name="reply_delay_max" min="1" max="120"
+                    defaultValue={(account as any).reply_delay_max ?? ""}
+                    placeholder={`Auto: ${warmupDefault.max}`}
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-50 placeholder-gray-600 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+              </div>
+              <p className="text-gray-600 text-xs mt-1.5">Deja vacío para usar el default automático por temperatura.</p>
+            </div>
+
             <button
               type="submit"
               className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium rounded-lg transition-colors"
             >
-              Guardar
+              Guardar configuración
             </button>
           </form>
         </div>

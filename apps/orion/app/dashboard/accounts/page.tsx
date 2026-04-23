@@ -28,6 +28,8 @@ async function updateAccount(formData: FormData) {
     proxy_url:              formData.get("proxy_url") as string || null,
     li_at_cookie:           newCookie,
     cal_com_url:            formData.get("cal_com_url") as string || null,
+    reply_delay_min:        (formData.get("reply_delay_min") as string) ? parseInt(formData.get("reply_delay_min") as string) : null,
+    reply_delay_max:        (formData.get("reply_delay_max") as string) ? parseInt(formData.get("reply_delay_max") as string) : null,
     user_id:                assignedUserId || null,
     warmup_status:          newWarmupStatus || "cold",
     ...(cookieChanged ? { li_at_cookie_updated_at: new Date().toISOString() } : {}),
@@ -208,6 +210,23 @@ export default async function AccountsPage() {
                   <Field name="daily_connection_limit" label="Límite diario" defaultValue={String(raw?.daily_connection_limit ?? 20)} type="number" />
                   <Field name="proxy_url" label="Proxy URL (opcional)" defaultValue={raw?.proxy_url ?? ""} placeholder="http://user:pass@host:port" />
                   <Field name="cal_com_url" label="Link de Cal.com" defaultValue={(raw as any)?.cal_com_url ?? ""} placeholder="https://cal.com/josh" />
+                  {/* ── Velocidad de respuesta IA ───────────────────────── */}
+                  <div className="pt-2 border-t border-gray-700 space-y-2">
+                    <div>
+                      <p className="text-xs text-gray-400 font-medium mb-0.5">Delay de auto-respuesta IA</p>
+                      <p className="text-xs text-gray-600 leading-snug">
+                        Vacío = automático por temperatura ({ws.icon} {ws.label}:{" "}
+                        {(raw as any)?.warmup_status === "cold"    ? "60-90 min" :
+                         (raw as any)?.warmup_status === "warming" ? "25-45 min" :
+                         (raw as any)?.warmup_status === "hot"     ? "1-5 min"   : "8-20 min"}).
+                        Rellena solo si quieres un override manual.
+                      </p>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <Field name="reply_delay_min" label="Mín (minutos)" defaultValue={(raw as any)?.reply_delay_min ?? ""} placeholder="ej: 1" type="number" />
+                      <Field name="reply_delay_max" label="Máx (minutos)" defaultValue={(raw as any)?.reply_delay_max ?? ""} placeholder="ej: 3" type="number" />
+                    </div>
+                  </div>
                   {isAdmin && profiles && profiles.length > 0 && (
                     <div className="space-y-1">
                       <label className="block text-xs text-gray-400">Usuario asignado</label>

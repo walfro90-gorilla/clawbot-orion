@@ -669,10 +669,12 @@ export type Database = {
           ai_subject: string | null
           campaign_id: string | null
           created_at: string | null
+          dead_reason: string | null
           disqualification_reason: string | null
           full_name: string | null
           id: string
           last_followup2_at: string | null
+          last_followup3_at: string | null
           linkedin_url: string
           meeting_at: string | null
           meeting_url: string | null
@@ -690,10 +692,12 @@ export type Database = {
           ai_subject?: string | null
           campaign_id?: string | null
           created_at?: string | null
+          dead_reason?: string | null
           disqualification_reason?: string | null
           full_name?: string | null
           id?: string
           last_followup2_at?: string | null
+          last_followup3_at?: string | null
           linkedin_url: string
           meeting_at?: string | null
           meeting_url?: string | null
@@ -711,10 +715,12 @@ export type Database = {
           ai_subject?: string | null
           campaign_id?: string | null
           created_at?: string | null
+          dead_reason?: string | null
           disqualification_reason?: string | null
           full_name?: string | null
           id?: string
           last_followup2_at?: string | null
+          last_followup3_at?: string | null
           linkedin_url?: string
           meeting_at?: string | null
           meeting_url?: string | null
@@ -757,6 +763,8 @@ export type Database = {
           li_at_cookie_updated_at: string | null
           linkedin_profile_url: string | null
           proxy_url: string | null
+          reply_delay_max: number | null
+          reply_delay_min: number | null
           status: string | null
           user_id: string | null
           warmup_started_at: string | null
@@ -775,6 +783,8 @@ export type Database = {
           li_at_cookie_updated_at?: string | null
           linkedin_profile_url?: string | null
           proxy_url?: string | null
+          reply_delay_max?: number | null
+          reply_delay_min?: number | null
           status?: string | null
           user_id?: string | null
           warmup_started_at?: string | null
@@ -793,6 +803,8 @@ export type Database = {
           li_at_cookie_updated_at?: string | null
           linkedin_profile_url?: string | null
           proxy_url?: string | null
+          reply_delay_max?: number | null
+          reply_delay_min?: number | null
           status?: string | null
           user_id?: string | null
           warmup_started_at?: string | null
@@ -1270,6 +1282,12 @@ export type Database = {
           status: string | null
           worker_id: string | null
         }[]
+        SetofOptions: {
+          from: "*"
+          to: "messages_queue"
+          isOneToOne: false
+          isSetofReturn: true
+        }
       }
       claim_next_lead: {
         Args: { p_campaign_id: string }
@@ -1279,10 +1297,12 @@ export type Database = {
           ai_subject: string | null
           campaign_id: string | null
           created_at: string | null
+          dead_reason: string | null
           disqualification_reason: string | null
           full_name: string | null
           id: string
           last_followup2_at: string | null
+          last_followup3_at: string | null
           linkedin_url: string
           meeting_at: string | null
           meeting_url: string | null
@@ -1294,6 +1314,12 @@ export type Database = {
           sent_at: string | null
           status: string | null
         }[]
+        SetofOptions: {
+          from: "*"
+          to: "leads"
+          isOneToOne: false
+          isSetofReturn: true
+        }
       }
       get_campaign_account: {
         Args: { p_campaign_id: string }
@@ -1321,13 +1347,19 @@ export type Database = {
           status: string | null
           worker_id: string | null
         }[]
+        SetofOptions: {
+          from: "*"
+          to: "messages_queue"
+          isOneToOne: false
+          isSetofReturn: true
+        }
       }
       increment_daily_activity: {
         Args: { p_account_id: string; p_field: string }
         Returns: undefined
       }
-      is_admin_or_above: { Args: Record<PropertyKey, never>; Returns: boolean }
-      show_limit: { Args: Record<PropertyKey, never>; Returns: number }
+      is_admin_or_above: { Args: never; Returns: boolean }
+      show_limit: { Args: never; Returns: number }
       show_trgm: { Args: { "": string }; Returns: string[] }
       unaccent: { Args: { "": string }; Returns: string }
     }
@@ -1462,10 +1494,3 @@ export const Constants = {
     Enums: {},
   },
 } as const
-
-// ── Extended types used by Orion pages ────────────────────────────────────────
-
-export type AccountToday     = Database["public"]["Views"]["v_account_today"]["Row"]
-export type LeadPipeline     = Database["public"]["Views"]["v_lead_pipeline"]["Row"]
-export type Campaign         = Database["public"]["Tables"]["campaigns"]["Row"]
-export type LeadStatusConfig = Database["public"]["Tables"]["lead_status_config"]["Row"]

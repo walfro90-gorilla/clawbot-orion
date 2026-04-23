@@ -245,7 +245,7 @@ async function generateDraftAsync(lead, inboundMessageText) {
       .eq('id', lead.id)
       .single()
 
-    // 4. Config auto-reply + Cal.com URL (vía campaña → cuenta)
+    // 4. Config auto-reply + Cal.com URL + delay por cuenta
     const { data: campaign } = await supabase
       .from('campaigns')
       .select('auto_reply_mode, auto_reply_delay_min, auto_reply_delay_max, linkedin_account_id')
@@ -253,13 +253,30 @@ async function generateDraftAsync(lead, inboundMessageText) {
       .single()
 
     let calUrl = null
+    let accountDelayMin = null
+    let accountDelayMax = null
     if (campaign?.linkedin_account_id) {
       const { data: acct } = await supabase
         .from('linkedin_accounts')
-        .select('cal_com_url')
+        .select('cal_com_url, reply_delay_min, reply_delay_max, warmup_status')
         .eq('id', campaign.linkedin_account_id)
         .single()
       calUrl = acct?.cal_com_url ?? null
+      // Prioridad: account override → default por warmup_status → campaign → global default
+      if (acct?.reply_delay_min != null && acct?.reply_delay_max != null) {
+        accountDelayMin = acct.reply_delay_min
+        accountDelayMax = acct.reply_delay_max
+      } else {
+        // Defaults por warmup_status — más conservador en cuentas nuevas
+        const WARMUP_DELAYS = {
+          cold:    { min: 60, max: 90  },
+          warming: { min: 25, max: 45  },
+          warm:    { min: 8,  max: 20  },
+          hot:     { min: 1,  max: 5   },
+        }
+        const wd = WARMUP_DELAYS[acct?.warmup_status ?? 'warm']
+        if (wd) { accountDelayMin = wd.min; accountDelayMax = wd.max }
+      }
     }
 
     // 5. Generar draft con contexto completo y estrategia por turno
@@ -276,9 +293,10 @@ async function generateDraftAsync(lead, inboundMessageText) {
     if (!draft) return
 
     // 6. Programar envío automático si mode != 'manual'
+    // Prioridad de delay: account override > warmup default > campaign > global
     const mode     = campaign?.auto_reply_mode ?? 'manual'
-    const delayMin = campaign?.auto_reply_delay_min ?? 45
-    const delayMax = campaign?.auto_reply_delay_max ?? 90
+    const delayMin = accountDelayMin ?? campaign?.auto_reply_delay_min ?? 45
+    const delayMax = accountDelayMax ?? campaign?.auto_reply_delay_max ?? 90
     const delayMs  = (Math.floor(Math.random() * (delayMax - delayMin + 1)) + delayMin) * 60_000
     const scheduledAt = mode !== 'manual' ? new Date(Date.now() + delayMs).toISOString() : null
 
