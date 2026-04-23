@@ -21,6 +21,7 @@ import StealthPlugin from 'puppeteer-extra-plugin-stealth'
 import dotenv from 'dotenv'
 import { supabase } from './lib/supabase.js'
 import { generateReplyDraft } from './ai.js'
+import { randomContextOptions } from './lib/browser.js'
 
 dotenv.config()
 chromium.use(StealthPlugin())
@@ -655,7 +656,7 @@ async function checkMessaging(page, leadMap, leads, stats, globalApiResponses) {
     await markReplied(matchedLead, messageText, threadId)
     stats.replied++
     // Fire-and-forget: generate AI reply draft
-    generateDraftAsync(matchedLead, messageText).catch(() => {})
+    generateDraftAsync(matchedLead, messageText).catch(e => console.error(`[INBOX] generateDraftAsync error para ${matchedLead.full_name}:`, e.message))
 
     // Actualizar el leadMap para no reprocesar
     const profileUrl = normalizeLinkedInUrl(matchedLead.linkedin_url)
@@ -694,11 +695,6 @@ async function run() {
   }
 
   // ── Lanzar browser ──────────────────────────────────────────────────────────
-  const USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
-  ]
 
   const proxy = parseProxy(account.proxy_url)
   if (!proxy) {
@@ -719,17 +715,7 @@ async function run() {
     args: launchArgs,
   })
 
-  const context = await browser.newContext({
-    userAgent:  USER_AGENTS[randInt(0, USER_AGENTS.length - 1)],
-    viewport:   { width: randInt(1260, 1440), height: randInt(860, 950) },
-    locale:     'es-MX',
-    timezoneId: 'America/Mexico_City',
-    // Proxy con credenciales — Playwright lo pasa correctamente a Chromium
-    ...(proxy ? { proxy } : {}),
-    extraHTTPHeaders: {
-      'Accept-Language': 'es-MX,es;q=0.9,en;q=0.8',
-    },
-  })
+  const context = await browser.newContext(randomContextOptions(proxy ?? undefined))
 
   // Inyectar li_at cookie
   await context.addCookies([{

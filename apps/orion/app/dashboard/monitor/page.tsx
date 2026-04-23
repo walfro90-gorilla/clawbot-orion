@@ -143,8 +143,27 @@ export default async function MonitorPage() {
   const now = Date.now()
   const minAgo = (iso: string | null) => iso ? Math.round((now - new Date(iso).getTime()) / 60000) : null
 
-  // Health score
-  const criticalCount = (accountsBanned ?? 0) + (errorsToday ?? 0) + (accountsRateLimited ?? 0)
+  // ── Scheduler heartbeat check ──────────────────────────────────────────────
+  const lastTick    = logs?.find(l => l.job_type === "tick")
+  const lastTickAt  = lastTick?.created_at ? new Date(lastTick.created_at).getTime() : null
+  const tickAgeMins = lastTickAt ? Math.round((now - lastTickAt) / 60000) : null
+
+  // Business hours México City (9–19h Mon–Fri)
+  const mxHour = parseInt(new Intl.DateTimeFormat("es-MX", {
+    hour: "numeric", hour12: false, timeZone: "America/Mexico_City",
+  }).format(new Date()))
+  const mxDay = new Intl.DateTimeFormat("es-MX", {
+    weekday: "long", timeZone: "America/Mexico_City",
+  }).format(new Date()).toLowerCase()
+  const isBusinessHours = ["lunes","martes","miércoles","jueves","viernes"].some(d => mxDay.includes(d))
+    && mxHour >= 9 && mxHour < 19
+
+  // Alert if scheduler hasn't ticked in 2+ hours during business hours
+  const schedulerDead = isBusinessHours && (tickAgeMins === null || tickAgeMins > 120)
+  const schedulerWarn = !schedulerDead && isBusinessHours && tickAgeMins !== null && tickAgeMins > 60
+
+  // Health score (include scheduler status)
+  const criticalCount = (accountsBanned ?? 0) + (errorsToday ?? 0) + (accountsRateLimited ?? 0) + (schedulerDead ? 1 : 0)
   const health = criticalCount === 0 ? "ok" : criticalCount <= 2 ? "warning" : "critical"
 
   // Pipeline: aggregate lead counts per campaign per status
@@ -189,6 +208,41 @@ export default async function MonitorPage() {
           {health === "ok" ? "Sistema saludable" : health === "warning" ? "Alertas activas" : "Crítico"}
         </div>
       </div>
+
+      {/* ── Scheduler heartbeat banner ──────────────────────────────────────── */}
+      {schedulerDead && (
+        <div className="flex items-start gap-3 px-5 py-4 bg-red-500/10 border border-red-500/40 rounded-xl text-sm">
+          <span className="text-red-400 text-lg shrink-0 mt-0.5">🔴</span>
+          <div>
+            <p className="text-red-400 font-semibold">
+              Scheduler sin actividad — {tickAgeMins !== null ? `último tick hace ${tickAgeMins} min` : "nunca registrado"}
+            </p>
+            <p className="text-red-400/70 text-xs mt-0.5">
+              El scheduler debería tickear cada 20–40 min en horario laboral. Reinicia con <code className="bg-red-900/30 px-1 rounded">pm2 restart prometheus-scheduler</code> si el problema persiste.
+            </p>
+          </div>
+        </div>
+      )}
+      {schedulerWarn && (
+        <div className="flex items-start gap-3 px-5 py-4 bg-yellow-500/10 border border-yellow-500/30 rounded-xl text-sm">
+          <span className="text-yellow-400 text-lg shrink-0 mt-0.5">🟡</span>
+          <div>
+            <p className="text-yellow-400 font-semibold">
+              Scheduler lento — último tick hace {tickAgeMins} min
+            </p>
+            <p className="text-yellow-400/70 text-xs mt-0.5">
+              Lo normal es 20–40 min. Puede ser un tick largo (inbox pesado). Si supera 2h se mostrará como crítico.
+            </p>
+          </div>
+        </div>
+      )}
+      {!schedulerDead && !schedulerWarn && lastTickAt && (
+        <div className="flex items-center gap-2 px-4 py-2.5 bg-green-500/5 border border-green-500/20 rounded-xl text-xs text-green-400/80">
+          <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse shrink-0" />
+          Scheduler activo — último tick hace {tickAgeMins} min
+          {!isBusinessHours && <span className="text-gray-500 ml-1">(fuera de horario — solo inbox)</span>}
+        </div>
+      )}
 
       {/* ── Alertas críticas ──────────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">

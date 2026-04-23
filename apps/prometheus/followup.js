@@ -22,6 +22,7 @@ import { chromium } from 'playwright-extra'
 import StealthPlugin from 'puppeteer-extra-plugin-stealth'
 import dotenv from 'dotenv'
 import { supabase, logActivity, incrementDaily } from './lib/supabase.js'
+import { randomContextOptions } from './lib/browser.js'
 
 dotenv.config()
 chromium.use(StealthPlugin())
@@ -124,8 +125,7 @@ async function loadFollowupLeads(campaign) {
     .select('id, full_name, linkedin_url, sent_at, status, last_followup2_at, last_followup3_at')
     .eq('campaign_id', CAMPAIGN_ID)
     .lte('sent_at', cutoff)
-    .order('sent_at', { ascending: true })
-    .limit(20)
+    .limit(50)
 
   if (isStep3) {
     // Step 3: leads that received step 2 but haven't received step 3 yet
@@ -138,9 +138,12 @@ async function loadFollowupLeads(campaign) {
     query = query.eq('status', 'connected')
   }
 
-  const { data: leads, error } = await query
+  const { data: rawLeads, error } = await query
   if (error) throw new Error(`Could not load leads: ${error.message}`)
-  if (!leads?.length) return []
+  if (!rawLeads?.length) return []
+
+  // Shuffle to avoid predictable FIFO pattern (anti-fingerprinting)
+  const leads = rawLeads.sort(() => Math.random() - 0.5).slice(0, 20)
 
   // For step 1: filter out leads that already have a follow_up_sent event
   let alreadySentLeadIds = new Set()
@@ -401,15 +404,7 @@ async function run() {
   }
 
   // ── Launch browser ───────────────────────────────────────────────────────────
-  const USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
-  ]
-  const userAgent = USER_AGENTS[randInt(0, USER_AGENTS.length - 1)]
-  const vpWidth   = randInt(1260, 1440)
-  const vpHeight  = randInt(860, 920)
+
 
   const PROXY_URL = process.env.PROXY_URL || account.proxy_url || null
   if (!PROXY_URL) {
@@ -422,13 +417,7 @@ async function run() {
   if (proxy?.server) launchArgs.push(`--proxy-server=${proxy.server}`)
 
   const browser = await chromium.launch({ headless: true, args: launchArgs })
-  const context = await browser.newContext({
-    userAgent,
-    viewport:   { width: vpWidth, height: vpHeight },
-    locale:     'es-MX',
-    timezoneId: 'America/Mexico_City',
-    ...(proxy ? { proxy } : {}),
-  })
+  const context = await browser.newContext(randomContextOptions(proxy ?? undefined))
   const page = await context.newPage()
 
   // Inject LinkedIn cookie

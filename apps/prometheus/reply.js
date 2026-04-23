@@ -16,6 +16,7 @@ import { chromium } from 'playwright-extra'
 import StealthPlugin from 'puppeteer-extra-plugin-stealth'
 import dotenv from 'dotenv'
 import { supabase } from './lib/supabase.js'
+import { randomContextOptions } from './lib/browser.js'
 
 dotenv.config()
 chromium.use(StealthPlugin())
@@ -250,11 +251,6 @@ async function run() {
   const { lead, account, conv } = await loadContext()
   console.log(`[REPLY] Lead: ${lead.full_name} | Account: ${account.label}`)
 
-  const USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
-  ]
-
   const proxy = parseProxy(account.proxy_url)
   if (proxy) console.log(`[REPLY] Using proxy: ${proxy.server}`)
   else       console.log('[REPLY] ⚠️  No proxy — ban risk')
@@ -264,14 +260,7 @@ async function run() {
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled'],
   })
 
-  const context = await browser.newContext({
-    userAgent:  USER_AGENTS[randInt(0, USER_AGENTS.length - 1)],
-    viewport:   { width: randInt(1260, 1440), height: randInt(860, 950) },
-    locale:     'es-MX',
-    timezoneId: 'America/Mexico_City',
-    ...(proxy ? { proxy } : {}),
-    extraHTTPHeaders: { 'Accept-Language': 'es-MX,es;q=0.9,en;q=0.8' },
-  })
+  const context = await browser.newContext(randomContextOptions(proxy ?? undefined))
 
   await context.addCookies([{
     name: 'li_at', value: account.li_at_cookie,

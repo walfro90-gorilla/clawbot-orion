@@ -3,6 +3,7 @@ import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import dotenv from 'dotenv';
 import { generateMessage } from './ai.js';
 import { supabase, logActivity } from './lib/supabase.js';
+import { randomContextOptions } from './lib/browser.js';
 
 dotenv.config();
 
@@ -441,18 +442,6 @@ async function run() {
   // ── Rotate User-Agent (realistic pool of Chrome versions on Win/Mac) ─────
   // User agents actualizados — Chrome 133/134/135 (2025). Usar versiones recientes
   // es clave: LinkedIn puede validar la versión contra TLS fingerprints.
-  const USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
-  ];
-  const userAgent = USER_AGENTS[randInt(0, USER_AGENTS.length - 1)];
-
-  // Slight viewport randomization — humans don't all use the same screen
-  const vpWidth  = randInt(1260, 1440);
-  const vpHeight = randInt(860, 920);
 
   const PROXY_URL = process.env.PROXY_URL || null;
   if (!PROXY_URL) {
@@ -473,14 +462,7 @@ async function run() {
 
   const browser = await chromium.launch({ headless: true, args: launchArgs });
 
-  const context = await browser.newContext({
-    userAgent,
-    viewport: { width: vpWidth, height: vpHeight },
-    locale: 'es-MX',
-    timezoneId: 'America/Mexico_City',
-    // Proxy con credenciales — Playwright lo pasa correctamente a Chromium
-    ...(proxy ? { proxy } : {}),
-  });
+  const context = await browser.newContext(randomContextOptions(proxy ?? undefined));
 
   await context.addCookies([{
     name: 'li_at',

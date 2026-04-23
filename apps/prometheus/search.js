@@ -15,6 +15,7 @@ import { chromium } from 'playwright-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import dotenv from 'dotenv';
 import { supabase, logActivity } from './lib/supabase.js';
+import { randomContextOptions } from './lib/browser.js';
 
 dotenv.config();
 chromium.use(StealthPlugin());
@@ -242,20 +243,7 @@ async function run() {
   const launchArgs = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled'];
   const browser = await chromium.launch({ headless: true, args: launchArgs });
 
-  const USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
-  ];
-  const context = await browser.newContext({
-    userAgent: USER_AGENTS[randInt(0, USER_AGENTS.length - 1)],
-    viewport: { width: randInt(1260, 1440), height: randInt(860, 920) },
-    locale: 'es-MX',
-    timezoneId: 'America/Mexico_City',
-    ...(proxy ? { proxy } : {}),
-  });
+  const context = await browser.newContext(randomContextOptions(proxy ?? undefined));
 
   await context.addCookies([{
     name: 'li_at', value: LI_AT_COOKIE,

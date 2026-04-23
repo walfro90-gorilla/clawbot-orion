@@ -43,8 +43,17 @@ const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
 const sleep   = (ms)       => new Promise(r => setTimeout(r, ms));
 
 // ── Account locking — prevents two campaigns of the same account running in parallel ─
-// This is module-level so it persists across ticks within the same scheduler process.
-const accountLocks = new Set();
+// Map<accountId, lockedAtMs> — auto-expires after 20 min to survive worker hangs.
+const accountLocks = new Map();
+const ACCOUNT_LOCK_TTL_MS = 20 * 60 * 1000; // 20 min max per campaign run
+
+function acquireLock(accountId) {
+  const existing = accountLocks.get(accountId);
+  if (existing && Date.now() - existing < ACCOUNT_LOCK_TTL_MS) return false; // locked
+  accountLocks.set(accountId, Date.now());
+  return true;
+}
+function releaseLock(accountId) { accountLocks.delete(accountId); }
 
 /** Hora actual en Mexico City */
 function mxTime() {
@@ -305,7 +314,7 @@ async function tick() {
           .eq('linkedin_account_id', account.id)
           .eq('alert_type', 'cookie_expiry')
           .is('resolved_at', null)
-          .gte('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
+          .gte('created_at', new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString())
           .maybeSingle();
 
         if (!existing) {
@@ -361,12 +370,11 @@ async function processCampaign(campaign) {
   }
 
   // Guard: otra campaña del mismo account ya está en proceso este tick
-  if (accountId && accountLocks.has(accountId)) {
+  if (accountId && !acquireLock(accountId)) {
     console.log(`[SCHEDULER] ⚠️  Cuenta "${account?.label}" ocupada (otra campaña en curso) — skip "${cname}".`);
     await logJob({ campaignId: cid, accountId, jobType: 'tick', status: 'skipped', skipReason: 'account_locked' });
     return;
   }
-  if (accountId) accountLocks.add(accountId);
 
   try {
     // Guard: horario específico de la campaña (puede diferir del global)
@@ -486,7 +494,7 @@ async function processCampaign(campaign) {
 
   } finally {
     // Siempre liberar el lock aunque haya error o return temprano
-    if (accountId) accountLocks.delete(accountId);
+    if (accountId) releaseLock(accountId);
   }
 }
 
@@ -616,6 +624,13 @@ async function runAutoReplyJob(account) {
   console.log(`[SCHEDULER] 🤖 Auto-reply: ${dueDrafts.length} draft(s) listos para "${account.label}"`);
 
   for (const conv of dueDrafts) {
+    // Guard: draft must be a non-empty string before sending
+    if (!conv.ai_reply_draft?.trim()) {
+      console.warn(`[SCHEDULER] ⚠️  Draft vacío/nulo para conv ${conv.id} — cancelando scheduled_at.`);
+      await supabase.from('conversations').update({ ai_reply_scheduled_at: null }).eq('id', conv.id);
+      continue;
+    }
+
     // Limpiar scheduling ANTES de enviar (evita doble envío si el tick se solapa)
     await supabase.from('conversations')
       .update({ ai_reply_scheduled_at: null })
