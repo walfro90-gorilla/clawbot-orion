@@ -600,22 +600,32 @@ async function checkMessaging(page, leadMap, leads, stats, globalApiResponses) {
 
           console.log(`[INBOX] Thread messages count: ${msgElements.length}`)
 
-          // Filtrar mensajes inbound (del lead, no nuestros — distance !== 'SELF')
-          const inboundMessages = msgElements.filter(msg => {
-            const senderDistance = msg.sender?.participantType?.member?.distance
-            return senderDistance && senderDistance !== 'SELF'
-          })
+          // Separar mensajes por dirección (SELF = nuestros, otros = del lead)
+          const isSelf = msg => msg.sender?.participantType?.member?.distance === 'SELF'
 
-          // Solo usar mensajes inbound para capturar respuestas
-          // Nota: emojis como "👍" tienen .length === 2 en JS (UTF-16 surrogate pair)
-          // por eso usamos trim().length >= 1 para no perderlos
-          for (const msg of inboundMessages.slice(-3)) {
-            const body = (msg.body?.text ?? msg.body ?? '').trim()
-            if (body.length >= 1) messageText = body
+          // Encontrar el índice del ÚLTIMO mensaje outbound nuestro
+          // Todo lo inbound DESPUÉS de ese punto = respuesta pendiente del lead
+          let lastOutboundIdx = -1
+          for (let i = msgElements.length - 1; i >= 0; i--) {
+            if (isSelf(msgElements[i])) { lastOutboundIdx = i; break }
           }
-          if (messageText) {
-            console.log(`[INBOX]   Latest inbound message: "${messageText.slice(0, 100)}"`)
-          } else if (inboundMessages.length === 0) {
+
+          // Recoger TODOS los mensajes inbound después del último outbound
+          // Si no hay outbound aún (primera respuesta a invite), tomar todos los inbound
+          const pendingInbound = msgElements
+            .slice(lastOutboundIdx + 1)
+            .filter(msg => !isSelf(msg))
+
+          // Concatenar para dar contexto completo a la IA
+          // Emojis como "👍" tienen .length === 2 (UTF-16), trim().length >= 1 los captura
+          const parts = pendingInbound
+            .map(msg => (msg.body?.text ?? msg.body ?? '').trim())
+            .filter(t => t.length >= 1)
+
+          if (parts.length > 0) {
+            messageText = parts.join('\n\n')
+            console.log(`[INBOX]   Inbound messages (${parts.length}): "${messageText.slice(0, 120)}"`)
+          } else if (pendingInbound.length === 0 && msgElements.every(isSelf)) {
             console.log(`[INBOX]   No inbound messages in thread (${msgElements.length} total, all outbound)`)
           }
         } else {

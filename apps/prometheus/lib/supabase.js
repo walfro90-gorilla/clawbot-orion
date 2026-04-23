@@ -59,6 +59,29 @@ export async function checkDailyLimit(accountId) {
  * @param {object} details         - Contexto adicional (urls, exit codes, etc.)
  * @param {boolean} pauseCampaign  - Si true, pone campaign.batch_paused = true
  */
+// ── Slack notification ────────────────────────────────────────────────────────
+const SLACK_ICONS = { critical: '🔴', warning: '🟡', info: '🔵' };
+
+async function notifySlack(severity, alertType, message, details = {}) {
+  const webhook = process.env.SLACK_WEBHOOK_URL;
+  if (!webhook) return;
+
+  const icon    = SLACK_ICONS[severity] ?? '🔔';
+  const detailLine = Object.keys(details).length
+    ? '\n```' + JSON.stringify(details, null, 2).slice(0, 400) + '```'
+    : '';
+
+  const body = {
+    text: `${icon} *ClawBot — ${alertType.replace(/_/g, ' ').toUpperCase()}*\n${message}${detailLine}`,
+  };
+
+  await fetch(webhook, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify(body),
+  }).catch(e => console.warn('[SLACK] notify failed:', e.message));
+}
+
 export async function createAlert(accountId, campaignId, alertType, severity, message, details = {}, pauseCampaign = false) {
   let autoPaused = false;
 
@@ -88,4 +111,9 @@ export async function createAlert(accountId, campaignId, alertType, severity, me
 
   if (error) console.warn('[DB] createAlert failed:', error.message);
   else       console.warn(`[ALERT] [${severity.toUpperCase()}] ${alertType}: ${message}`);
+
+  // Slack: siempre en critical, nunca en info
+  if (severity === 'critical' || severity === 'warning') {
+    await notifySlack(severity, alertType, message, details);
+  }
 }
