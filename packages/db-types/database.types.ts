@@ -268,6 +268,9 @@ export type Database = {
       campaigns: {
         Row: {
           auto_dead_after_days: number | null
+          auto_reply_delay_max: number | null
+          auto_reply_delay_min: number | null
+          auto_reply_mode: string | null
           batch_paused: boolean
           created_at: string | null
           daily_invite_target: number
@@ -276,12 +279,15 @@ export type Database = {
           follow_up_paused: boolean | null
           follow_up_step2_delay_days: number | null
           follow_up_step2_message: string | null
+          follow_up_step3_delay_days: number | null
+          follow_up_step3_message: string | null
           gemini_system_prompt: string
           id: string
           is_active: boolean | null
           last_batch_at: string | null
           last_followup_at: string | null
           last_followup2_at: string | null
+          last_followup3_at: string | null
           last_searched_at: string | null
           linkedin_account_id: string | null
           min_batch_gap_min: number
@@ -301,6 +307,9 @@ export type Database = {
         }
         Insert: {
           auto_dead_after_days?: number | null
+          auto_reply_delay_max?: number | null
+          auto_reply_delay_min?: number | null
+          auto_reply_mode?: string | null
           batch_paused?: boolean
           created_at?: string | null
           daily_invite_target?: number
@@ -309,12 +318,15 @@ export type Database = {
           follow_up_paused?: boolean | null
           follow_up_step2_delay_days?: number | null
           follow_up_step2_message?: string | null
+          follow_up_step3_delay_days?: number | null
+          follow_up_step3_message?: string | null
           gemini_system_prompt: string
           id?: string
           is_active?: boolean | null
           last_batch_at?: string | null
           last_followup_at?: string | null
           last_followup2_at?: string | null
+          last_followup3_at?: string | null
           last_searched_at?: string | null
           linkedin_account_id?: string | null
           min_batch_gap_min?: number
@@ -334,6 +346,9 @@ export type Database = {
         }
         Update: {
           auto_dead_after_days?: number | null
+          auto_reply_delay_max?: number | null
+          auto_reply_delay_min?: number | null
+          auto_reply_mode?: string | null
           batch_paused?: boolean
           created_at?: string | null
           daily_invite_target?: number
@@ -342,12 +357,15 @@ export type Database = {
           follow_up_paused?: boolean | null
           follow_up_step2_delay_days?: number | null
           follow_up_step2_message?: string | null
+          follow_up_step3_delay_days?: number | null
+          follow_up_step3_message?: string | null
           gemini_system_prompt?: string
           id?: string
           is_active?: boolean | null
           last_batch_at?: string | null
           last_followup_at?: string | null
           last_followup2_at?: string | null
+          last_followup3_at?: string | null
           last_searched_at?: string | null
           linkedin_account_id?: string | null
           min_batch_gap_min?: number
@@ -430,6 +448,8 @@ export type Database = {
         Row: {
           ai_draft_generated_at: string | null
           ai_reply_draft: string | null
+          ai_reply_scheduled_at: string | null
+          conversation_turn: number | null
           created_at: string | null
           follow_up_count: number
           id: string
@@ -446,6 +466,8 @@ export type Database = {
         Insert: {
           ai_draft_generated_at?: string | null
           ai_reply_draft?: string | null
+          ai_reply_scheduled_at?: string | null
+          conversation_turn?: number | null
           created_at?: string | null
           follow_up_count?: number
           id?: string
@@ -462,6 +484,8 @@ export type Database = {
         Update: {
           ai_draft_generated_at?: string | null
           ai_reply_draft?: string | null
+          ai_reply_scheduled_at?: string | null
+          conversation_turn?: number | null
           created_at?: string | null
           follow_up_count?: number
           id?: string

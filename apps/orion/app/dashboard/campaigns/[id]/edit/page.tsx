@@ -38,7 +38,12 @@ async function saveCampaign(formData: FormData) {
     follow_up_delay_days:       Number(formData.get("follow_up_delay_days") || 3),
     follow_up_step2_message:    (formData.get("follow_up_step2_message") as string) || null,
     follow_up_step2_delay_days: Number(formData.get("follow_up_step2_delay_days") || 12),
+    follow_up_step3_message:    (formData.get("follow_up_step3_message") as string) || null,
+    follow_up_step3_delay_days: Number(formData.get("follow_up_step3_delay_days") || 21),
     auto_dead_after_days:       Number(formData.get("auto_dead_after_days") || 21),
+    auto_reply_mode:            (formData.get("auto_reply_mode") as string) || "manual",
+    auto_reply_delay_min:       Number(formData.get("auto_reply_delay_min") || 45),
+    auto_reply_delay_max:       Number(formData.get("auto_reply_delay_max") || 90),
   }).eq("id", id)
 
   // ── Message template — upsert by campaign_id
@@ -227,6 +232,25 @@ export default async function CampaignEditPage({ params }: { params: Promise<{ i
             </Field>
           </div>
 
+          {/* Step 3 — Closing */}
+          <div className="space-y-3 pt-2 border-t border-gray-800">
+            <p className="text-gray-400 text-xs font-semibold uppercase tracking-wide">Cierre (día {(c as any).follow_up_step3_delay_days ?? 21}) — opcional</p>
+            <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-3 text-xs text-amber-300">
+              Último intento. Tono de bajo compromiso — no agresivo. Déjalo vacío para desactivarlo.
+            </div>
+            <Field label="Mensaje de cierre"
+              hint="Último mensaje antes de marcar como perdido. Breve y sin presión.">
+              <textarea name="follow_up_step3_message" rows={3}
+                defaultValue={(c as any).follow_up_step3_message ?? ""}
+                placeholder="Hola [Nombre], entiendo que no es el momento. Queda la puerta abierta — si en algún momento tiene sentido conversar, aquí estaré."
+                className={inp} />
+            </Field>
+            <Field label="Días de espera (cierre)" hint="Días desde la invitación original para el mensaje de cierre. Recomendado: ≥14 días.">
+              <input name="follow_up_step3_delay_days" type="number" min="12" max="90"
+                defaultValue={(c as any).follow_up_step3_delay_days ?? 21} className={inp} />
+            </Field>
+          </div>
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Field label="Días hasta marcar como Perdido" hint="Días tras el último follow-up sin respuesta para auto-marcar como dead. Default: 21.">
               <input name="auto_dead_after_days" type="number" min="7" max="90"
@@ -242,6 +266,33 @@ export default async function CampaignEditPage({ params }: { params: Promise<{ i
                 className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-yellow-500 focus:ring-yellow-500" />
               <span className="text-sm text-gray-300">⏸ Pausar todos los seguimientos</span>
             </label>
+          </div>
+
+          {/* Auto-respuesta IA */}
+          <div className="space-y-3 pt-2 border-t border-gray-800">
+            <p className="text-gray-400 text-xs font-semibold uppercase tracking-wide">Auto-respuesta IA</p>
+            <div className="bg-blue-500/5 border border-blue-500/20 rounded-xl p-3 text-xs text-blue-300">
+              Cuando un lead responde, Gemini genera un borrador contextualizado con su perfil e historial.
+              En modo Semi-auto o Automático, se envía tras el retraso configurado sin necesidad de aprobación.
+              Puedes cancelar cualquier envío desde <strong>/conversaciones</strong> antes de que ocurra.
+            </div>
+            <Field label="Modo de respuesta automática">
+              <select name="auto_reply_mode" defaultValue={(c as any).auto_reply_mode ?? "manual"} className={inp}>
+                <option value="manual">Manual — siempre requiere aprobación humana</option>
+                <option value="semi_auto">Semi-automático — countdown + cancelación (testing)</option>
+                <option value="auto">Automático — envío sin intervención (producción)</option>
+              </select>
+            </Field>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Retraso mínimo (min)" hint="Recomendado: ≥30 min para parecer humano.">
+                <input name="auto_reply_delay_min" type="number" min="5" max="480"
+                  defaultValue={(c as any).auto_reply_delay_min ?? 45} className={inp} />
+              </Field>
+              <Field label="Retraso máximo (min)" hint="Randomización anti-ban — se elige un tiempo aleatorio entre mín y máx.">
+                <input name="auto_reply_delay_max" type="number" min="10" max="720"
+                  defaultValue={(c as any).auto_reply_delay_max ?? 90} className={inp} />
+              </Field>
+            </div>
           </div>
         </Section>
 

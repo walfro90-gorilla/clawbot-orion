@@ -289,26 +289,12 @@ async function openComposeArea(page, cta) {
 
   if (cta.type === 'connect') {
     await doClick();
-    await page.waitForTimeout(randInt(800, 1500));
+    await page.waitForTimeout(randInt(1000, 1800));
 
     // Screenshot immediately after click — shows what LinkedIn displayed (modal vs quick-connect)
     await page.screenshot({ path: 'debug_post_connect_click.png', fullPage: false });
 
-    // LinkedIn has two flows after clicking Connect:
-    // A) Modal with "Add a note" button → click it → textarea appears
-    // B) "Quick Connect" → request sent immediately, no modal
-    // Try flow A first, fall back gracefully to flow B.
-
-    // The modal is in shadow DOM — use getByRole which pierces it.
-    // LinkedIn ES UI: "Añadir una nota" / EN UI: "Add a note"
-    // Premium/Sales Navigator may show "Personalizar invitación" or similar variants
-    const addNoteBtn = page.getByRole('button', {
-      name: /add a note|añadir una nota|añadir nota|add a personalised note|personalizar/i,
-    }).first();
-
-    const hasModal = await addNoteBtn.isVisible({ timeout: 8000 }).catch(() => false);
-
-    // Captcha/checkpoint detection after clicking CTA
+    // Captcha/checkpoint detection (check before any modal logic)
     if (page.url().includes('/checkpoint') || page.url().includes('/challenge')) {
       console.error('[CLAWBOT] ⛔ CAPTCHA/CHECKPOINT detected after CTA click — aborting.');
       await page.screenshot({ path: 'debug_captcha.png', fullPage: false });
@@ -326,17 +312,72 @@ async function openComposeArea(page, cta) {
       return 'captcha';
     }
 
+    // ── Strategy 1: "Add a note" button (LinkedIn ES/EN + all known text variants)
+    // LinkedIn has changed this text multiple times across A/B tests and locales.
+    const addNoteBtn = page.getByRole('button', {
+      name: /add a note|añadir una nota|añadir nota|add a personalised note|add a personalized note|personalizar|personali[sz]e|con nota|agregar nota|with a note/i,
+    }).first();
+    let hasModal = await addNoteBtn.isVisible({ timeout: 5000 }).catch(() => false);
+
+    // ── Strategy 2: LinkedIn new modal shows "Enviar sin nota" alongside "Añadir nota"
+    // If we see "send without note" it means the modal IS open, just different structure.
     if (!hasModal) {
-      // Quick Connect fired — invitation may have already been sent without a note.
-      // This happens when LinkedIn bypasses the modal (A/B test, Premium flow, repeat invite).
-      console.warn('[CLAWBOT] ⚠️  Quick Connect detected — invitation sent WITHOUT note (no modal appeared).');
-      console.warn('[CLAWBOT]    Check debug_post_connect_click.png to inspect LinkedIn state.');
+      const sendWithoutBtn = page.getByRole('button', {
+        name: /send without note|enviar sin nota|skip note|omitir nota|send now|enviar ahora/i,
+      }).first();
+      const hasSendWithout = await sendWithoutBtn.isVisible({ timeout: 3000 }).catch(() => false);
+      if (hasSendWithout) {
+        console.log('[CLAWBOT] "Send without note" detected — modal IS open, scanning for note button...');
+        // Modal is present: look for any note-related button via text scan
+        const noteBtn = page.locator('button').filter({
+          hasText: /nota|note/i,
+        }).first();
+        const hasNote = await noteBtn.isVisible({ timeout: 2000 }).catch(() => false);
+        if (hasNote) {
+          hasModal = true;
+          await noteBtn.click();
+          await page.waitForTimeout(randInt(600, 1000));
+        }
+      }
+    }
+
+    // ── Strategy 3: Textarea already visible in shadow DOM (no "Add a note" click needed)
+    if (!hasModal) {
+      const directInShadow = await page.evaluate(() => {
+        const host = document.querySelector('#interop-outlet, [data-testid="interop-shadowdom"]');
+        const root = host?.shadowRoot;
+        if (!root) return false;
+        return root.querySelectorAll('textarea').length > 0;
+      });
+      if (directInShadow) {
+        console.log('[CLAWBOT] Note textarea visible directly in shadow DOM (new LinkedIn flow).');
+        // Skip clicking "Add a note" — fall through to shadow DOM focus below
+        hasModal = true;
+      }
+    }
+
+    // ── Debug: log all visible button texts before giving up
+    if (!hasModal) {
+      const visibleBtns = await page.evaluate(() => {
+        const host = document.querySelector('#interop-outlet');
+        const shadowBtns = host?.shadowRoot
+          ? Array.from(host.shadowRoot.querySelectorAll('button')).map(b => b.textContent?.trim())
+          : [];
+        const domBtns = Array.from(document.querySelectorAll('button')).map(b => b.textContent?.trim());
+        return [...new Set([...shadowBtns, ...domBtns])].filter(t => t && t.length > 0 && t.length < 60);
+      });
+      console.log('[CLAWBOT] Visible buttons after Connect click:', JSON.stringify(visibleBtns));
+      console.warn('[CLAWBOT] ⚠️  Quick Connect — invitation sent WITHOUT note (no modal found).');
       return 'quick-connect';
     }
 
-    console.log('[CLAWBOT] Note modal detected — clicking "Añadir una nota"...');
-    await addNoteBtn.click();
-    await page.waitForTimeout(randInt(700, 1200));
+    // Only click "Add a note" if we found it via Strategy 1 (not 2 or 3 which already handled it)
+    const needsAddNoteClick = await addNoteBtn.isVisible({ timeout: 500 }).catch(() => false);
+    if (needsAddNoteClick) {
+      console.log('[CLAWBOT] Note modal detected — clicking "Añadir una nota"...');
+      await addNoteBtn.click();
+      await page.waitForTimeout(randInt(700, 1200));
+    }
 
     // The note textarea is inside LinkedIn's interop shadow DOM.
     // getByRole('textbox') matches the search bar first, and pointer events
@@ -414,6 +455,10 @@ async function run() {
   const vpHeight = randInt(860, 920);
 
   const PROXY_URL = process.env.PROXY_URL || null;
+  if (!PROXY_URL) {
+    console.error('[WORKER] ❌ PROXY_URL no configurado — abortando para evitar ban de IP de datacenter.');
+    process.exit(1);
+  }
   const proxy = parseProxy(PROXY_URL);
 
   const launchArgs = [

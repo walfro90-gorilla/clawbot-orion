@@ -215,12 +215,31 @@ async function run() {
 
   // ── Launch browser ─────────────────────────────────────────────────────
   const PROXY_URL = process.env.PROXY_URL || null;
+  if (!PROXY_URL) {
+    console.error('[SEARCH] ❌ PROXY_URL no configurado — abortando para evitar ban de IP de datacenter.');
+    process.exit(1);
+  }
+
+  function parseProxy(proxyUrl) {
+    if (!proxyUrl) return null;
+    try {
+      const u = new URL(proxyUrl);
+      return {
+        server:   `${u.protocol}//${u.hostname}:${u.port}`,
+        username: u.username || undefined,
+        password: u.password || undefined,
+      };
+    } catch {
+      return { server: proxyUrl };
+    }
+  }
+
+  const proxy = parseProxy(PROXY_URL);
+
+  if (proxy) console.log(`[SEARCH] Using proxy: ${proxy.server}`);
+  else       console.log('[SEARCH] ⚠️  No proxy configured — using direct IP (ban risk on datacenter IPs)');
+
   const launchArgs = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled'];
-  if (PROXY_URL) launchArgs.push(`--proxy-server=${PROXY_URL}`);
-
-  if (PROXY_URL) console.log(`[SEARCH] Using proxy: ${PROXY_URL}`);
-  else           console.log('[SEARCH] ⚠️  No proxy configured — using direct IP (ban risk on datacenter IPs)');
-
   const browser = await chromium.launch({ headless: true, args: launchArgs });
 
   const USER_AGENTS = [
@@ -235,6 +254,7 @@ async function run() {
     viewport: { width: randInt(1260, 1440), height: randInt(860, 920) },
     locale: 'es-MX',
     timezoneId: 'America/Mexico_City',
+    ...(proxy ? { proxy } : {}),
   });
 
   await context.addCookies([{
@@ -261,9 +281,10 @@ async function run() {
   const found   = [];
   const seen    = new Set();
   let   pageNum = 1;
+  const MAX_PAGES = 40;
 
   try {
-    while (found.length < targetCount) {
+    while (found.length < targetCount && pageNum <= MAX_PAGES) {
       const url = buildSearchUrl(jobFilters) + `&page=${pageNum}`;
       console.log(`[SEARCH] Page ${pageNum} → ${url}`);
 

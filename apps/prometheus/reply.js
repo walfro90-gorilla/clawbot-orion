@@ -88,15 +88,21 @@ async function loadContext() {
 
 // ── Record sent reply in conversation_events ──────────────────────────────────
 async function recordReply(convId, accountId, messageText) {
-  if (!convId || DRY_RUN) return
+  if (DRY_RUN) return
 
-  // Ensure conversation exists
-  const resolvedConvId = convId ?? (await supabase
-    .from('conversations')
-    .upsert({ lead_id: LEAD_ID, linkedin_account_id: accountId }, { onConflict: 'lead_id' })
-    .select('id').single()).data?.id
-
-  if (!resolvedConvId) { console.warn('[REPLY] Could not resolve conversation ID'); return }
+  // Resolve conversation ID — upsert if not yet created
+  let resolvedConvId = convId
+  if (!resolvedConvId) {
+    const { data, error } = await supabase
+      .from('conversations')
+      .upsert({ lead_id: LEAD_ID, linkedin_account_id: accountId }, { onConflict: 'lead_id' })
+      .select('id').single()
+    if (error || !data?.id) {
+      console.error('[REPLY] No se pudo resolver/crear conversación:', error?.message)
+      return
+    }
+    resolvedConvId = data.id
+  }
 
   await supabase.from('conversation_events').insert({
     conversation_id: resolvedConvId,

@@ -141,6 +141,14 @@ function parseSearchOutput(lines) {
   return { saved: savedMatch ? parseInt(savedMatch[1]) : 0 };
 }
 
+// ── Cookie staleness guard ────────────────────────────────────────────────────
+// Retorna true si la cookie tiene >60 días y no se debe ejecutar ningún script browser
+function isCookieExpiredCritical(account) {
+  if (!account.li_at_cookie_updated_at) return false; // sin fecha → permitir (alerta separada)
+  const daysSince = (Date.now() - new Date(account.li_at_cookie_updated_at).getTime()) / (1000 * 60 * 60 * 24);
+  return daysSince >= 60;
+}
+
 // ── Inbox job ─────────────────────────────────────────────────────────────────
 
 // Corre inbox.js para una cuenta si pasó el cooldown mínimo
@@ -151,6 +159,11 @@ async function runInboxJob(account) {
   if (minutesSinceCheck < minInboxGapMin) {
     const remaining = Math.round(minInboxGapMin - minutesSinceCheck);
     console.log(`[SCHEDULER] 📬 Inbox "${account.label}" — cooldown activo (faltan ~${remaining} min).`);
+    return;
+  }
+
+  if (isCookieExpiredCritical(account)) {
+    console.error(`[SCHEDULER] 🚫 Cookie de "${account.label}" tiene >60 días — saltando inbox para evitar auth wall.`);
     return;
   }
 
@@ -216,9 +229,10 @@ async function tick() {
     .select(`
       id, name, batch_paused, search_paused, follow_up_paused, min_pending_threshold, daily_invite_target,
       min_batch_gap_min, search_gap_hours, schedule_start_hour, schedule_end_hour,
-      last_searched_at, last_batch_at, last_followup_at, last_followup2_at,
+      last_searched_at, last_batch_at, last_followup_at, last_followup2_at, last_followup3_at,
       follow_up_message, follow_up_delay_days,
       follow_up_step2_message, follow_up_step2_delay_days,
+      follow_up_step3_message, follow_up_step3_delay_days,
       auto_dead_after_days,
       search_keywords, search_location, search_count,
       linkedin_account_id,
@@ -316,6 +330,14 @@ async function tick() {
       await sleep(randInt(5000, 15000)); // pausa natural antes del inbox
       await runInboxJob(account);
     }
+
+    // ── Auto-reply: enviar drafts programados por Gemini ─────────────────────
+    for (const account of accountsSeen.values()) {
+      if (account.status !== 'active') continue;
+      await runAutoReplyJob(account).catch(e =>
+        console.error(`[SCHEDULER] runAutoReplyJob error para "${account.label}":`, e.message)
+      );
+    }
   }
 
   console.log(`[SCHEDULER] Tick completado.`);
@@ -330,6 +352,13 @@ async function processCampaign(campaign) {
   const accountId = account?.id;
 
   console.log(`\n[SCHEDULER] Campaña: "${cname}"`);
+
+  // Guard: cookie expirada (>60 días) — no correr scripts browser
+  if (account && isCookieExpiredCritical(account)) {
+    console.error(`[SCHEDULER] 🚫 Cookie de "${account.label}" tiene >60 días — saltando campaña "${cname}" para evitar auth wall.`);
+    await logJob({ campaignId: cid, accountId, jobType: 'tick', status: 'skipped', skipReason: 'cookie_expired_critical' });
+    return;
+  }
 
   // Guard: otra campaña del mismo account ya está en proceso este tick
   if (accountId && accountLocks.has(accountId)) {
@@ -441,6 +470,17 @@ async function processCampaign(campaign) {
       }
     }
 
+    // ── FOLLOW-UP step 3: mensaje de cierre — gap conservador 24h ────────────────
+    if (campaign.follow_up_step3_message && !campaign.follow_up_paused) {
+      const followup3GapOk = minutesSince(campaign.last_followup3_at) >= 24 * 60; // 24h gap
+      if (followup3GapOk) {
+        await runFollowupJob(campaign, account, 3);
+      } else {
+        const remaining = Math.round(24 * 60 - minutesSince(campaign.last_followup3_at));
+        console.log(`[SCHEDULER] ⏳ Follow-up step 3 gap activo — faltan ~${remaining} min.`);
+      }
+    }
+
     // ── GHOST: marcar como muertos los leads que no respondieron tras FU2 ────────
     await runGhostJob(campaign);
 
@@ -467,7 +507,28 @@ async function runGhostJob(campaign) {
 
   let ghosted = 0;
 
-  // ── Case 1: follow_up_sent_2 + no reply after deadDays ─────────────────────
+  // ── Case 1a: follow_up_sent_3 + no reply after deadDays ────────────────────
+  if (campaign.follow_up_step3_message) {
+    const { data: fu3Leads } = await supabase
+      .from('leads')
+      .select('id, full_name')
+      .eq('campaign_id', cid)
+      .eq('status', 'follow_up_sent_3')
+      .lte('last_followup3_at', daysAgo(deadDays));
+
+    if (fu3Leads?.length) {
+      const ids = fu3Leads.map(l => l.id);
+      await supabase.from('leads').update({
+        status:      'dead',
+        dead_reason: `ghosted_after_fu3 — sin respuesta ${deadDays}d tras último follow-up`,
+      }).in('id', ids);
+      ghosted += ids.length;
+      console.log(`[SCHEDULER] 💀 Ghost job: ${ids.length} leads → dead (FU3 sin respuesta en ${deadDays}d) — "${campaign.name}"`);
+    }
+  }
+
+  // ── Case 1b: follow_up_sent_2 + no reply after deadDays (sin FU3 configurado) ─
+  if (!campaign.follow_up_step3_message) {
   const { data: fu2Leads } = await supabase
     .from('leads')
     .select('id, full_name')
@@ -483,6 +544,7 @@ async function runGhostJob(campaign) {
     }).in('id', ids);
     ghosted += ids.length;
     console.log(`[SCHEDULER] 💀 Ghost job: ${ids.length} leads → dead (FU2 sin respuesta en ${deadDays}d) — "${campaign.name}"`);
+  }
   }
 
   // ── Case 2: follow_up_sent (sin FU2 configurado) + no reply after deadDays+7 ─
@@ -527,6 +589,64 @@ async function runGhostJob(campaign) {
 
   if (ghosted === 0) {
     console.log(`[SCHEDULER] 👻 Ghost job: sin leads para marcar como muertos — "${campaign.name}"`);
+  }
+}
+
+// ── Auto-reply job — envía drafts de Gemini programados ──────────────────────
+// Scope: por cuenta (no por campaña). Corre en cada tick de inbox.
+// Busca conversaciones con ai_reply_scheduled_at vencido y las envía via reply.js.
+
+async function runAutoReplyJob(account) {
+  const { data: dueDrafts, error } = await supabase
+    .from('conversations')
+    .select('id, lead_id, ai_reply_draft, conversation_turn')
+    .eq('linkedin_account_id', account.id)
+    .not('ai_reply_scheduled_at', 'is', null)
+    .lte('ai_reply_scheduled_at', new Date().toISOString())
+    .not('ai_reply_draft', 'is', null)
+    .limit(3); // máx 3 auto-replies por tick (anti-ban)
+
+  if (error) {
+    console.error(`[SCHEDULER] runAutoReplyJob query error:`, error.message);
+    return;
+  }
+
+  if (!dueDrafts?.length) return;
+
+  console.log(`[SCHEDULER] 🤖 Auto-reply: ${dueDrafts.length} draft(s) listos para "${account.label}"`);
+
+  for (const conv of dueDrafts) {
+    // Limpiar scheduling ANTES de enviar (evita doble envío si el tick se solapa)
+    await supabase.from('conversations')
+      .update({ ai_reply_scheduled_at: null })
+      .eq('id', conv.id);
+
+    const { code } = await runScript('reply.js', {
+      LEAD_ID:       conv.lead_id,
+      REPLY_MESSAGE: conv.ai_reply_draft,
+      DRY_RUN:       'false',
+      LIVE_SEND:     'true',
+      PROXY_URL:     account.proxy_url ?? '',
+    });
+
+    if (code === 0) {
+      const nextTurn = (conv.conversation_turn ?? 0) + 1;
+      await supabase.from('conversations').update({
+        ai_reply_draft:        null,
+        ai_draft_generated_at: null,
+        conversation_turn:     nextTurn,
+      }).eq('id', conv.id);
+      console.log(`[SCHEDULER] 🤖 Auto-reply enviado → turno ${nextTurn} (conv ${conv.id})`);
+    } else {
+      // Fallo en el envío — restaurar scheduled_at para reintentar en el siguiente tick
+      const retryAt = new Date(Date.now() + 15 * 60_000).toISOString(); // +15 min
+      await supabase.from('conversations')
+        .update({ ai_reply_scheduled_at: retryAt })
+        .eq('id', conv.id);
+      console.warn(`[SCHEDULER] ⚠️  Auto-reply falló (code=${code}) para conv ${conv.id} — reintento en 15 min`);
+    }
+
+    await sleep(randInt(3000, 8000)); // pequeña pausa entre envíos
   }
 }
 
@@ -691,11 +811,11 @@ async function runBatchJob(campaign, account) {
 // ── Follow-up job ─────────────────────────────────────────────────────────────
 
 async function runFollowupJob(campaign, account, step = 1) {
-  const jobType = step === 2 ? 'followup_2' : 'followup';
-  console.log(`[SCHEDULER] 💬 Iniciando follow-up step ${step} para "${campaign.name}"...`);
+  const jobType = step === 3 ? 'followup_3' : step === 2 ? 'followup_2' : 'followup';
+  console.log(`[SCHEDULER] 💬 Iniciando follow-up step ${step}/3 para "${campaign.name}"...`);
 
   // Actualizar timestamp del step correspondiente
-  const tsField = step === 2 ? 'last_followup2_at' : 'last_followup_at';
+  const tsField = step === 3 ? 'last_followup3_at' : step === 2 ? 'last_followup2_at' : 'last_followup_at';
   await supabase.from('campaigns').update({ [tsField]: new Date().toISOString() }).eq('id', campaign.id);
 
   await logJob({ campaignId: campaign.id, accountId: account.id, jobType, status: 'started' });

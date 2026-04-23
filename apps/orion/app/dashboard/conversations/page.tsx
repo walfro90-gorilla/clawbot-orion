@@ -4,6 +4,7 @@ import { getSessionUser } from "@/lib/auth/role"
 import { RefreshInboxBtn } from "@/components/refresh-inbox-btn"
 import { ReplyBtn } from "@/components/reply-btn"
 import { ApproveDraftBtn } from "@/components/approve-draft-btn"
+import { CountdownTimer } from "@/components/countdown-timer"
 import Link from "next/link"
 
 export default async function ConversationsPage() {
@@ -36,6 +37,8 @@ export default async function ConversationsPage() {
       last_message_at,
       inbox_checked_at,
       ai_reply_draft,
+      ai_reply_scheduled_at,
+      conversation_turn,
       leads (
         id, full_name, linkedin_url, status,
         campaigns ( name )
@@ -145,11 +148,16 @@ export default async function ConversationsPage() {
                         ) : (
                           <span className="text-gray-600">—</span>
                         )}
-                        {c.ai_reply_draft && (
+                        {(c.ai_reply_draft || c.ai_reply_scheduled_at) && (
                           <div className="mt-1">
                             <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-yellow-500/10 border border-yellow-500/20 text-yellow-400 font-medium">
-                              ✨ Draft IA listo
+                              {c.ai_reply_scheduled_at ? "🤖 Envío programado" : "✨ Draft IA listo"}
                             </span>
+                            {c.conversation_turn > 0 && (
+                              <span className="ml-1.5 inline-flex items-center text-[10px] px-1.5 py-0.5 rounded bg-gray-700 text-gray-400">
+                                Turno {c.conversation_turn}
+                              </span>
+                            )}
                           </div>
                         )}
                       </td>
@@ -167,7 +175,14 @@ export default async function ConversationsPage() {
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex flex-col gap-1.5">
-                          {c.ai_reply_draft ? (
+                          {c.ai_reply_scheduled_at ? (
+                            <CountdownTimer
+                              scheduledAt={c.ai_reply_scheduled_at}
+                              leadId={c.lead_id}
+                              draft={c.ai_reply_draft ?? ""}
+                              leadName={lead?.full_name ?? "Lead"}
+                            />
+                          ) : c.ai_reply_draft ? (
                             <ApproveDraftBtn
                               leadId={c.lead_id}
                               leadName={lead?.full_name ?? "Lead"}

@@ -29,10 +29,12 @@ chromium.use(StealthPlugin())
 const CAMPAIGN_ID    = process.env.CAMPAIGN_ID
 const DRY_RUN        = process.env.DRY_RUN !== 'false'
 const LIVE_SEND      = process.env.LIVE_SEND === 'true'
-const FOLLOW_UP_STEP = parseInt(process.env.FOLLOW_UP_STEP ?? '1') // 1 or 2
+const FOLLOW_UP_STEP = parseInt(process.env.FOLLOW_UP_STEP ?? '1') // 1, 2, or 3
 
 const MAX_FOLLOWUPS_PER_RUN = 4   // máx follow-ups por ejecución (anti-ban)
-const MAX_FOLLOWUPS_PER_DAY = 8   // cap diario por cuenta (suma de todas las ejecuciones del día)
+// Cap diario GLOBAL — cuenta todos los tipos de follow-up juntos para no saturar la cuenta.
+// Antes era por tipo (8 step1 + 8 step2 + 8 step3 = 24/día), ahora es total compartido.
+const MAX_FOLLOWUPS_PER_DAY = 5   // máx mensajes de follow-up en total por día por cuenta
 const DELAY_MIN_MS          = DRY_RUN ? 3_000  : 45 * 1000
 const DELAY_MAX_MS          = DRY_RUN ? 6_000  : 120 * 1000
 
@@ -75,6 +77,7 @@ async function loadCampaign() {
     .select(`
       id, name, follow_up_message, follow_up_delay_days, follow_up_paused,
       follow_up_step2_message, follow_up_step2_delay_days,
+      follow_up_step3_message, follow_up_step3_delay_days,
       linkedin_account_id,
       linkedin_accounts (
         id, label, li_at_cookie, proxy_url, status
@@ -94,6 +97,9 @@ async function loadCampaign() {
   if (FOLLOW_UP_STEP === 2 && !data.follow_up_step2_message) {
     throw new Error('No follow_up_step2_message set — skipping step 2.')
   }
+  if (FOLLOW_UP_STEP === 3 && !data.follow_up_step3_message) {
+    throw new Error('No follow_up_step3_message set — skipping step 3.')
+  }
 
   return data
 }
@@ -101,10 +107,12 @@ async function loadCampaign() {
 // ── Load leads eligible for follow-up ────────────────────────────────────────
 async function loadFollowupLeads(campaign) {
   const isStep2 = FOLLOW_UP_STEP === 2
+  const isStep3 = FOLLOW_UP_STEP === 3
 
-  // Step 1: leads that are 'connected' and sent_at > delayDays ago
-  // Step 2: leads that are 'follow_up_sent' and sent_at > step2_delay_days ago, last_followup2_at is null
-  const delayDays = isStep2
+  // Delay days per step
+  const delayDays = isStep3
+    ? (campaign.follow_up_step3_delay_days ?? 21)
+    : isStep2
     ? (campaign.follow_up_step2_delay_days ?? 12)
     : (campaign.follow_up_delay_days ?? 3)
   const cutoff    = new Date(Date.now() - delayDays * 24 * 60 * 60 * 1000).toISOString()
@@ -113,13 +121,16 @@ async function loadFollowupLeads(campaign) {
 
   let query = supabase
     .from('leads')
-    .select('id, full_name, linkedin_url, sent_at, status, last_followup2_at')
+    .select('id, full_name, linkedin_url, sent_at, status, last_followup2_at, last_followup3_at')
     .eq('campaign_id', CAMPAIGN_ID)
     .lte('sent_at', cutoff)
     .order('sent_at', { ascending: true })
     .limit(20)
 
-  if (isStep2) {
+  if (isStep3) {
+    // Step 3: leads that received step 2 but haven't received step 3 yet
+    query = query.eq('status', 'follow_up_sent_2').is('last_followup3_at', null)
+  } else if (isStep2) {
     // Step 2: leads in 'follow_up_sent' status that haven't received step 2 yet
     query = query.eq('status', 'follow_up_sent').is('last_followup2_at', null)
   } else {
@@ -134,7 +145,7 @@ async function loadFollowupLeads(campaign) {
   // For step 1: filter out leads that already have a follow_up_sent event
   let alreadySentLeadIds = new Set()
 
-  if (!isStep2) {
+  if (!isStep2 && !isStep3) {
     const leadIds = leads.map(l => l.id)
     const { data: convs } = await supabase
       .from('conversations')
@@ -157,21 +168,21 @@ async function loadFollowupLeads(campaign) {
     }
   }
 
-  // Daily cap check (applies to both steps)
+  // ── Global daily cap: count ALL follow-up types together (anti-ban safety)
+  // This prevents steps 1+2+3 from collectively sending too many messages in one day.
   const todayStart = new Date()
   todayStart.setHours(0, 0, 0, 0)
-  const eventType = isStep2 ? 'follow_up_sent_2' : 'follow_up_sent'
 
   const { count: sentToday } = await supabase
     .from('conversation_events')
     .select('id', { count: 'exact', head: true })
-    .eq('event_type', eventType)
+    .in('event_type', ['follow_up_sent', 'follow_up_sent_2', 'follow_up_sent_3'])
     .eq('direction', 'outbound')
     .gte('sent_at', todayStart.toISOString())
 
   const remainingToday = Math.max(0, MAX_FOLLOWUPS_PER_DAY - (sentToday ?? 0))
   if (remainingToday === 0) {
-    console.log(`[FOLLOWUP] Daily cap reached (${MAX_FOLLOWUPS_PER_DAY}/day) — skipping.`)
+    console.log(`[FOLLOWUP] Global daily cap reached (${MAX_FOLLOWUPS_PER_DAY}/day total) — skipping.`)
     return []
   }
 
@@ -179,7 +190,7 @@ async function loadFollowupLeads(campaign) {
     .filter(l => !alreadySentLeadIds.has(l.id))
     .slice(0, Math.min(MAX_FOLLOWUPS_PER_RUN, remainingToday))
 
-  console.log(`[FOLLOWUP] Eligible: ${eligible.length} leads (cap: ${sentToday ?? 0}/${MAX_FOLLOWUPS_PER_DAY} today, skip ${alreadySentLeadIds.size} already sent)`)
+  console.log(`[FOLLOWUP] Eligible: ${eligible.length} leads (global cap: ${sentToday ?? 0}/${MAX_FOLLOWUPS_PER_DAY} today, skip ${alreadySentLeadIds.size} already sent)`)
   return eligible
 }
 
@@ -187,7 +198,8 @@ async function loadFollowupLeads(campaign) {
 async function recordFollowUp(lead, message) {
   const accountId = process.env.ACCOUNT_ID_RESOLVED
   const isStep2   = FOLLOW_UP_STEP === 2
-  const eventType = isStep2 ? 'follow_up_sent_2' : 'follow_up_sent'
+  const isStep3   = FOLLOW_UP_STEP === 3
+  const eventType = isStep3 ? 'follow_up_sent_3' : isStep2 ? 'follow_up_sent_2' : 'follow_up_sent'
   const now       = new Date().toISOString()
 
   // Upsert conversation
@@ -213,14 +225,17 @@ async function recordFollowUp(lead, message) {
     sent_at:         now,
   })
 
-  // For step 2: update lead status and last_followup2_at
-  if (isStep2) {
+  if (isStep3) {
+    await supabase.from('leads').update({
+      status:            'follow_up_sent_3',
+      last_followup3_at: now,
+    }).eq('id', lead.id)
+  } else if (isStep2) {
     await supabase.from('leads').update({
       status:            'follow_up_sent_2',
       last_followup2_at: now,
     }).eq('id', lead.id)
   } else {
-    // Step 1: update lead status to follow_up_sent
     await supabase.from('leads').update({ status: 'follow_up_sent' }).eq('id', lead.id)
   }
 
@@ -351,7 +366,7 @@ async function run() {
     process.exit(1)
   }
 
-  console.log(`[FOLLOWUP] Starting follow-up job for campaign ${CAMPAIGN_ID} (step ${FOLLOW_UP_STEP})`)
+  console.log(`[FOLLOWUP] Starting follow-up job for campaign ${CAMPAIGN_ID} (step ${FOLLOW_UP_STEP}/3)`)
   console.log(`[FOLLOWUP] DRY_RUN=${DRY_RUN} | LIVE_SEND=${LIVE_SEND}`)
 
   const campaign = await loadCampaign()
@@ -364,7 +379,9 @@ async function run() {
   process.env.ACCOUNT_ID_RESOLVED = account.id
 
   // Select message based on step
-  const followUpMessage = FOLLOW_UP_STEP === 2
+  const followUpMessage = FOLLOW_UP_STEP === 3
+    ? campaign.follow_up_step3_message
+    : FOLLOW_UP_STEP === 2
     ? campaign.follow_up_step2_message
     : campaign.follow_up_message
 
@@ -395,6 +412,10 @@ async function run() {
   const vpHeight  = randInt(860, 920)
 
   const PROXY_URL = process.env.PROXY_URL || account.proxy_url || null
+  if (!PROXY_URL) {
+    console.error('[FOLLOWUP] ❌ PROXY_URL no configurado — abortando para evitar ban de IP de datacenter.')
+    process.exit(1)
+  }
   const proxy     = parseProxy(PROXY_URL)
 
   const launchArgs = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled']
@@ -435,8 +456,12 @@ async function run() {
     for (const lead of leads) {
       console.log(`\n[FOLLOWUP] ─── ${lead.full_name} (${sentCount + 1}/${leads.length}) ───`)
 
+      // Personalize message: replace [Nombre] with lead's first name
+      const firstName = lead.full_name?.split(' ')[0] ?? 'estimado/a'
+      const personalizedMessage = followUpMessage.replace(/\[Nombre\]/gi, firstName)
+
       try {
-        const outcome = await sendFollowUp(page, lead, followUpMessage)
+        const outcome = await sendFollowUp(page, lead, personalizedMessage)
 
         if (outcome === 'captcha') {
           console.error('[FOLLOWUP] ⛔ Captcha — stopping.')
@@ -447,7 +472,7 @@ async function run() {
 
         if (outcome === 'sent') {
           if (LIVE_SEND) {
-            await recordFollowUp(lead, followUpMessage)
+            await recordFollowUp(lead, personalizedMessage)
             await logActivity(account.id, 'message_sent', { lead_id: lead.id, campaign_id: CAMPAIGN_ID, type: 'follow_up' })
             await incrementDaily(account.id, 'messages_sent')
           }

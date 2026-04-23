@@ -43,14 +43,25 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // Clear ai_reply_draft so the badge disappears after approval
+  // Read current conversation_turn before clearing draft
+  const { data: conv } = await admin
+    .from("conversations")
+    .select("conversation_turn")
+    .eq("lead_id", leadId)
+    .maybeSingle()
+
+  // Clear draft + increment turn counter + cancel any pending scheduled send
   await admin
     .from("conversations")
-    .update({ ai_reply_draft: null, ai_draft_generated_at: null })
+    .update({
+      ai_reply_draft:        null,
+      ai_draft_generated_at: null,
+      ai_reply_scheduled_at: null,
+      conversation_turn:     ((conv?.conversation_turn ?? 0) + 1),
+    })
     .eq("lead_id", leadId)
 
-  // Trigger reply.js (same as manual reply) — fire-and-forget background process
-  const cmd = `nohup node reply.js >> /tmp/manual-run-reply.log 2>&1 &`
+  // Trigger reply.js — background process with 2-min timeout
   const env = {
     ...process.env,
     LEAD_ID:       leadId,
@@ -59,7 +70,15 @@ export async function POST(req: NextRequest) {
     LIVE_SEND:     "true",
   }
 
-  exec(cmd, { cwd: PROMETHEUS_DIR, env })
+  const cmd = `node ${PROMETHEUS_DIR}/reply.js`
+  exec(cmd, { env, timeout: 120_000 }, (err, _stdout, stderr) => {
+    if (err) {
+      const reason = err.killed ? "timeout (120s)" : `exit code ${err.code}`
+      console.error(`[approve-draft] reply.js failed (${reason}) for lead=${leadId}:`, stderr?.slice(0, 500))
+    } else {
+      console.log(`[approve-draft] reply.js completed for lead=${leadId}`)
+    }
+  })
 
   console.log(`[approve-draft] Draft approved and reply triggered for lead=${leadId} by ${user.email}`)
   return NextResponse.json({ ok: true, estimatedSeconds: 90 })

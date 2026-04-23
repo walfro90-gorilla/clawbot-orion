@@ -215,29 +215,40 @@ async function markReplied(lead, messageText, threadId) {
 // conversations.ai_reply_draft para aprobación humana en Orion.
 async function generateDraftAsync(lead, inboundMessageText) {
   try {
-    // Obtener historial de mensajes salientes para dar contexto a Gemini
+    // 1. Conversación existente — turno actual + id
     const { data: conv } = await supabase
       .from('conversations')
-      .select('id')
+      .select('id, conversation_turn')
       .eq('lead_id', lead.id)
       .maybeSingle()
 
-    let outboundHistory = []
+    // 2. Historial COMPLETO (inbound + outbound) para contexto multi-turn
+    let conversationHistory = []
     if (conv?.id) {
       const { data: events } = await supabase
         .from('conversation_events')
-        .select('content, direction')
+        .select('direction, content, sent_at, event_type')
         .eq('conversation_id', conv.id)
-        .eq('direction', 'outbound')
+        .in('event_type', [
+          'reply_received', 'reply_sent', 'message_sent',
+          'follow_up_sent', 'follow_up_sent_2', 'follow_up_sent_3',
+        ])
         .order('sent_at', { ascending: true })
-      outboundHistory = (events ?? []).map(e => e.content).filter(Boolean)
+      conversationHistory = events ?? []
     }
 
-    // Obtener cal_com_url de la cuenta LinkedIn (vía campaña)
+    // 3. Perfil completo del lead (profile_data JSONB)
+    const { data: fullLead } = await supabase
+      .from('leads')
+      .select('profile_data, campaign_id')
+      .eq('id', lead.id)
+      .single()
+
+    // 4. Config auto-reply + Cal.com URL (vía campaña → cuenta)
     const { data: campaign } = await supabase
       .from('campaigns')
-      .select('linkedin_account_id')
-      .eq('id', lead.campaign_id)
+      .select('auto_reply_mode, auto_reply_delay_min, auto_reply_delay_max, linkedin_account_id')
+      .eq('id', fullLead?.campaign_id ?? lead.campaign_id)
       .single()
 
     let calUrl = null
@@ -250,25 +261,39 @@ async function generateDraftAsync(lead, inboundMessageText) {
       calUrl = acct?.cal_com_url ?? null
     }
 
+    // 5. Generar draft con contexto completo y estrategia por turno
+    const turnCount = conv?.conversation_turn ?? 0
     const draft = await generateReplyDraft({
-      leadName:        lead.full_name,
-      outboundHistory,
-      inboundMessage:  inboundMessageText,
+      leadName:           lead.full_name,
+      leadProfileData:    fullLead?.profile_data ?? {},
+      conversationHistory,
+      inboundMessage:     inboundMessageText,
       calUrl,
+      turnCount,
     })
 
     if (!draft) return
 
-    // Guardar borrador en la conversation
+    // 6. Programar envío automático si mode != 'manual'
+    const mode     = campaign?.auto_reply_mode ?? 'manual'
+    const delayMin = campaign?.auto_reply_delay_min ?? 45
+    const delayMax = campaign?.auto_reply_delay_max ?? 90
+    const delayMs  = (Math.floor(Math.random() * (delayMax - delayMin + 1)) + delayMin) * 60_000
+    const scheduledAt = mode !== 'manual' ? new Date(Date.now() + delayMs).toISOString() : null
+
     await supabase
       .from('conversations')
       .update({
         ai_reply_draft:        draft,
         ai_draft_generated_at: new Date().toISOString(),
+        ...(scheduledAt ? { ai_reply_scheduled_at: scheduledAt } : {}),
       })
       .eq('lead_id', lead.id)
 
-    console.log(`[INBOX] 🤖 AI draft generado para "${lead.full_name}" (${draft.length} chars)`)
+    const modeLabel = scheduledAt
+      ? `modo=${mode}, envío programado en ~${delayMin}-${delayMax} min`
+      : 'modo=manual, esperando aprobación'
+    console.log(`[INBOX] 🤖 Draft turno ${turnCount} para "${lead.full_name}" (${draft.length} chars) — ${modeLabel}`)
   } catch (err) {
     console.warn(`[INBOX] AI draft failed for "${lead.full_name}":`, err.message)
   }
@@ -340,7 +365,7 @@ async function checkNotifications(page, leadMap, stats) {
       stats.replied++
       leadMap.set(profileUrl, { ...lead, status: 'replied' })
       // Fire-and-forget: generate AI reply draft
-      generateDraftAsync(lead, previewText).catch(() => {})
+      generateDraftAsync(lead, previewText).catch(e => console.error(`[inbox] generateDraftAsync error para ${lead.full_name}:`, e.message))
     } else if (lead.status === 'invite_sent') {
       await markConnected(lead)
       leadMap.set(profileUrl, { ...lead, status: 'connected' })
@@ -676,8 +701,11 @@ async function run() {
   ]
 
   const proxy = parseProxy(account.proxy_url)
-  if (proxy) console.log(`[INBOX] Using proxy: ${proxy.server} (user=${proxy.username ?? 'none'})`)
-  else       console.log('[INBOX] ⚠️  No proxy — ban risk alto en IPs de datacenter')
+  if (!proxy) {
+    console.error('[INBOX] ❌ No proxy configurado para esta cuenta — abortando para evitar ban de IP de datacenter.');
+    process.exit(1);
+  }
+  console.log(`[INBOX] Using proxy: ${proxy.server} (user=${proxy.username ?? 'none'})`)
 
   const launchArgs = [
     '--no-sandbox',

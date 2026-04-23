@@ -1,26 +1,67 @@
 @import "tailwindcss";
 
+/* ── Class-based dark mode ─────────────────────────────────────────────────── */
+@variant dark (&:where(.dark, .dark *));
+
+/* ── Theme tokens ──────────────────────────────────────────────────────────── */
+/* Light = LinkedIn-inspired (DEFAULT — no .dark class needed)                  */
+/* Dark  = current theme (requires .dark class on <html>)                       */
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* Backgrounds */
+  --th-950: #F3F2EE;   /* page bg      — LinkedIn warm off-white */
+  --th-900: #FFFFFF;   /* card/sidebar — white                   */
+  --th-800: #EAE8E4;   /* hover/surface                          */
+  --th-700: #D4D2CF;   /* border strong                          */
+  --th-600: #B8B6B3;   /* border subtle                          */
+
+  /* Text — gray tokens flip to dark values in light mode */
+  --th-50:  #191919;   /* was near-white; now near-black */
+  --th-100: #2D2D2D;
+  --th-200: #3D3D3D;
+  --th-300: #555555;
+  --th-400: #666666;   /* secondary text */
+  --th-500: #888888;   /* muted text     */
 }
 
+.dark {
+  /* Backgrounds */
+  --th-950: #030712;
+  --th-900: #111827;
+  --th-800: #1f2937;
+  --th-700: #374151;
+  --th-600: #4b5563;
+
+  /* Text */
+  --th-50:  #f9fafb;
+  --th-100: #f3f4f6;
+  --th-200: #e5e7eb;
+  --th-300: #d1d5db;
+  --th-400: #9ca3af;
+  --th-500: #6b7280;
+}
+
+/* ── Register in Tailwind — bg/border/text-gray-* auto-switch between themes ─ */
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+  --color-gray-50:  var(--th-50);
+  --color-gray-100: var(--th-100);
+  --color-gray-200: var(--th-200);
+  --color-gray-300: var(--th-300);
+  --color-gray-400: var(--th-400);
+  --color-gray-500: var(--th-500);
+  --color-gray-600: var(--th-600);
+  --color-gray-700: var(--th-700);
+  --color-gray-800: var(--th-800);
+  --color-gray-900: var(--th-900);
+  --color-gray-950: var(--th-950);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
+/* ── Body base ─────────────────────────────────────────────────────────────── */
 body {
-  background: var(--background);
-  color: var(--foreground);
+  background: var(--th-950);
+  color: var(--th-50);
   font-family: Arial, Helvetica, sans-serif;
+  transition: background-color 0.15s ease, color 0.15s ease;
 }
