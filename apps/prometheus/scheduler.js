@@ -607,7 +607,7 @@ async function runGhostJob(campaign) {
 async function runAutoReplyJob(account) {
   const { data: dueDrafts, error } = await supabase
     .from('conversations')
-    .select('id, lead_id, ai_reply_draft, conversation_turn, ai_draft_generated_at')
+    .select('id, lead_id, ai_reply_draft, conversation_turn')
     .eq('linkedin_account_id', account.id)
     .not('ai_reply_scheduled_at', 'is', null)
     .lte('ai_reply_scheduled_at', new Date().toISOString())
@@ -629,27 +629,6 @@ async function runAutoReplyJob(account) {
       console.warn(`[SCHEDULER] ⚠️  Draft vacío/nulo para conv ${conv.id} — cancelando scheduled_at.`);
       await supabase.from('conversations').update({ ai_reply_scheduled_at: null }).eq('id', conv.id);
       continue;
-    }
-
-    // Guard: mensajes nuevos después del draft (lead mandó más mensajes mientras esperaba)
-    // Si hay eventos inbound DESPUÉS de ai_draft_generated_at → posponer para que inbox regenere
-    if (conv.ai_draft_generated_at) {
-      const { count: newMsgCount } = await supabase
-        .from('conversation_events')
-        .select('id', { count: 'exact', head: true })
-        .eq('conversation_id', conv.id)
-        .eq('direction', 'inbound')
-        .gt('sent_at', conv.ai_draft_generated_at);
-
-      if ((newMsgCount ?? 0) > 0) {
-        // Hay mensajes nuevos — posponer 3 min para que el inbox los capture y regenere el draft
-        const retry = new Date(Date.now() + 3 * 60_000).toISOString();
-        await supabase.from('conversations')
-          .update({ ai_reply_scheduled_at: retry })
-          .eq('id', conv.id);
-        console.log(`[SCHEDULER] ⏳ Mensajes nuevos después del draft en conv ${conv.id} — reintentando en 3 min`);
-        continue;
-      }
     }
 
     // Limpiar scheduling ANTES de enviar (evita doble envío si el tick se solapa)
