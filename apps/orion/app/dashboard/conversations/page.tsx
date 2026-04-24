@@ -55,6 +55,28 @@ export default async function ConversationsPage() {
 
   const list = convos ?? []
 
+  // Detect conversation signals from last message text
+  function detectSignal(lastMsg: string | null, draft: string | null): {
+    icon: string; label: string; cls: string
+  } | null {
+    const msg  = (lastMsg ?? "").toLowerCase()
+    const drft = (draft ?? "").toLowerCase()
+
+    if (lastMsg?.startsWith("[Sin texto"))
+      return { icon: "👁️", label: "Revisar manualmente", cls: "bg-orange-500/10 border-orange-500/30 text-orange-400" }
+    if (/ya no (trabajo|laburo|estoy|soy)|dejé de trabajar|ya no (pertenec|form)/i.test(msg))
+      return { icon: "🏢", label: "Ya no trabaja ahí", cls: "bg-red-500/10 border-red-500/30 text-red-400" }
+    if (/no soy (el|la|quien|la persona)|no es conmigo|no aplica para mí|otro contacto|te recomiendo acercarte/i.test(msg))
+      return { icon: "🔀", label: "Persona incorrecta", cls: "bg-red-500/10 border-red-500/30 text-red-400" }
+    if (/no (me interesa|tengo interés|estoy interesado|aplica)|no gracias|paso por ahora/i.test(msg))
+      return { icon: "❌", label: "No interesado", cls: "bg-gray-500/10 border-gray-500/30 text-gray-400" }
+    if (/notificaci|antes de tiempo|mensaje (técnico|del sistema)/i.test(drft))
+      return { icon: "🚨", label: "Draft sospechoso", cls: "bg-red-500/10 border-red-500/30 text-red-400" }
+    if (/interesa|cuéntame|cómo funciona|cuánto cuesta|me gustaría|cuándo|disponib/i.test(msg))
+      return { icon: "🔥", label: "Interés detectado", cls: "bg-green-500/10 border-green-500/30 text-green-400" }
+    return null
+  }
+
   const statusColors: Record<string, string> = {
     active:        "bg-green-500/15 text-green-400 border-green-500/30",
     initiated:     "bg-blue-500/15 text-blue-400 border-blue-500/30",
@@ -148,18 +170,29 @@ export default async function ConversationsPage() {
                         ) : (
                           <span className="text-gray-600">—</span>
                         )}
-                        {(c.ai_reply_draft || c.ai_reply_scheduled_at) && (
-                          <div className="mt-1">
+                        <div className="mt-1.5 flex flex-wrap gap-1">
+                          {/* Conversation signal */}
+                          {(() => {
+                            const sig = detectSignal(c.last_message_text, c.ai_reply_draft)
+                            return sig ? (
+                              <span className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full border font-medium ${sig.cls}`}>
+                                {sig.icon} {sig.label}
+                              </span>
+                            ) : null
+                          })()}
+                          {/* Draft / schedule status */}
+                          {(c.ai_reply_draft || c.ai_reply_scheduled_at) && (
                             <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-yellow-500/10 border border-yellow-500/20 text-yellow-400 font-medium">
                               {c.ai_reply_scheduled_at ? "🤖 Envío programado" : "✨ Draft IA listo"}
                             </span>
-                            {c.conversation_turn > 0 && (
-                              <span className="ml-1.5 inline-flex items-center text-[10px] px-1.5 py-0.5 rounded bg-gray-700 text-gray-400">
-                                Turno {c.conversation_turn}
-                              </span>
-                            )}
-                          </div>
-                        )}
+                          )}
+                          {/* Turn badge */}
+                          {c.conversation_turn > 0 && (
+                            <span className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded bg-gray-700 text-gray-400">
+                              Turno {c.conversation_turn}
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="px-4 py-3 text-gray-400 text-xs whitespace-nowrap">
                         {c.last_message_at

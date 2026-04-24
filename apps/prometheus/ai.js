@@ -136,8 +136,6 @@ P: ¿Cómo me genera ventas? → ORION no cierra ventas, abre puertas. Tu equipo
 `.trim();
 
 // ── Generate AI reply draft using Gemini — multi-turn conversation engine ──────
-// Called fire-and-forget from inbox.js when a lead replies.
-// The draft is stored in conversations.ai_reply_draft for human approval or auto-send.
 export async function generateReplyDraft({
   leadName,
   leadProfileData = {},
@@ -151,82 +149,106 @@ export async function generateReplyDraft({
 
   const ai = new GoogleGenAI({ apiKey });
 
-  // Extract key fields from profile_data JSONB
+  // Profile data — scraped at connection time, may be outdated
   const profile = leadProfileData ?? {};
-  const profileSnippet = JSON.stringify({
-    headline:        profile.headline        ?? null,
-    company:         profile.headlineCompany ?? profile.company ?? null,
-    currentPosition: profile.currentPosition ?? null,
-    about:           profile.about           ?? null,
-    location:        profile.location        ?? null,
-  }, null, 2);
+  const profileSnippet = [
+    profile.headline        ? `Cargo/Headline: ${profile.headline}` : null,
+    (profile.headlineCompany ?? profile.company) ? `Empresa (al momento del scraping, puede haber cambiado): ${profile.headlineCompany ?? profile.company}` : null,
+    profile.currentPosition ? `Posición actual (scraping): ${profile.currentPosition}` : null,
+    profile.about           ? `Sobre él/ella: ${profile.about.slice(0, 300)}` : null,
+    profile.location        ? `Ubicación: ${profile.location}` : null,
+  ].filter(Boolean).join('\n') || 'Sin datos de perfil.';
 
-  // Build full conversation history block (inbound + outbound)
+  // Full conversation history — outbound + inbound chronologically
   const historyBlock = conversationHistory.length > 0
     ? conversationHistory
         .map(e => {
-          const speaker = e.direction === 'outbound' ? 'Nosotros' : (leadName ?? 'Lead');
-          return `[${speaker}]: ${(e.content ?? '').slice(0, 500)}`;
+          const speaker = e.direction === 'outbound' ? 'NOSOTROS' : leadName ?? 'LEAD';
+          return `[${speaker}]: ${(e.content ?? '').slice(0, 600)}`;
         })
         .join('\n')
-    : '(primera interacción — sin historial previo)';
+    : '(sin historial previo)';
 
-  // Turn-based strategy instructions
+  // Turn-based strategy — only applies when no situational rule triggers
   let strategyBlock;
   if (turnCount === 0) {
-    strategyBlock = `PRIMERA RESPUESTA — TURNO 0
-OBJETIVO: Crear rapport genuino. NO vender. NO mencionar ORION todavía.
-- Reconoce su mensaje de forma específica y personal.
-- Menciona UN detalle concreto de su perfil o empresa que sea relevante.
-- Haz UNA sola pregunta abierta sobre su negocio o desafío actual.
-- NO incluyas link de Cal.com.
-- Máx 80 palabras. Tono casual, como entre colegas.`;
+    strategyBlock = `ESTRATEGIA TURNO 0 — RAPPORT (si no aplica ninguna situación especial):
+- Reconoce su mensaje específicamente. NO repitas el mismo saludo genérico del historial.
+- Menciona UN detalle de su perfil o empresa (SOLO si el historial no lo contradice).
+- Haz UNA pregunta abierta sobre su trabajo o desafío actual.
+- NO menciones ORION. NO incluyas Cal.com. Máx 80 palabras.`;
   } else if (turnCount <= 2) {
-    strategyBlock = `CONVERSACIÓN EN CURSO — TURNO ${turnCount}
-OBJETIVO: Profundizar, mostrar valor sutilmente.
-- Responde directamente a lo que dijo. Muestra que leíste con atención.
-- Si hizo una pregunta técnica, respóndela usando el contexto de EBOOMS/ORION.
-- Si muestra interés claro o curiosidad, puedes mencionar que ayudamos a empresas similares.
-- Si su tono es positivo o hace preguntas sobre cómo funciona: ofrece una llamada de 20 min${calUrl ? ` usando ${calUrl}` : ''}.
-- Si sigue neutral o exploratorio, haz otra pregunta de discovery sobre su proceso comercial.
-- Máx 100 palabras.`;
+    strategyBlock = `ESTRATEGIA TURNO ${turnCount} — PROFUNDIZAR (si no aplica ninguna situación especial):
+- Responde DIRECTAMENTE a lo que dijo. Demuestra que leíste su mensaje con atención.
+- Si hace pregunta técnica, responde con contexto de EBOOMS/ORION.
+- Si muestra interés, ofrece llamada 20 min${calUrl ? ` — link: ${calUrl}` : ''}.
+- Si sigue neutral, haz otra pregunta de discovery. Máx 100 palabras.`;
   } else {
-    strategyBlock = `TURNO AVANZADO — TURNO ${turnCount}
-OBJETIVO: Cerrar la reunión de 20 minutos.
-- Responde su mensaje brevemente y con calidez.
-- Ofrece la sesión estratégica de 20 min de forma directa pero sin presión.
-${calUrl ? `- Incluye el link de forma natural: ${calUrl}` : '- Pregunta directamente cuándo tiene disponibilidad.'}
-- Si rechaza claramente, acepta con gracia y deja la puerta abierta. Sin insistir.
-- Máx 80 palabras.`;
+    strategyBlock = `ESTRATEGIA TURNO ${turnCount} — CIERRE (si no aplica ninguna situación especial):
+- Respuesta breve y cálida. Ofrece sesión 20 min directamente.
+${calUrl ? `- Link natural: ${calUrl}` : '- Pregunta disponibilidad directamente.'}
+- Si rechaza, acepta con gracia. Sin insistir. Máx 80 palabras.`;
   }
 
   const prompt = `${EBOOMS_CONTEXT}
 
 ---
 
-PERFIL DEL LEAD (${leadName ?? 'Lead'}):
+PERFIL DEL LEAD — ${leadName ?? 'Lead'} (datos del momento del scraping, PUEDEN estar desactualizados):
 ${profileSnippet}
 
-HISTORIAL COMPLETO DE LA CONVERSACIÓN:
+⚠️ REGLA CRÍTICA: El historial de la conversación es tu ÚNICA fuente de verdad.
+Si el lead menciona en el chat que ya no trabaja en algún lugar, que cambió de empresa, o que no es el contacto correcto → CREE AL HISTORIAL, no al perfil de arriba.
+
+---
+
+HISTORIAL COMPLETO DE LA CONVERSACIÓN (en orden cronológico):
 ${historyBlock}
 
-ÚLTIMO MENSAJE RECIBIDO DE ${leadName ?? 'el lead'}:
+ÚLTIMO MENSAJE DE ${leadName ?? 'el lead'}:
 "${inboundMessage ?? ''}"
 
 ---
 
+PASO 1 — ANTES DE ESCRIBIR, identifica en qué situación estás:
+
+🔴 SITUACIÓN A: El lead dice que ya no trabaja en la empresa / cambió de trabajo
+   → Reconoce el cambio con naturalidad. NO sigas preguntando sobre la empresa anterior.
+   → Pregunta brevemente dónde trabaja ahora o en qué está enfocado. Máx 35 palabras.
+   → Ejemplo: "Ah, entiendo! ¿Y actualmente en qué proyecto o empresa estás?"
+
+🔴 SITUACIÓN B: El lead dice que no es el contacto correcto / que te refieras a otra persona
+   → Agradece la aclaración. Pregunta cómo llegar a la persona correcta, o despídete con calidez.
+   → Máx 35 palabras. Sin insistir.
+
+🔴 SITUACIÓN C: El lead rechaza claramente (no le interesa, no tiene tiempo, no aplica)
+   → Acepta con gracia. Deja la puerta abierta con una frase amable. Sin argumentar.
+   → Máx 25 palabras.
+
+🟡 SITUACIÓN D: El lead hizo una pregunta directa
+   → Respóndela primero. Luego aplica la estrategia de turno.
+
+🟡 SITUACIÓN E: El lead corrigió algo que dijiste o aclaró un malentendido
+   → Reconócelo brevemente ("Claro, entiendo.") y ajusta el rumbo. NO repitas el error.
+
+✅ SITUACIÓN F: Conversación normal (sin situaciones especiales)
+   → Aplica la estrategia de turno:
+
 ${strategyBlock}
 
-REGLA GLOBAL: Si el lead directamente pregunta por precio, disponibilidad, cómo funciona el sistema o quiere saber más →
-responde con contexto de EBOOMS y ofrece la reunión de 20 min${calUrl ? ` con ${calUrl}` : ''} SIN importar el turno.
+---
+
+REGLA GLOBAL: Si el lead pregunta precio, disponibilidad, cómo funciona → responde con contexto EBOOMS y ofrece reunión 20 min${calUrl ? ` (${calUrl})` : ''}.
+
+PROHIBIDO: Mencionar "LinkedIn", "notificaciones", "mensajes enviados antes de tiempo", o cualquier referencia al sistema técnico. El lead no debe saber que hay automatización.
 
 Responde ÚNICAMENTE con el texto del mensaje. Sin comillas, sin prefijos, sin markdown.`;
 
   const response = await ai.models.generateContent({
     model: 'gemini-2.5-flash',
     config: {
-      systemInstruction: 'Eres un SDR experto en ventas B2B. Escribe respuestas breves, humanas, personalizadas y estratégicas.',
-      temperature: 0.85,
+      systemInstruction: 'Eres un SDR experto en ventas B2B. SIEMPRE lees el historial completo antes de responder. Adaptas tu respuesta a la situación real de la conversación, no a un script fijo.',
+      temperature: 0.75,
       maxOutputTokens: 350,
       thinkingConfig: { thinkingBudget: 0 },
     },

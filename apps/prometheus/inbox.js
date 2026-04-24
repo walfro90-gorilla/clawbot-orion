@@ -231,7 +231,8 @@ async function generateDraftAsync(lead, inboundMessageText) {
         .select('direction, content, sent_at, event_type')
         .eq('conversation_id', conv.id)
         .in('event_type', [
-          'reply_received', 'reply_sent', 'message_sent',
+          'invite_sent', 'message_sent',
+          'reply_received', 'reply_sent',
           'follow_up_sent', 'follow_up_sent_2', 'follow_up_sent_3',
         ])
         .order('sent_at', { ascending: true })
@@ -670,9 +671,16 @@ async function checkMessaging(page, leadMap, leads, stats, globalApiResponses) {
       continue
     }
 
-    // Si no hay texto pero tiene unread, usar placeholder
+    // Si no hay texto real del hilo → no generar draft (evita que Gemini responda sobre "notificaciones")
+    // El admin verá la conversación en Orion para revisión manual
     if (!messageText) {
-      messageText = `[Mensaje detectado — revisar LinkedIn] Última actividad: ${new Date(convo.lastActivityAt).toLocaleString('es-MX')}`
+      console.warn(`[INBOX] ⚠️  No se pudo leer el texto del hilo de ${matchedLead.full_name} — marcando para revisión manual (sin draft).`)
+      await supabase.from('conversations').update({
+        inbox_checked_at: new Date().toISOString(),
+        last_message_text: '[Sin texto — revisar LinkedIn manualmente]',
+      }).eq('lead_id', matchedLead.id)
+      stats.replied++
+      continue
     }
 
     // Actualizar estado del lead
