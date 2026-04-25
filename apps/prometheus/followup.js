@@ -245,6 +245,53 @@ async function recordFollowUp(lead, message) {
   console.log(`[FOLLOWUP] ✅ Recorded ${eventType} for "${lead.full_name}"`)
 }
 
+// ── Find the message compose textarea — handles all LinkedIn UI variants ──────
+// LinkedIn has multiple layouts: overlay bubble, /messaging/thread/ page, /messaging/ page.
+// All have different selectors. This function tries all of them with fallbacks.
+async function findComposeTextarea(page) {
+  // Strategy 1: specific compose area by aria-label (most reliable in new UI)
+  const byAriaLabel = page.locator(
+    '[contenteditable="true"][aria-label], ' +
+    '[contenteditable="true"][data-placeholder]'
+  ).filter({ hasNotText: /search|buscar/i }).first()
+  if (await byAriaLabel.isVisible({ timeout: 5000 }).catch(() => false)) return byAriaLabel
+
+  // Strategy 2: classic msg-form class (older LinkedIn UI)
+  const byClass = page.locator(
+    '.msg-form__contenteditable, ' +
+    '.msg-overlay-conversation-bubble--is-active [contenteditable="true"]'
+  ).first()
+  if (await byClass.isVisible({ timeout: 3000 }).catch(() => false)) return byClass
+
+  // Strategy 3: /messaging/thread/ page — reply box at bottom
+  if (page.url().includes('/messaging/')) {
+    // In thread view, the compose box is at the bottom, not the search at top
+    // Filter out the search box by checking position (compose is lower on page)
+    const allEditable = await page.locator('[contenteditable="true"]').all()
+    for (const el of allEditable.reverse()) { // reverse = bottom-first
+      const box = await el.boundingBox().catch(() => null)
+      if (box && box.y > 400) { // compose is below mid-page
+        const visible = await el.isVisible().catch(() => false)
+        if (visible) return el
+      }
+    }
+  }
+
+  // Strategy 4: broadest fallback — any visible contenteditable that's not tiny
+  const allEditable = page.locator('[contenteditable="true"]')
+  const count = await allEditable.count().catch(() => 0)
+  for (let i = count - 1; i >= 0; i--) {
+    const el = allEditable.nth(i)
+    const box = await el.boundingBox().catch(() => null)
+    if (box && box.width > 200 && box.height > 20) {
+      const visible = await el.isVisible().catch(() => false)
+      if (visible) return el
+    }
+  }
+
+  return null
+}
+
 // ── Navigate to profile and send message ─────────────────────────────────────
 async function sendFollowUp(page, lead, message) {
   const profileUrl = lead.linkedin_url.endsWith('/')
@@ -265,58 +312,48 @@ async function sendFollowUp(page, lead, message) {
   await humanScroll(page, randInt(300, 600))
   await microDelay()
 
-  // Find the Message button (they're connected — should be a direct message button)
-  const msgBtn = page.getByRole('button', {
-    name: /^(message|mensaje|enviar mensaje|send message)$/i,
-  }).first()
-
-  const hasMsgBtn = await msgBtn.isVisible({ timeout: 8000 }).catch(() => false)
-  if (!hasMsgBtn) {
-    // Try alt locators (LinkedIn A/B tests)
-    const altBtn = page.locator(
-      'a[href*="/messaging/"], button[aria-label*="message" i], button[aria-label*="mensaje" i]'
-    ).first()
-    const hasAlt = await altBtn.isVisible({ timeout: 3000 }).catch(() => false)
-    if (!hasAlt) {
-      console.warn(`[FOLLOWUP] ⚠️  No message button found for "${lead.full_name}" — may no longer be connected or premium-gated.`)
-      return 'no_button'
+  // Find the Message button — try multiple variants (LinkedIn A/B tests constantly)
+  let clickedMessage = false
+  const msgBtnLocators = [
+    page.getByRole('button', { name: /^(message|mensaje|enviar mensaje|send message)$/i }).first(),
+    page.locator('button[aria-label*="message" i], button[aria-label*="mensaje" i]').first(),
+    page.locator('a[href*="/messaging/new"]').first(),
+    page.locator('[data-control-name="message"]').first(),
+  ]
+  for (const btn of msgBtnLocators) {
+    if (await btn.isVisible({ timeout: 3000 }).catch(() => false)) {
+      await btn.click()
+      clickedMessage = true
+      break
     }
-    await altBtn.click()
-  } else {
-    await msgBtn.click()
   }
 
-  await page.waitForTimeout(randInt(1500, 2500))
-
-  // Handle possible redirect to /messaging/ page
-  if (page.url().includes('/messaging/')) {
-    const textarea = page.locator('div[role="textbox"], [contenteditable="true"]').first()
-    const hasTextarea = await textarea.isVisible({ timeout: 8000 }).catch(() => false)
-    if (!hasTextarea) {
-      console.warn(`[FOLLOWUP] No messaging textarea found on /messaging/ page.`)
-      return 'error'
-    }
-    await typeAndSend(page, textarea, lead, message)
-    return 'sent'
+  if (!clickedMessage) {
+    console.warn(`[FOLLOWUP] ⚠️  No message button found for "${lead.full_name}" — may no longer be connected or premium-gated.`)
+    return 'no_button'
   }
 
-  // Messaging overlay at bottom of page
-  const textarea = page.locator(
-    'div[role="textbox"][contenteditable="true"], ' +
-    '.msg-form__contenteditable, ' +
-    '.msg-overlay-conversation-bubble--is-active [contenteditable="true"]'
-  ).first()
+  // Wait for navigation or overlay to appear
+  await page.waitForTimeout(randInt(2000, 3500))
 
-  const hasTextarea = await textarea.isVisible({ timeout: 8000 }).catch(() => false)
-  if (!hasTextarea) {
-    // Try pressing Escape to dismiss any overlay then re-check
+  // Log current URL to help debug
+  console.log(`[FOLLOWUP] After click — URL: ${page.url()}`)
+
+  // Find compose textarea using multi-strategy function
+  const textarea = await findComposeTextarea(page)
+
+  if (!textarea) {
+    // Last resort: press Escape (dismiss any modal) and retry
     await page.keyboard.press('Escape')
-    await page.waitForTimeout(randInt(600, 1000))
-    const hasAfterEsc = await textarea.isVisible({ timeout: 3000 }).catch(() => false)
-    if (!hasAfterEsc) {
-      console.warn(`[FOLLOWUP] ⚠️  Messaging textarea not found for "${lead.full_name}".`)
+    await page.waitForTimeout(1000)
+    const retryTextarea = await findComposeTextarea(page)
+    if (!retryTextarea) {
+      console.warn(`[FOLLOWUP] ⚠️  Compose textarea not found for "${lead.full_name}" after all strategies.`)
+      await page.screenshot({ path: `debug_followup_${lead.id?.slice(0,8)}.png` }).catch(() => {})
       return 'error'
     }
+    await typeAndSend(page, retryTextarea, lead, message)
+    return 'sent'
   }
 
   await typeAndSend(page, textarea, lead, message)
