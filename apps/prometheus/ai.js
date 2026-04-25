@@ -143,6 +143,10 @@ export async function generateReplyDraft({
   inboundMessage,
   calUrl,
   turnCount = 0,
+  aiTone = 'casual',
+  senderPersona = null,
+  companyContext = null,
+  exampleMessages = null,
 } = {}) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY not set');
@@ -244,15 +248,94 @@ PROHIBIDO: Mencionar "LinkedIn", "notificaciones", "mensajes enviados antes de t
 
 Responde ÚNICAMENTE con el texto del mensaje. Sin comillas, sin prefijos, sin markdown.`;
 
+  // Build tone instruction
+  const toneGuide = {
+    casual:       'Tono casual y amigable. Como si hablaras con un colega. Frases cortas, naturales. Puedes usar humor suave.',
+    professional: 'Tono profesional y confiable. Claro, sin jerga. Respeto mutuo entre pares del mismo nivel.',
+    executive:    'Tono ejecutivo y conciso. Ve al punto. Sin relleno. Hablas como C-level a C-level.',
+    technical:    'Tono técnico y preciso. Puedes usar terminología del sector. Demuestra conocimiento profundo.',
+  }
+  const toneInstruction = toneGuide[aiTone] ?? toneGuide.casual
+
+  // Company context: use custom if provided, else fallback to EBOOMS default
+  const activeCompanyContext = companyContext?.trim() || EBOOMS_CONTEXT
+
+  // Sender persona block
+  const personaBlock = senderPersona?.trim()
+    ? `QUIÉN ERES (escribe SIEMPRE con esta voz, no con voz genérica):
+${senderPersona.trim()}`
+    : `QUIÉN ERES: Un SDR experto representando a la empresa descrita abajo.`
+
+  // Example messages block
+  const examplesBlock = exampleMessages?.trim()
+    ? `\nEJEMPLOS DE TU ESTILO DE ESCRITURA (replica este tono y longitud exactamente):
+${exampleMessages.trim()}\n`
+    : ''
+
+  const finalPrompt = `${activeCompanyContext}
+
+---
+
+${personaBlock}
+
+TONO DE COMUNICACIÓN: ${toneInstruction}
+${examplesBlock}
+---
+
+PERFIL DEL LEAD — ${leadName ?? 'Lead'} (datos del scraping, PUEDEN estar desactualizados):
+${profileSnippet}
+
+⚠️ REGLA CRÍTICA: El historial de la conversación es tu ÚNICA fuente de verdad.
+Si el lead menciona en el chat que ya no trabaja en algún lugar, que cambió de empresa, o que no es el contacto correcto → CREE AL HISTORIAL, no al perfil de arriba.
+
+---
+
+HISTORIAL COMPLETO DE LA CONVERSACIÓN (cronológico):
+${historyBlock}
+
+ÚLTIMO MENSAJE DE ${leadName ?? 'el lead'}:
+"${inboundMessage ?? ''}"
+
+---
+
+PASO 1 — ANTES DE ESCRIBIR, identifica en qué situación estás:
+
+🔴 SITUACIÓN A: El lead dice que ya no trabaja en la empresa / cambió de trabajo
+   → Reconoce el cambio con naturalidad. NO sigas preguntando sobre la empresa anterior.
+   → Pregunta brevemente dónde trabaja ahora o en qué está enfocado. Máx 35 palabras.
+
+🔴 SITUACIÓN B: El lead dice que no es el contacto correcto / te refiere a alguien más
+   → Agradece la aclaración. Pregunta cómo llegar a la persona correcta, o despídete con calidez.
+   → Máx 35 palabras. Sin insistir.
+
+🔴 SITUACIÓN C: El lead rechaza claramente (no le interesa, no tiene tiempo, no aplica)
+   → Acepta con gracia. Deja la puerta abierta. Sin argumentar. Máx 25 palabras.
+
+🟡 SITUACIÓN D: El lead hizo una pregunta directa → Respóndela primero.
+
+🟡 SITUACIÓN E: El lead corrigió algo → Reconócelo brevemente y ajusta el rumbo.
+
+✅ SITUACIÓN F: Conversación normal → Aplica la estrategia de turno:
+
+${strategyBlock}
+
+---
+
+REGLA GLOBAL: Si el lead pregunta precio, disponibilidad, cómo funciona → responde con contexto de la empresa y ofrece reunión 20 min${calUrl ? ` (${calUrl})` : ''}.
+
+PROHIBIDO: Mencionar "LinkedIn", "notificaciones", "mensajes enviados antes de tiempo", o cualquier referencia al sistema técnico.
+
+Responde ÚNICAMENTE con el texto del mensaje. Sin comillas, sin prefijos, sin markdown.`
+
   const response = await ai.models.generateContent({
     model: 'gemini-2.5-flash',
     config: {
-      systemInstruction: 'Eres un SDR experto en ventas B2B. SIEMPRE lees el historial completo antes de responder. Adaptas tu respuesta a la situación real de la conversación, no a un script fijo.',
-      temperature: 0.75,
+      systemInstruction: `Eres el asistente de escritura de un SDR. Tu trabajo es escribir mensajes de LinkedIn que suenen exactamente como la persona descrita en "QUIÉN ERES". SIEMPRE lees el historial completo antes de responder. Adaptas la respuesta a la situación real, no a un script.`,
+      temperature: 0.8,
       maxOutputTokens: 350,
       thinkingConfig: { thinkingBudget: 0 },
     },
-    contents: prompt,
+    contents: finalPrompt,
   });
 
   return response.text.trim();

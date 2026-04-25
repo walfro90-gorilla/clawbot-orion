@@ -44,6 +44,10 @@ async function saveCampaign(formData: FormData) {
     auto_reply_mode:            (formData.get("auto_reply_mode") as string) || "manual",
     auto_reply_delay_min:       Number(formData.get("auto_reply_delay_min") || 45),
     auto_reply_delay_max:       Number(formData.get("auto_reply_delay_max") || 90),
+    ai_tone:                    (formData.get("ai_tone") as string) || "casual",
+    ai_sender_persona:          (formData.get("ai_sender_persona") as string) || null,
+    ai_company_context:         (formData.get("ai_company_context") as string) || null,
+    ai_example_messages:        (formData.get("ai_example_messages") as string) || null,
   }).eq("id", id)
 
   // ── Message template — upsert by campaign_id
@@ -297,6 +301,60 @@ export default async function CampaignEditPage({ params }: { params: Promise<{ i
         </Section>
 
 
+
+        {/* ── PERSONALIZACIÓN IA ──────────────────────────────────────── */}
+        <Section title="Personalización IA" icon="🧠" description="Define la voz del vendedor y el contexto de tu empresa. La IA escribirá exactamente con ese estilo.">
+          <Field label="Tono de comunicación" hint="Define el registro general de todos los mensajes de esta campaña.">
+            <select name="ai_tone" defaultValue={(c as any).ai_tone ?? "casual"} className={inp}>
+              <option value="casual">💬 Casual y amigable — como entre colegas</option>
+              <option value="professional">🤝 Profesional — claro y confiable</option>
+              <option value="executive">⚡ Ejecutivo — directo, sin relleno, C-level a C-level</option>
+              <option value="technical">🔧 Técnico — preciso, terminología del sector</option>
+            </select>
+          </Field>
+
+          <Field
+            label="Perfil del vendedor (tu voz)"
+            hint="Cuéntale a la IA quién eres. Cuanto más detalle, más auténtica suena la voz. Incluye: nombre, cargo, años de experiencia, estilo de comunicación, frases que usas, lo que NO dices."
+          >
+            <textarea name="ai_sender_persona" rows={5}
+              defaultValue={(c as any).ai_sender_persona ?? ""}
+              placeholder={`Ejemplo: Me llamo Joshua, soy cofundador de EBOOMS. Tengo 6 años en ventas B2B. Soy directo pero con humor. Me gusta ir al grano sin sonar vendedor. Nunca digo "espero que estés bien" ni "te escribo porque vi tu perfil". Uso frases cortas. Hago preguntas de una sola cosa a la vez. Si el lead no responde a la pregunta, la reformulo diferente.`}
+              className={`${inp} resize-none`} />
+          </Field>
+
+          <Field
+            label="Contexto de tu empresa"
+            hint="Qué vendes, a quién, qué problema resuelves, tu propuesta de valor, preguntas frecuentes y cómo responderlas. Si lo dejas vacío, se usa el contexto genérico de EBOOMS."
+          >
+            <textarea name="ai_company_context" rows={8}
+              defaultValue={(c as any).ai_company_context ?? ""}
+              placeholder={`Ejemplo:
+EMPRESA: EBOOMS — automatización de prospección B2B en LinkedIn.
+PROBLEMA QUE RESUELVES: Los equipos comerciales dedican menos del 30% de su tiempo a atraer negocio nuevo. ORION lo hace en piloto automático.
+PROPUESTA DE VALOR: 100 conexiones con decisores en el primer mes. 2-3 citas calificadas. Sin permanencia.
+CLIENTE IDEAL: Directores comerciales o CEO de empresas de servicios B2B con ticket alto.
+OBJETIVO EN LINKEDIN: Solo conseguir una reunión de 20 min. No vender en el chat.
+FAQ:
+- ¿Cuánto cuesta? → No dar precio; mostrar ROI en la reunión.
+- ¿Garantizan resultados? → Garantizamos el sistema funcionando; resultados dependen de la propuesta de valor.`}
+              className={`${inp} resize-none font-mono text-xs`} />
+          </Field>
+
+          <Field
+            label="Mensajes de ejemplo (calibración de estilo)"
+            hint="Pega 2-3 mensajes reales que hayas enviado y que representen bien tu estilo. La IA los usará como referencia exacta de longitud, tono y estructura. Separa cada mensaje con una línea en blanco."
+          >
+            <textarea name="ai_example_messages" rows={6}
+              defaultValue={(c as any).ai_example_messages ?? ""}
+              placeholder={`Ejemplo 1:
+Hola Ana, vi que llevas el área comercial en Grupo XYZ. ¿Cómo está funcionando la generación de leads B2B para ustedes este año?
+
+Ejemplo 2:
+Qué bien que lo mencionas. Justo ese es el problema que más escucho en empresas de tu tamaño. ¿Cuántos vendedores tienen activos prospectando en LinkedIn hoy?`}
+              className={`${inp} resize-none`} />
+          </Field>
+        </Section>
 
         {/* ── BÚSQUEDA ────────────────────────────────────────────────── */}
         <Section title="Búsqueda en LinkedIn" icon="🔍" description="Parámetros para el scraper de perfiles.">

@@ -267,6 +267,10 @@ export type Database = {
       }
       campaigns: {
         Row: {
+          ai_company_context: string | null
+          ai_example_messages: string | null
+          ai_sender_persona: string | null
+          ai_tone: string | null
           auto_dead_after_days: number | null
           auto_reply_delay_max: number | null
           auto_reply_delay_min: number | null
@@ -306,6 +310,10 @@ export type Database = {
           title_whitelist: string[] | null
         }
         Insert: {
+          ai_company_context?: string | null
+          ai_example_messages?: string | null
+          ai_sender_persona?: string | null
+          ai_tone?: string | null
           auto_dead_after_days?: number | null
           auto_reply_delay_max?: number | null
           auto_reply_delay_min?: number | null
@@ -345,6 +353,10 @@ export type Database = {
           title_whitelist?: string[] | null
         }
         Update: {
+          ai_company_context?: string | null
+          ai_example_messages?: string | null
+          ai_sender_persona?: string | null
+          ai_tone?: string | null
           auto_dead_after_days?: number | null
           auto_reply_delay_max?: number | null
           auto_reply_delay_min?: number | null

@@ -246,10 +246,10 @@ async function generateDraftAsync(lead, inboundMessageText) {
       .eq('id', lead.id)
       .single()
 
-    // 4. Config auto-reply + Cal.com URL + delay por cuenta
+    // 4. Config auto-reply + Cal.com URL + delay por cuenta + persona IA
     const { data: campaign } = await supabase
       .from('campaigns')
-      .select('auto_reply_mode, auto_reply_delay_min, auto_reply_delay_max, linkedin_account_id')
+      .select('auto_reply_mode, auto_reply_delay_min, auto_reply_delay_max, linkedin_account_id, ai_tone, ai_sender_persona, ai_company_context, ai_example_messages')
       .eq('id', fullLead?.campaign_id ?? lead.campaign_id)
       .single()
 
@@ -289,6 +289,10 @@ async function generateDraftAsync(lead, inboundMessageText) {
       inboundMessage:     inboundMessageText,
       calUrl,
       turnCount,
+      aiTone:             campaign?.ai_tone ?? 'casual',
+      senderPersona:      campaign?.ai_sender_persona ?? null,
+      companyContext:     campaign?.ai_company_context ?? null,
+      exampleMessages:    campaign?.ai_example_messages ?? null,
     })
 
     if (!draft) return
