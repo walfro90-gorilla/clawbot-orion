@@ -2,6 +2,7 @@ import { createClient } from "@/lib/supabase/server"
 import { createAdminClient } from "@/lib/supabase/admin"
 import { redirect } from "next/navigation"
 import type { AccountToday } from "@clawbot/db-types"
+import { ProxyChecker } from "@/components/proxy-checker"
 
 async function updateAccount(formData: FormData) {
   "use server"
@@ -195,6 +196,22 @@ export default async function AccountsPage() {
                     {(raw as any)?.warmup_status === "hot" && "Cuenta veterana"}
                   </div>
                 </div>
+              </div>
+
+              {/* Proxy monitor */}
+              <div className="border-t border-gray-700 pt-3 space-y-1.5">
+                <p className="text-xs text-gray-500 font-medium uppercase tracking-wide">Proxy / IP</p>
+                <ProxyChecker
+                  accountId={a.account_id ?? ""}
+                  hasProxy={!!(raw as any)?.proxy_url}
+                  initial={{
+                    ip:          (raw as any)?.proxy_ip ?? null,
+                    countryCode: (raw as any)?.proxy_country_code ?? null,
+                    country:     (raw as any)?.proxy_country_name ?? null,
+                    city:        (raw as any)?.proxy_city ?? null,
+                    checkedAt:   (raw as any)?.proxy_checked_at ?? null,
+                  }}
+                />
               </div>
 
               {/* Edit form */}

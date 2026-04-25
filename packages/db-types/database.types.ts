@@ -780,6 +780,11 @@ export type Database = {
           li_at_cookie: string
           li_at_cookie_updated_at: string | null
           linkedin_profile_url: string | null
+          proxy_checked_at: string | null
+          proxy_city: string | null
+          proxy_country_code: string | null
+          proxy_country_name: string | null
+          proxy_ip: string | null
           proxy_url: string | null
           reply_delay_max: number | null
           reply_delay_min: number | null
@@ -800,6 +805,11 @@ export type Database = {
           li_at_cookie: string
           li_at_cookie_updated_at?: string | null
           linkedin_profile_url?: string | null
+          proxy_checked_at?: string | null
+          proxy_city?: string | null
+          proxy_country_code?: string | null
+          proxy_country_name?: string | null
+          proxy_ip?: string | null
           proxy_url?: string | null
           reply_delay_max?: number | null
           reply_delay_min?: number | null
@@ -820,6 +830,11 @@ export type Database = {
           li_at_cookie?: string
           li_at_cookie_updated_at?: string | null
           linkedin_profile_url?: string | null
+          proxy_checked_at?: string | null
+          proxy_city?: string | null
+          proxy_country_code?: string | null
+          proxy_country_name?: string | null
+          proxy_ip?: string | null
           proxy_url?: string | null
           reply_delay_max?: number | null
           reply_delay_min?: number | null

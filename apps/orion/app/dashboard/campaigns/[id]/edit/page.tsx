@@ -96,7 +96,7 @@ export default async function CampaignEditPage({ params }: { params: Promise<{ i
 
   const [{ data: c }, { data: accounts }, { data: templates }] = await Promise.all([
     admin.from("campaigns").select("*").eq("id", id).single(),
-    admin.from("linkedin_accounts").select("id, label, linkedin_profile_url, status").order("label"),
+    admin.from("linkedin_accounts").select("id, label, linkedin_profile_url, status, proxy_country_code, proxy_country_name, proxy_ip, proxy_checked_at").order("label"),
     admin.from("message_templates").select("*").eq("campaign_id", id).eq("is_active", true).limit(1),
   ])
 
@@ -393,6 +393,73 @@ Qué bien que lo mencionas. Justo ese es el problema que más escucho en empresa
 
         {/* ── BÚSQUEDA ────────────────────────────────────────────────── */}
         <Section title="Búsqueda en LinkedIn" icon="🔍" description="Parámetros para el scraper de perfiles.">
+
+          {/* Proxy vs location warning */}
+          {(() => {
+            const linkedAccount = accounts?.find(a => a.id === c.linkedin_account_id) as any
+            const proxyCountry  = linkedAccount?.proxy_country_name ?? null
+            const proxyCode     = linkedAccount?.proxy_country_code ?? null
+            const proxyIp       = linkedAccount?.proxy_ip ?? null
+            const location      = c.search_location ?? ""
+            const proxyChecked  = linkedAccount?.proxy_checked_at ?? null
+
+            // Detect if location mentions a country different from proxy country
+            const locationLower = location.toLowerCase()
+            const proxyLower    = (proxyCountry ?? "").toLowerCase()
+            const countryMismatch = proxyCode && location &&
+              !locationLower.includes(proxyLower.split(" ")[0]) &&
+              !locationLower.includes(proxyCode.toLowerCase())
+
+            return (
+              <div className="space-y-2 mb-2">
+                {/* Proxy info banner */}
+                <div className={`flex items-start gap-3 px-4 py-3 rounded-xl border text-sm ${
+                  proxyIp
+                    ? "bg-gray-800/60 border-gray-700"
+                    : "bg-red-500/10 border-red-500/30"
+                }`}>
+                  <span className="text-lg shrink-0 mt-0.5">
+                    {proxyIp ? "🌐" : "⚠️"}
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    {proxyIp ? (
+                      <>
+                        <p className="text-gray-200 text-xs font-medium">
+                          Proxy activo — {proxyCountry ?? proxyCode} {proxyCode && `(${proxyCode})`}
+                        </p>
+                        <p className="text-gray-500 text-xs mt-0.5 font-mono">{proxyIp}{linkedAccount?.proxy_city ? ` · ${linkedAccount.proxy_city}` : ""}</p>
+                        {proxyChecked && (
+                          <p className="text-gray-600 text-xs mt-0.5">
+                            Verificado: {new Date(proxyChecked).toLocaleString("es-MX", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}
+                          </p>
+                        )}
+                      </>
+                    ) : (
+                      <p className="text-red-400 text-xs">
+                        Proxy no verificado — ve a <strong>Cuentas LI</strong> y haz click en "Verificar proxy" para ver el país real de tu IP.
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Country mismatch warning */}
+                {countryMismatch && (
+                  <div className="flex items-start gap-3 px-4 py-3 bg-yellow-500/10 border border-yellow-500/30 rounded-xl text-sm">
+                    <span className="text-lg shrink-0 mt-0.5">🚨</span>
+                    <div>
+                      <p className="text-yellow-400 font-semibold text-xs">Riesgo de ban — mismatch de país</p>
+                      <p className="text-yellow-400/80 text-xs mt-0.5">
+                        Tu proxy está en <strong>{proxyCountry}</strong> pero la ubicación de búsqueda es <strong>"{location}"</strong>.
+                        Un humano usando LinkedIn desde {proxyCountry} normalmente no busca perfiles de otra región de forma masiva.
+                        Usa un proxy del país donde quieres buscar, o verifica manualmente esa región antes de automatizar.
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )
+          })()}
+
           <Field label="Keywords de búsqueda" hint="Separadas por coma. La primera se usa como query principal en LinkedIn.">
             <input name="search_keywords" defaultValue={toComma(c.search_keywords)}
               placeholder="Director Finanzas, CFO, VP Finance" className={inp} />
