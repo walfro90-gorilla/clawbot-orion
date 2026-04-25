@@ -297,6 +297,7 @@ export type Database = {
           min_batch_gap_min: number
           min_pending_threshold: number
           name: string
+          schedule_days: string[] | null
           schedule_end_hour: number
           schedule_start_hour: number
           scheduler_notes: string | null
@@ -340,6 +341,7 @@ export type Database = {
           min_batch_gap_min?: number
           min_pending_threshold?: number
           name: string
+          schedule_days?: string[] | null
           schedule_end_hour?: number
           schedule_start_hour?: number
           scheduler_notes?: string | null
@@ -383,6 +385,7 @@ export type Database = {
           min_batch_gap_min?: number
           min_pending_threshold?: number
           name?: string
+          schedule_days?: string[] | null
           schedule_end_hour?: number
           schedule_start_hour?: number
           scheduler_notes?: string | null

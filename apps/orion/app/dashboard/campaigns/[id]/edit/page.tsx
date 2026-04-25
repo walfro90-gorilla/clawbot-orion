@@ -33,6 +33,9 @@ async function saveCampaign(formData: FormData) {
     min_pending_threshold: Number(formData.get("min_pending_threshold") || 15),
     schedule_start_hour:   Number(formData.get("schedule_start_hour") || 9),
     schedule_end_hour:     Number(formData.get("schedule_end_hour") || 19),
+    schedule_days:         formData.getAll("schedule_days").length
+      ? formData.getAll("schedule_days") as string[]
+      : ["lunes","martes","miércoles","jueves","viernes"],
     search_gap_hours:      Number(formData.get("search_gap_hours") || 20),
     follow_up_message:          (formData.get("follow_up_message") as string) || null,
     follow_up_delay_days:       Number(formData.get("follow_up_delay_days") || 3),
@@ -173,6 +176,38 @@ export default async function CampaignEditPage({ params }: { params: Promise<{ i
             <Field label="Hora de fin (24h)" hint="Hora del día a partir de la cual el scheduler se detiene.">
               <input name="schedule_end_hour" type="number" min="0" max="23"
                 defaultValue={c.schedule_end_hour ?? 19} className={inp} />
+            </Field>
+            <Field label="Días activos" hint="Días de la semana en que corren búsqueda e invitaciones (hora México).">
+              {(() => {
+                const allDays = [
+                  { value: "lunes",     label: "L" },
+                  { value: "martes",    label: "M" },
+                  { value: "miércoles", label: "X" },
+                  { value: "jueves",    label: "J" },
+                  { value: "viernes",   label: "V" },
+                  { value: "sábado",    label: "S" },
+                  { value: "domingo",   label: "D" },
+                ]
+                const activeDays: string[] = (c as any).schedule_days ?? ["lunes","martes","miércoles","jueves","viernes"]
+                return (
+                  <div className="flex gap-2 flex-wrap">
+                    {allDays.map(({ value, label }) => (
+                      <label key={value} className="cursor-pointer">
+                        <input
+                          type="checkbox"
+                          name="schedule_days"
+                          value={value}
+                          defaultChecked={activeDays.includes(value)}
+                          className="sr-only peer"
+                        />
+                        <span className="flex items-center justify-center w-9 h-9 rounded-lg border text-xs font-bold transition-colors peer-checked:bg-blue-600 peer-checked:border-blue-600 peer-checked:text-white border-gray-600 text-gray-400 hover:border-gray-400">
+                          {label}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                )
+              })()}
             </Field>
             <Field label="Gap entre búsquedas (horas)" hint="Horas mínimas entre un search y el siguiente.">
               <input name="search_gap_hours" type="number" min="1" max="168"

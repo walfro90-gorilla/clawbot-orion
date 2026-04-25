@@ -73,18 +73,16 @@ function mxTime() {
   return { mxHour, mxDay, mxDate, now };
 }
 
-/** true si estamos en horario laboral México según config de campaña */
-function isBusinessHours(startHour = 9, endHour = 19) {
+/** true si estamos en horario laboral según los días y horas configurados */
+function isBusinessHours(startHour = 9, endHour = 19, days = ['lunes','martes','miércoles','jueves','viernes']) {
   const { mxHour, mxDay } = mxTime();
-  const weekdays = ['lunes','martes','miércoles','jueves','viernes'];
-  return weekdays.some(d => mxDay.includes(d)) && mxHour >= startHour && mxHour < endHour;
+  return days.some(d => mxDay.includes(d)) && mxHour >= startHour && mxHour < endHour;
 }
 
-/** Inbox puede correr Lun–Sáb 8–21h — solo lectura, riesgo muy bajo */
-function isInboxHours() {
+/** Inbox puede correr Lun–Dom 8–21h (cualquier día activo) */
+function isInboxHours(days = ['lunes','martes','miércoles','jueves','viernes','sábado','domingo']) {
   const { mxHour, mxDay } = mxTime();
-  const inboxDays = ['lunes','martes','miércoles','jueves','viernes','sábado'];
-  return inboxDays.some(d => mxDay.includes(d)) && mxHour >= 8 && mxHour < 21;
+  return days.some(d => mxDay.includes(d)) && mxHour >= 8 && mxHour < 21;
 }
 
 /** Minutos transcurridos desde una fecha ISO */
@@ -222,12 +220,12 @@ async function tick() {
   console.log(`\n[SCHEDULER] ═══════════════════════════════════════`);
   console.log(`[SCHEDULER] Tick @ ${mxDate}`);
 
-  // Check horario global: batch/search solo Lun–Vie 9–19h; inbox también sábado 8–21h
-  const inGlobalHours  = isBusinessHours();
-  const inInboxHours   = isInboxHours();
-
-  if (!inGlobalHours && !inInboxHours) {
-    console.log(`[SCHEDULER] Fuera de horario (batch: Lun–Vie 9–19 / inbox: Lun–Sáb 8–21) — skip.`);
+  // Horario global: inbox corre cualquier día 8-21h CDMX.
+  // Batch/search: cada campaña define sus días en schedule_days.
+  // Permitimos el tick si estamos en horas de inbox (8-21h cualquier día).
+  const { mxHour } = mxTime();
+  if (mxHour < 8 || mxHour >= 22) {
+    console.log(`[SCHEDULER] Fuera de horario nocturno (8-22h) — skip.`);
     await logJob({ jobType: 'tick', status: 'skipped', skipReason: 'outside_business_hours' });
     return;
   }
@@ -237,7 +235,7 @@ async function tick() {
     .from('campaigns')
     .select(`
       id, name, batch_paused, search_paused, follow_up_paused, min_pending_threshold, daily_invite_target,
-      min_batch_gap_min, search_gap_hours, schedule_start_hour, schedule_end_hour,
+      min_batch_gap_min, search_gap_hours, schedule_start_hour, schedule_end_hour, schedule_days,
       last_searched_at, last_batch_at, last_followup_at, last_followup2_at, last_followup3_at,
       follow_up_message, follow_up_delay_days,
       follow_up_step2_message, follow_up_step2_delay_days,
@@ -377,12 +375,15 @@ async function processCampaign(campaign) {
   }
 
   try {
-    // Guard: horario específico de la campaña (puede diferir del global)
+    // Guard: horario y días específicos de la campaña
     const campStartHour = campaign.schedule_start_hour ?? 9;
     const campEndHour   = campaign.schedule_end_hour   ?? 19;
-    if (!isBusinessHours(campStartHour, campEndHour)) {
-      const { mxHour } = mxTime();
-      console.log(`[SCHEDULER] ⏰ "${cname}" fuera de su horario (${campStartHour}–${campEndHour}h, ahora ${mxHour}h MX) — skip.`);
+    const campDays      = campaign.schedule_days?.length
+      ? campaign.schedule_days
+      : ['lunes','martes','miércoles','jueves','viernes'];
+    if (!isBusinessHours(campStartHour, campEndHour, campDays)) {
+      const { mxHour, mxDay } = mxTime();
+      console.log(`[SCHEDULER] ⏰ "${cname}" fuera de horario (días: ${campDays.join(',')}, horas: ${campStartHour}-${campEndHour}h, ahora: ${mxDay} ${mxHour}h) — skip.`);
       return;
     }
 
