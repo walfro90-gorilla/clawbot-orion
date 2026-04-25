@@ -415,6 +415,21 @@ async function processCampaign(campaign) {
       return;
     }
 
+    // Auto-rescue: leads en 'scraped' → 'pending' (quedan varados si hubo dry-run o error)
+    // El dashboard los cuenta como "en cola" pero claim_next_lead solo toma 'pending'
+    const { count: scrapedCount } = await supabase
+      .from('leads')
+      .select('id', { count: 'exact', head: true })
+      .eq('campaign_id', cid)
+      .eq('status', 'scraped');
+    if ((scrapedCount ?? 0) > 0) {
+      await supabase.from('leads')
+        .update({ status: 'pending', retry_count: 0 })
+        .eq('campaign_id', cid)
+        .eq('status', 'scraped');
+      console.log(`[SCHEDULER] 🔄 Auto-rescue: ${scrapedCount} lead(s) scraped → pending en "${cname}"`);
+    }
+
     // Contar pending leads
     const { count: pendingCount } = await supabase
       .from('leads')
