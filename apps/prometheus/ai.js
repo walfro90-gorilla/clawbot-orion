@@ -340,3 +340,51 @@ Responde ÚNICAMENTE con el texto del mensaje. Sin comillas, sin prefijos, sin m
 
   return response.text.trim();
 }
+
+// ── Qualify an inbound message — is this a potential lead or a vendor/spam? ──
+// Fast, cheap call. Returns { qualified, reason, signal }
+// signal: 'lead' | 'vendor' | 'spam' | 'recruiter' | 'unknown'
+export async function qualifyInboundMessage({ senderName, messageText, accountContext = '' }) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error('GEMINI_API_KEY not set');
+
+  const ai = new GoogleGenAI({ apiKey });
+
+  const prompt = `Analiza este mensaje de LinkedIn y clasifícalo.
+
+REMITENTE: ${senderName ?? 'Desconocido'}
+MENSAJE:
+"${messageText ?? ''}"
+
+${accountContext ? `CONTEXTO DE LA CUENTA RECEPTORA: ${accountContext}` : ''}
+
+Clasifica el mensaje en UNA de estas categorías:
+- "lead": Persona que puede ser un cliente potencial. Muestra interés, curiosidad, hace preguntas sobre los servicios, es un decisor, o simplemente quiere conectar (dar el beneficio de la duda a mensajes cortos como "Hola").
+- "vendor": Alguien que quiere VENDERNOS algo. Señales: "te ofrezco", "ofrecemos", "somos una agencia/empresa", "podemos ayudarte a", propuestas comerciales.
+- "recruiter": Headhunter o reclutador buscando contratar.
+- "spam": Mensaje genérico masivo, sin personalización, copy-paste evidente.
+- "unknown": No se puede determinar con la información disponible.
+
+Regla: ante la duda entre "lead" y "unknown", clasifica como "lead".
+
+Responde ÚNICAMENTE con JSON válido:
+{"signal": "lead|vendor|recruiter|spam|unknown", "qualified": true|false, "reason": "una frase corta explicando la clasificación"}
+
+qualified = true solo si signal es "lead".`;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      config: {
+        temperature: 0.3,
+        maxOutputTokens: 100,
+        thinkingConfig: { thinkingBudget: 0 },
+        responseMimeType: 'application/json',
+      },
+      contents: prompt,
+    });
+    return JSON.parse(response.text.trim());
+  } catch {
+    return { signal: 'unknown', qualified: true, reason: 'No se pudo clasificar — asumiendo lead por defecto' };
+  }
+}

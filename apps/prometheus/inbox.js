@@ -20,7 +20,7 @@ import { chromium } from 'playwright-extra'
 import StealthPlugin from 'puppeteer-extra-plugin-stealth'
 import dotenv from 'dotenv'
 import { supabase } from './lib/supabase.js'
-import { generateReplyDraft } from './ai.js'
+import { generateReplyDraft, qualifyInboundMessage } from './ai.js'
 import { randomContextOptions } from './lib/browser.js'
 
 dotenv.config()
@@ -426,9 +426,110 @@ function getOtherParticipant(convo) {
   return parts.find(p => p.participantType?.member?.distance !== 'SELF') ?? null
 }
 
+// ── Procesar mensaje inbound de persona desconocida (no en leadMap) ───────────
+// Califica con IA si es un lead potencial. Si sí, crea lead + genera draft.
+async function processInboundUnknown(member, messageText, threadId, account) {
+  const senderName = `${member.firstName?.text ?? ''} ${member.lastName?.text ?? ''}`.trim()
+  const publicId   = member.publicIdentifier ?? null
+  const profileUrl = publicId ? `https://www.linkedin.com/in/${publicId}/` : null
+
+  console.log(`[INBOX] 📬 Inbound desconocido: ${senderName} — calificando...`)
+
+  // Evitar duplicados: si ya existe un lead con esta URL, no crear otro
+  if (profileUrl) {
+    const { data: existing } = await supabase.from('leads')
+      .select('id, status')
+      .eq('linkedin_url', profileUrl)
+      .maybeSingle()
+    if (existing) {
+      console.log(`[INBOX]   Lead ya existe (${existing.status}) — skip inbound create`)
+      return
+    }
+  }
+
+  // Clasificar con IA
+  const qualification = await qualifyInboundMessage({
+    senderName,
+    messageText,
+    accountContext: account?.label ? `Cuenta LinkedIn de ${account.label}` : '',
+  }).catch(() => ({ signal: 'unknown', qualified: true, reason: 'Error de clasificación' }))
+
+  console.log(`[INBOX]   Clasificación: ${qualification.signal} — ${qualification.reason}`)
+
+  if (!qualification.qualified) {
+    console.log(`[INBOX]   Descartado (${qualification.signal}) — no es un lead`)
+    return
+  }
+
+  if (DRY_RUN) {
+    console.log(`[INBOX][DRY] Lead inbound calificado: ${senderName} — no se crea en dry-run`)
+    return
+  }
+
+  // Encontrar campaña activa de esta cuenta para asignar el lead
+  const { data: campaign } = await supabase.from('campaigns')
+    .select('id, name, auto_reply_mode, auto_reply_delay_min, auto_reply_delay_max, ai_tone, ai_sender_persona, ai_company_context, ai_example_messages')
+    .eq('linkedin_account_id', account.id)
+    .eq('is_active', true)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  // Crear lead inbound
+  const { data: newLead, error: leadErr } = await supabase.from('leads').insert({
+    campaign_id:   campaign?.id ?? null,
+    linkedin_url:  profileUrl,
+    full_name:     senderName,
+    status:        'replied',
+    source:        'inbound',
+    replied_at:    new Date().toISOString(),
+    ai_qualified:  true,
+    profile_data:  {
+      headline:  member.headline?.text ?? null,
+      location:  member.location?.basicLocation?.countryCode ?? null,
+    },
+  }).select('id').single()
+
+  if (leadErr || !newLead?.id) {
+    console.error(`[INBOX] Error creando lead inbound ${senderName}:`, leadErr?.message)
+    return
+  }
+
+  console.log(`[INBOX] ✅ Lead inbound creado: ${senderName} (${newLead.id}) — campaña: ${campaign?.name ?? 'sin campaña'}`)
+
+  // Crear conversación
+  const { data: conv } = await supabase.from('conversations').upsert({
+    lead_id:             newLead.id,
+    linkedin_account_id: account.id,
+    linkedin_thread_id:  threadId,
+    status:              'active',
+    last_message_at:     new Date().toISOString(),
+    last_message_text:   messageText?.slice(0, 1000),
+    inbox_checked_at:    new Date().toISOString(),
+  }, { onConflict: 'lead_id' }).select('id').single()
+
+  if (!conv?.id) return
+
+  // Registrar evento inbound
+  await supabase.from('conversation_events').insert({
+    conversation_id: conv.id,
+    event_type:      'reply_received',
+    direction:       'inbound',
+    content:         messageText?.slice(0, 4000),
+    sent_at:         new Date().toISOString(),
+  })
+
+  // Generar draft de respuesta si la campaña tiene auto-reply
+  if (campaign?.auto_reply_mode && campaign.auto_reply_mode !== 'manual') {
+    const fakeLead = { id: newLead.id, full_name: senderName, campaign_id: campaign.id }
+    generateDraftAsync(fakeLead, messageText)
+      .catch(e => console.error(`[INBOX] Draft inbound error para ${senderName}:`, e.message))
+  }
+}
+
 // ── Paso 2: Messaging — detectar mensajes recibidos via LinkedIn GraphQL ─────
 // Recibe globalApiResponses capturadas globalmente desde el inicio del run
-async function checkMessaging(page, leadMap, leads, stats, globalApiResponses) {
+async function checkMessaging(page, leadMap, leads, stats, globalApiResponses, account) {
   console.log('[INBOX] → Checking messaging inbox via Voyager API...')
   console.log(`[INBOX] API responses captured so far: ${globalApiResponses.size}`)
 
@@ -561,7 +662,43 @@ async function checkMessaging(page, leadMap, leads, stats, globalApiResponses) {
     const matchedLead = leadNameMap.get(fullName.toLowerCase())
 
     if (!matchedLead) {
-      // No es un lead nuestro — skip
+      // Persona desconocida — si tiene mensajes sin leer, calificar como inbound potencial
+      if ((convo.unreadCount ?? 0) > 0) {
+        const threadId = extractThreadId(convo)
+        // Necesitamos el texto del mensaje — navegar al hilo para obtenerlo
+        // (usamos la misma lógica que para leads conocidos, pero de forma simplificada)
+        let inboundText = null
+        if (threadId) {
+          try {
+            for (const url of [...globalApiResponses.keys()]) {
+              if (url.toLowerCase().includes('messengermessages')) globalApiResponses.delete(url)
+            }
+            await page.goto(`https://www.linkedin.com/messaging/thread/${threadId}/`, {
+              waitUntil: 'domcontentloaded', timeout: 20000,
+            })
+            await page.waitForTimeout(2500)
+            for (const [url, json] of globalApiResponses.entries()) {
+              if (url.toLowerCase().includes('messengermessages')) {
+                const els = json?.data?.messengerMessagesBySyncToken?.elements
+                  ?? json?.data?.messengerMessagesByAnchorTimestamp?.elements
+                  ?? json?.data?.messengerMessages?.elements ?? []
+                const isSelf = m => m.sender?.participantType?.member?.distance === 'SELF'
+                const lastOutIdx = [...els].reduce((idx, m, i) => isSelf(m) ? i : idx, -1)
+                const pending = els.slice(lastOutIdx + 1).filter(m => !isSelf(m))
+                const parts = pending.map(m => (m.body?.text ?? '').trim()).filter(Boolean)
+                if (parts.length) inboundText = parts.join('\n\n')
+                break
+              }
+            }
+          } catch (e) {
+            console.warn(`[INBOX] Error leyendo hilo inbound desconocido:`, e.message)
+          }
+        }
+        if (inboundText) {
+          await processInboundUnknown(member, inboundText, threadId, account)
+          stats.replied++
+        }
+      }
       continue
     }
 
@@ -828,7 +965,7 @@ async function run() {
 
     // ── Paso 2: Messaging ─────────────────────────────────────────────────────
     try {
-      await checkMessaging(page, leadMap, leads, stats, globalApiResponses)
+      await checkMessaging(page, leadMap, leads, stats, globalApiResponses, account)
     } catch (err) {
       console.warn('[INBOX] Messaging check failed:', err.message)
       stats.errors++

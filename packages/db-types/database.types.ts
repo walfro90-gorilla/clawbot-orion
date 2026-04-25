@@ -696,6 +696,7 @@ export type Database = {
           retry_count: number
           scraped_at: string | null
           sent_at: string | null
+          source: string | null
           status: string | null
         }
         Insert: {
@@ -719,6 +720,7 @@ export type Database = {
           retry_count?: number
           scraped_at?: string | null
           sent_at?: string | null
+          source?: string | null
           status?: string | null
         }
         Update: {
@@ -742,6 +744,7 @@ export type Database = {
           retry_count?: number
           scraped_at?: string | null
           sent_at?: string | null
+          source?: string | null
           status?: string | null
         }
         Relationships: [
@@ -1324,6 +1327,7 @@ export type Database = {
           retry_count: number
           scraped_at: string | null
           sent_at: string | null
+          source: string | null
           status: string | null
         }[]
         SetofOptions: {

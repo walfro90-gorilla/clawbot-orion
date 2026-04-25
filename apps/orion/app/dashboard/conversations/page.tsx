@@ -40,7 +40,7 @@ export default async function ConversationsPage() {
       ai_reply_scheduled_at,
       conversation_turn,
       leads (
-        id, full_name, linkedin_url, status,
+        id, full_name, linkedin_url, status, source,
         campaigns ( name )
       )
     `)
@@ -145,12 +145,19 @@ export default async function ConversationsPage() {
                   return (
                     <tr key={c.id} className="hover:bg-gray-800/50 transition-colors">
                       <td className="px-4 py-3">
-                        <Link
-                          href={`/dashboard/conversations/${c.lead_id}`}
-                          className="text-white hover:text-blue-400 font-medium"
-                        >
-                          {lead?.full_name ?? "Sin nombre"}
-                        </Link>
+                        <div className="flex items-center gap-1.5">
+                          <Link
+                            href={`/dashboard/conversations/${c.lead_id}`}
+                            className="text-white hover:text-blue-400 font-medium"
+                          >
+                            {lead?.full_name ?? "Sin nombre"}
+                          </Link>
+                          {(lead as any)?.source === "inbound" && (
+                            <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-purple-500/15 border border-purple-500/30 text-purple-400 font-bold tracking-wide shrink-0">
+                              INBOUND
+                            </span>
+                          )}
+                        </div>
                         {lead?.linkedin_url && (
                           <div className="text-gray-500 text-xs mt-0.5 truncate max-w-[180px]">
                             {lead.linkedin_url.replace("https://www.linkedin.com/in/", "")}
