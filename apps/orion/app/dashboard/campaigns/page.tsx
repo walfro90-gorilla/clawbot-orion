@@ -47,6 +47,58 @@ async function updateSchedulerSettings(formData: FormData) {
   redirect("/dashboard/campaigns")
 }
 
+async function duplicateCampaign(formData: FormData) {
+  "use server"
+  const admin = createAdminClient()
+  const id    = formData.get("campaign_id") as string
+  if (!id) return
+
+  const { data: src } = await admin
+    .from("campaigns")
+    .select("*")
+    .eq("id", id)
+    .single()
+  if (!src) return
+
+  // Destructure to exclude auto-generated fields
+  const { id: _id, created_at: _ca, updated_at: _ua, ...srcFields } = src as any
+
+  const { data: newCamp } = await admin.from("campaigns").insert({
+    ...srcFields,
+    name:             `${src.name} (copia)`,
+    is_active:        false,
+    batch_paused:     true,
+    search_paused:    true,
+    follow_up_paused: true,
+    last_batch_at:    null,
+    last_searched_at: null,
+    last_followup_at: null,
+    last_followup2_at: null,
+    last_followup3_at: null,
+  }).select("id").single()
+
+  if (newCamp?.id) {
+    // Copy active message template
+    const { data: tmpl } = await admin
+      .from("message_templates")
+      .select("*")
+      .eq("campaign_id", id)
+      .eq("is_active", true)
+      .maybeSingle()
+    if (tmpl) {
+      await admin.from("message_templates").insert({
+        ...tmpl,
+        id:         undefined,
+        campaign_id: newCamp.id,
+        created_at: undefined,
+        updated_at: undefined,
+      })
+    }
+    redirect(`/dashboard/campaigns/${newCamp.id}/edit`)
+  }
+  redirect("/dashboard/campaigns")
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 // Risk level based on warmup_status
@@ -217,6 +269,14 @@ export default async function CampaignsPage() {
                     className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 text-xs rounded-lg transition-colors">
                     Editar
                   </Link>
+                  {!isRestricted && (
+                    <form action={duplicateCampaign}>
+                      <input type="hidden" name="campaign_id" value={c.id} />
+                      <button type="submit" className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 text-xs rounded-lg transition-colors" title="Duplicar campaña">
+                        ⧉ Duplicar
+                      </button>
+                    </form>
+                  )}
                 </div>
               </div>
 

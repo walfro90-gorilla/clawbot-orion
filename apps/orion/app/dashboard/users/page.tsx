@@ -1,6 +1,7 @@
 import { createAdminClient } from "@/lib/supabase/admin"
 import { requireRole } from "@/lib/auth/role"
 import { redirect } from "next/navigation"
+import { DeleteUserBtn } from "@/components/delete-user-btn"
 
 // ── Server Actions ─────────────────────────────────────────────────────────────
 
@@ -231,12 +232,11 @@ export default async function UsersPage() {
                           </form>
 
                           {!isMe && (
-                            <form action={deleteUser}>
-                              <input type="hidden" name="user_id" value={u.id} />
-                              <button type="submit" className="w-full py-2 bg-red-600/20 hover:bg-red-600/40 text-red-400 text-xs font-medium rounded-lg border border-red-500/30 transition-colors">
-                                🗑 Eliminar usuario
-                              </button>
-                            </form>
+                            <DeleteUserBtn
+                              userId={u.id}
+                              userEmail={u.email ?? ""}
+                              action={deleteUser}
+                            />
                           )}
                         </div>
                       </details>

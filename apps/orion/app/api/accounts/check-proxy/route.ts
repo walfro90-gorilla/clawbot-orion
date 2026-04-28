@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createAdminClient } from "@/lib/supabase/admin"
 import { createClient } from "@/lib/supabase/server"
+import { ROLE_LEVEL } from "@/lib/auth/role"
 import * as http from "node:http"
 import * as https from "node:https"
 import * as url from "node:url"
@@ -79,19 +80,23 @@ export async function POST(req: NextRequest) {
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   const admin = createAdminClient()
   const { data: profile } = await admin.from("profiles").select("role").eq("id", user.id).single()
-  const role = profile?.role ?? "viewer"
-  if (!["god_admin", "admin"].includes(role)) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 })
-  }
+  const role = (profile?.role ?? "viewer") as keyof typeof ROLE_LEVEL
 
   const { accountId } = await req.json()
   if (!accountId) return NextResponse.json({ error: "accountId required" }, { status: 400 })
 
   const { data: account } = await admin
     .from("linkedin_accounts")
-    .select("id, label, proxy_url")
+    .select("id, label, proxy_url, user_id")
     .eq("id", accountId)
     .single()
+
+  // Allow admins OR the account owner
+  const isAdmin = (ROLE_LEVEL[role] ?? 0) >= 3
+  const isOwner = account?.user_id === user.id
+  if (!isAdmin && !isOwner) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+  }
 
   if (!account?.proxy_url) {
     return NextResponse.json({ error: "No proxy configured for this account" }, { status: 400 })

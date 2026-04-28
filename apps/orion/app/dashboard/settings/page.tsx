@@ -1,6 +1,7 @@
 import { createClient } from "@/lib/supabase/server"
 import { createAdminClient } from "@/lib/supabase/admin"
 import { redirect } from "next/navigation"
+import { ProxyChecker } from "@/components/proxy-checker"
 
 async function saveSettings(formData: FormData) {
   "use server"
@@ -42,7 +43,7 @@ export default async function SettingsPage({
   // Find the LinkedIn account assigned to this user
   const { data: account } = await admin
     .from("linkedin_accounts")
-    .select("id, label, linkedin_profile_url, cal_com_url, li_at_cookie_updated_at, warmup_status, status, reply_delay_min, reply_delay_max")
+    .select("id, label, linkedin_profile_url, cal_com_url, li_at_cookie_updated_at, warmup_status, status, reply_delay_min, reply_delay_max, proxy_url, proxy_ip, proxy_country_code, proxy_country_name, proxy_city, proxy_checked_at")
     .eq("user_id", user.id)
     .maybeSingle()
 
@@ -126,6 +127,22 @@ export default async function SettingsPage({
               <p className="text-gray-500 text-xs mb-1">Cookie LinkedIn</p>
               <p className={`text-sm font-medium ${cookieStatus.cls}`}>{cookieStatus.label}</p>
             </div>
+          </div>
+
+          {/* Proxy monitor */}
+          <div className="pt-3 border-t border-gray-700/60">
+            <h2 className="text-gray-50 font-medium mb-2">Proxy / IP de salida</h2>
+            <ProxyChecker
+              accountId={account.id}
+              hasProxy={!!account.proxy_url}
+              initial={{
+                ip:          account.proxy_ip   ?? null,
+                countryCode: account.proxy_country_code ?? null,
+                country:     account.proxy_country_name ?? null,
+                city:        account.proxy_city  ?? null,
+                checkedAt:   account.proxy_checked_at ?? null,
+              }}
+            />
           </div>
 
           {cookieDays !== null && cookieDays >= 30 && (

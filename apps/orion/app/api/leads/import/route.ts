@@ -3,32 +3,25 @@ export const runtime = "nodejs"
 import { NextRequest, NextResponse } from "next/server"
 import { createClient } from "@/lib/supabase/server"
 import { createAdminClient } from "@/lib/supabase/admin"
+import { ROLE_LEVEL } from "@/lib/auth/role"
+import { checkRateLimit } from "@/lib/rate-limit"
+import { parse as csvParse } from "csv-parse/sync"
 
-const roleLevel: Record<string, number> = { god_admin: 4, admin: 3, user: 2, viewer: 1 }
+const MAX_CSV_BYTES = 5 * 1024 * 1024 // 5 MB
 
 function parseCSV(text: string): Record<string, string>[] {
-  const lines = text.trim().split(/\r?\n/)
-  if (lines.length < 2) return []
-
-  // Parse header — normalize to lowercase, trim whitespace
-  const headers = lines[0].split(",").map(h => h.trim().toLowerCase().replace(/['"]/g, ""))
-
-  return lines.slice(1).map(line => {
-    // Simple CSV parser — handles basic quoted fields
-    const values: string[] = []
-    let current = ""
-    let inQuotes = false
-    for (const char of line) {
-      if (char === '"') { inQuotes = !inQuotes }
-      else if (char === "," && !inQuotes) { values.push(current.trim()); current = "" }
-      else { current += char }
-    }
-    values.push(current.trim())
-
-    const row: Record<string, string> = {}
-    headers.forEach((h, i) => { row[h] = (values[i] ?? "").replace(/^["']|["']$/g, "").trim() })
-    return row
-  }).filter(r => Object.values(r).some(v => v !== ""))
+  try {
+    const rows: Record<string, string>[] = csvParse(text, {
+      columns: (headers: string[]) => headers.map(h => h.trim().toLowerCase().replace(/['"]/g, "")),
+      skip_empty_lines: true,
+      trim: true,
+      relax_quotes: true,
+      relax_column_count: true,
+    })
+    return rows.filter(r => Object.values(r).some(v => v !== ""))
+  } catch {
+    return []
+  }
 }
 
 function normalizeLinkedInUrl(raw: string): string | null {
@@ -53,8 +46,17 @@ export async function POST(req: NextRequest) {
 
   const admin = createAdminClient()
   const { data: profile } = await admin.from("profiles").select("role").eq("id", user.id).single()
-  const userLevel = roleLevel[profile?.role ?? ""] ?? 0
+  const userLevel = ROLE_LEVEL[profile?.role as keyof typeof ROLE_LEVEL] ?? 0
   if (userLevel < 3) return NextResponse.json({ error: "Forbidden — admins only" }, { status: 403 })
+
+  // Rate limit: max 10 imports per user per hour
+  const rl = checkRateLimit(`import:${user.id}`, 10, 60 * 60 * 1000)
+  if (!rl.ok) {
+    return NextResponse.json(
+      { error: `Demasiadas importaciones. Intenta en ${Math.ceil(rl.retryAfterMs / 60_000)} min.` },
+      { status: 429 }
+    )
+  }
 
   let campaignId: string
   let csvText: string
@@ -75,6 +77,9 @@ export async function POST(req: NextRequest) {
 
   if (!campaignId) return NextResponse.json({ error: "campaignId required" }, { status: 400 })
   if (!csvText?.trim()) return NextResponse.json({ error: "Empty CSV" }, { status: 400 })
+  if (Buffer.byteLength(csvText, "utf8") > MAX_CSV_BYTES) {
+    return NextResponse.json({ error: "Archivo demasiado grande (máx 5 MB)" }, { status: 413 })
+  }
 
   // Validate campaign exists and user can access it
   const { data: campaign } = await admin

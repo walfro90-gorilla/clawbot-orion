@@ -230,6 +230,11 @@ async function tick() {
     return;
   }
 
+  // Batch/search: true siempre que estemos en 8-22h — cada campaña filtra por sus propios schedule_days
+  const inGlobalHours = true;
+  // Inbox: Lun-Dom 8-21h
+  const inInboxHours  = isInboxHours();
+
   // ── Cargar campañas activas con su cuenta LinkedIn ──────────────────────────
   const { data: campaigns, error } = await supabase
     .from('campaigns')

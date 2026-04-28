@@ -4,10 +4,10 @@ import { NextRequest, NextResponse } from "next/server"
 import { exec } from "child_process"
 import { createClient } from "@/lib/supabase/server"
 import { createAdminClient } from "@/lib/supabase/admin"
+import { ROLE_LEVEL } from "@/lib/auth/role"
 
 const PROMETHEUS_DIR = "/root/clawbot/apps/prometheus"
-
-const roleLevel: Record<string, number> = { god_admin: 4, admin: 3, user: 2, viewer: 1 }
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 export async function POST(req: NextRequest) {
   const supabase = await createClient()
@@ -16,7 +16,7 @@ export async function POST(req: NextRequest) {
 
   const admin = createAdminClient()
   const { data: profile } = await admin.from("profiles").select("role").eq("id", user.id).single()
-  const userLevel = roleLevel[profile?.role ?? ""] ?? 0
+  const userLevel = ROLE_LEVEL[profile?.role as keyof typeof ROLE_LEVEL] ?? 0
   if (userLevel < 2) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
 
   const body = await req.json()
@@ -24,6 +24,9 @@ export async function POST(req: NextRequest) {
 
   if (!leadId || !message?.trim()) {
     return NextResponse.json({ error: "leadId and message are required" }, { status: 400 })
+  }
+  if (!UUID_RE.test(leadId)) {
+    return NextResponse.json({ error: "Invalid leadId" }, { status: 400 })
   }
   if (message.trim().length > 2000) {
     return NextResponse.json({ error: "Message too long (max 2000 chars)" }, { status: 400 })
@@ -43,8 +46,6 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // Sanitize message for shell — pass via env var (no shell interpolation risk)
-  const cmd = `nohup node reply.js >> /tmp/manual-run-reply.log 2>&1 &`
   const env = {
     ...process.env,
     LEAD_ID:       leadId,
@@ -53,7 +54,11 @@ export async function POST(req: NextRequest) {
     LIVE_SEND:     "true",
   }
 
-  exec(cmd, { cwd: PROMETHEUS_DIR, env })
+  // stdout only — no /tmp file accumulation
+  exec(`node reply.js`, { cwd: PROMETHEUS_DIR, env, timeout: 120_000 }, (err, _stdout, stderr) => {
+    if (err) console.error(`[reply-api] reply.js failed for lead=${leadId}:`, stderr?.slice(0, 500))
+    else     console.log(`[reply-api] reply.js completed for lead=${leadId}`)
+  })
 
   console.log(`[reply-api] Reply triggered for lead=${leadId} by ${user.email}`)
   return NextResponse.json({ ok: true, estimatedSeconds: 90 })

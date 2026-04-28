@@ -3,8 +3,7 @@ export const runtime = "nodejs"
 import { NextRequest, NextResponse } from "next/server"
 import { createClient } from "@/lib/supabase/server"
 import { createAdminClient } from "@/lib/supabase/admin"
-
-const roleLevel: Record<string, number> = { god_admin: 4, admin: 3, user: 2, viewer: 1 }
+import { ROLE_LEVEL } from "@/lib/auth/role"
 
 export async function POST(req: NextRequest) {
   const supabase = await createClient()
@@ -13,7 +12,7 @@ export async function POST(req: NextRequest) {
 
   const admin = createAdminClient()
   const { data: profile } = await admin.from("profiles").select("role").eq("id", user.id).single()
-  const userLevel = roleLevel[profile?.role ?? ""] ?? 0
+  const userLevel = ROLE_LEVEL[profile?.role as keyof typeof ROLE_LEVEL] ?? 0
   if (userLevel < 2) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
 
   const body = await req.json()

@@ -126,8 +126,8 @@ export default async function MonitorPage() {
     db.from("leads").select("id", { count: "exact", head: true }).eq("status", "replied").gt("replied_at", new Date(Date.now() - 24*60*60*1000).toISOString()),
     db.from("scheduler_log").select("id", { count: "exact", head: true }).eq("status", "error").gt("created_at", new Date(Date.now() - 24*60*60*1000).toISOString()),
     db.from("leads").select("id", { count: "exact", head: true }).eq("status", "pending"),
-    // Pipeline: all leads grouped by campaign + status
-    db.from("leads").select("campaign_id, status"),
+    // Pipeline: use aggregated view — avoids loading all rows into JS
+    db.from("v_campaign_stats").select("campaign_id, in_queue, invited, connected, replied, meetings"),
     // Follow-up eligible: connected leads old enough, no follow_up_sent event yet
     db.from("leads")
       .select("id, campaign_id, full_name, sent_at, campaigns!inner(follow_up_delay_days, follow_up_message)")
@@ -166,14 +166,16 @@ export default async function MonitorPage() {
   const criticalCount = (accountsBanned ?? 0) + (errorsToday ?? 0) + (accountsRateLimited ?? 0) + (schedulerDead ? 1 : 0)
   const health = criticalCount === 0 ? "ok" : criticalCount <= 2 ? "warning" : "critical"
 
-  // Pipeline: aggregate lead counts per campaign per status
-  type StatusKey = "pending" | "invite_sent" | "connected" | "replied" | "failed" | "disqualified"
-  const pipeline: Record<string, Record<StatusKey, number>> = {}
+  // Pipeline: pre-aggregated from view — no JS fan-out
+  const pipeline: Record<string, { pending: number; invite_sent: number; connected: number; replied: number }> = {}
   for (const row of pipelineRows ?? []) {
     if (!row.campaign_id) continue
-    if (!pipeline[row.campaign_id]) pipeline[row.campaign_id] = { pending: 0, invite_sent: 0, connected: 0, replied: 0, failed: 0, disqualified: 0 }
-    const s = row.status as StatusKey
-    if (s in pipeline[row.campaign_id]) pipeline[row.campaign_id][s]++
+    pipeline[row.campaign_id] = {
+      pending:     row.in_queue    ?? 0,
+      invite_sent: row.invited     ?? 0,
+      connected:   row.connected   ?? 0,
+      replied:     row.replied     ?? 0,
+    }
   }
 
   // Follow-up eligible: filter by campaign's actual delay_days
@@ -274,8 +276,8 @@ export default async function MonitorPage() {
         <h2 className="text-white font-semibold mb-3">Pipeline de Leads por Campaña</h2>
         <div className="space-y-3">
           {(campaigns ?? []).map(c => {
-            const p = pipeline[c.id] ?? { pending: 0, invite_sent: 0, connected: 0, replied: 0, failed: 0, disqualified: 0 }
-            const total = p.pending + p.invite_sent + p.connected + p.replied + p.failed + p.disqualified
+            const p = pipeline[c.id] ?? { pending: 0, invite_sent: 0, connected: 0, replied: 0 }
+            const total = p.pending + p.invite_sent + p.connected + p.replied
             const fuEligible = followupByCampaign[c.id] ?? 0
             const acc = accounts?.find(a => a.id === c.linkedin_account_id)
             const lastFollowup = minAgo(c.last_followup_at ?? null)
@@ -285,7 +287,6 @@ export default async function MonitorPage() {
               { key: "invite_sent",  label: "Inv. enviada",color: "text-blue-400",  bg: "bg-blue-500",    value: p.invite_sent },
               { key: "connected",    label: "Conectado",   color: "text-green-400", bg: "bg-green-500",   value: p.connected },
               { key: "replied",      label: "Respondió",   color: "text-orange-400",bg: "bg-orange-500",  value: p.replied },
-              { key: "failed",       label: "Falló",       color: "text-red-400",   bg: "bg-red-500",     value: p.failed },
             ]
 
             return (

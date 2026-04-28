@@ -1,9 +1,20 @@
+"use server"
 import { createClient } from "@/lib/supabase/server"
 import { createAdminClient } from "@/lib/supabase/admin"
 import { getSessionUser } from "@/lib/auth/role"
 import { StatusBadge } from "@/components/ui/status-badge"
+import { BulkActionBar, BulkSelectRow } from "@/components/bulk-action-bar"
 import Link from "next/link"
 import type { LeadPipeline, LeadStatusConfig, Campaign } from "@clawbot/db-types"
+
+async function bulkUpdateStatus(formData: FormData) {
+  "use server"
+  const admin   = createAdminClient()
+  const ids     = formData.getAll("lead_ids") as string[]
+  const newStatus = formData.get("new_status") as string
+  if (!ids.length || !newStatus) return
+  await admin.from("leads").update({ status: newStatus }).in("id", ids)
+}
 
 export default async function LeadsPage({
   searchParams,
@@ -112,14 +123,22 @@ export default async function LeadsPage({
           <h1 className="text-2xl font-bold text-white">Leads</h1>
           <p className="text-gray-400 text-sm mt-0.5">{count ?? leadList.length} leads en total</p>
         </div>
-        {!isRestricted && (
-          <Link
-            href="/dashboard/leads/import"
+        <div className="flex gap-2">
+          <a
+            href={`/api/leads/export?${sp.status ? `status=${sp.status}` : ""}${sp.campaign ? `&campaign=${sp.campaign}` : ""}`}
             className="px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-white text-sm font-medium rounded-lg transition-colors"
           >
-            ↑ Importar CSV
-          </Link>
-        )}
+            ↓ Exportar CSV
+          </a>
+          {!isRestricted && (
+            <Link
+              href="/dashboard/leads/import"
+              className="px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-white text-sm font-medium rounded-lg transition-colors"
+            >
+              ↑ Importar CSV
+            </Link>
+          )}
+        </div>
       </div>
 
       {/* Filters */}
@@ -182,12 +201,16 @@ export default async function LeadsPage({
         })}
       </div>
 
+      {/* Bulk action bar */}
+      <BulkActionBar action={bulkUpdateStatus} />
+
       {/* Table */}
       <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
         <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-gray-800 text-gray-400 text-xs uppercase tracking-wider">
+              <th className="px-4 py-3 w-8"></th>
               <th className="px-4 py-3 text-left font-medium">Nombre</th>
               <th className="px-4 py-3 text-left font-medium">Estado</th>
               <th className="px-4 py-3 text-left font-medium">Secuencia</th>
@@ -212,6 +235,9 @@ export default async function LeadsPage({
                 <tr key={lead.id} className={`hover:bg-gray-800/50 transition-colors ${
                   alert?.level === "danger" ? "bg-red-950/20" : alert?.level === "warn" ? "bg-yellow-950/20" : ""
                 }`}>
+                  <td className="px-4 py-3">
+                    <BulkSelectRow leadId={lead.id as string} />
+                  </td>
                   <td className="px-4 py-3">
                     <Link href={`/dashboard/leads/${lead.id}`} className="text-white hover:text-blue-400 font-medium text-sm">
                       {lead.full_name ?? "Sin nombre"}

@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { exec } from "child_process"
 import { createClient } from "@/lib/supabase/server"
 import { createAdminClient } from "@/lib/supabase/admin"
+import { ROLE_LEVEL } from "@/lib/auth/role"
 
 const PROMETHEUS_DIR = "/root/clawbot/apps/prometheus"
 
@@ -27,8 +28,6 @@ function getScript(jobType: string): string | null {
   return null
 }
 
-const roleLevel: Record<string, number> = { god_admin: 4, admin: 3, user: 2, viewer: 1 }
-
 export async function POST(req: NextRequest) {
   // Auth check
   const supabase = await createClient()
@@ -37,7 +36,7 @@ export async function POST(req: NextRequest) {
 
   const admin = createAdminClient()
   const { data: profile } = await admin.from("profiles").select("role").eq("id", user.id).single()
-  const userLevel = roleLevel[profile?.role ?? ""] ?? 0
+  const userLevel = ROLE_LEVEL[profile?.role as keyof typeof ROLE_LEVEL] ?? 0
 
   const body = await req.json()
   const { jobType, campaignId, accountId } = body as {
@@ -116,9 +115,12 @@ export async function POST(req: NextRequest) {
   if (accountId)  envParts.push(`ACCOUNT_ID=${accountId}`)
   const envPrefix = envParts.join(" ")
 
-  // Fire and forget — nohup so it outlives the HTTP request
-  const cmd = `${envPrefix} nohup node ${script} >> /tmp/manual-run-${jobType}.log 2>&1 &`
-  exec(cmd, { cwd: PROMETHEUS_DIR })
+  // Fire and forget — stdout/stderr captured by PM2 log rotation
+  const cmd = `${envPrefix} node ${script}`
+  exec(cmd, { cwd: PROMETHEUS_DIR, timeout: 180_000 }, (err, _out, stderr) => {
+    if (err) console.error(`[run-job] ${jobType} failed:`, stderr?.slice(0, 500))
+    else     console.log(`[run-job] ${jobType} completed`)
+  })
 
   console.log(`[run-job] ${jobType} triggered manually by ${user.email} (account=${accountId ?? campaignId})`)
 

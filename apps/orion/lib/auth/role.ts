@@ -4,7 +4,7 @@ import { redirect } from "next/navigation"
 
 export type UserRole = "god_admin" | "admin" | "user" | "viewer"
 
-const ROLE_LEVEL: Record<UserRole, number> = {
+export const ROLE_LEVEL: Record<UserRole, number> = {
   god_admin: 4,
   admin:     3,
   user:      2,

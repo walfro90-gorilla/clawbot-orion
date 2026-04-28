@@ -64,15 +64,15 @@ export default async function ConversationsPage() {
 
     if (lastMsg?.startsWith("[Sin texto"))
       return { icon: "👁️", label: "Revisar manualmente", cls: "bg-orange-500/10 border-orange-500/30 text-orange-400" }
-    if (/ya no (trabajo|laburo|estoy|soy)|dejé de trabajar|ya no (pertenec|form)/i.test(msg))
+    if (/ya no (trabajo|laburo|estoy|soy)|dejé de trabajar|ya no (pertenec|form)|i (no longer|don't) work|moved (on|company)|left (the company|my role)/i.test(msg))
       return { icon: "🏢", label: "Ya no trabaja ahí", cls: "bg-red-500/10 border-red-500/30 text-red-400" }
-    if (/no soy (el|la|quien|la persona)|no es conmigo|no aplica para mí|otro contacto|te recomiendo acercarte/i.test(msg))
+    if (/no soy (el|la|quien|la persona)|no es conmigo|no aplica para mí|otro contacto|te recomiendo acercarte|wrong person|not the right (person|contact)|you('re| are) looking for|reach out to/i.test(msg))
       return { icon: "🔀", label: "Persona incorrecta", cls: "bg-red-500/10 border-red-500/30 text-red-400" }
-    if (/no (me interesa|tengo interés|estoy interesado|aplica)|no gracias|paso por ahora/i.test(msg))
+    if (/no (me interesa|tengo interés|estoy interesado|aplica)|no gracias|paso por ahora|not interested|no thanks|i('ll)? pass|don't (need|want)|not (a good|the right) fit/i.test(msg))
       return { icon: "❌", label: "No interesado", cls: "bg-gray-500/10 border-gray-500/30 text-gray-400" }
     if (/notificaci|antes de tiempo|mensaje (técnico|del sistema)/i.test(drft))
       return { icon: "🚨", label: "Draft sospechoso", cls: "bg-red-500/10 border-red-500/30 text-red-400" }
-    if (/interesa|cuéntame|cómo funciona|cuánto cuesta|me gustaría|cuándo|disponib/i.test(msg))
+    if (/interesa|cuéntame|cómo funciona|cuánto cuesta|me gustaría|cuándo|disponib|tell me more|how (does|do) (it|you)|how much|interested|sounds good|let's (talk|connect|chat)|when (are you|can we)/i.test(msg))
       return { icon: "🔥", label: "Interés detectado", cls: "bg-green-500/10 border-green-500/30 text-green-400" }
     return null
   }

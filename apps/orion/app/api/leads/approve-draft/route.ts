@@ -4,10 +4,13 @@ import { NextRequest, NextResponse } from "next/server"
 import { exec } from "child_process"
 import { createClient } from "@/lib/supabase/server"
 import { createAdminClient } from "@/lib/supabase/admin"
+import { ROLE_LEVEL } from "@/lib/auth/role"
 
 const PROMETHEUS_DIR = "/root/clawbot/apps/prometheus"
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-const roleLevel: Record<string, number> = { god_admin: 4, admin: 3, user: 2, viewer: 1 }
+// In-memory debounce: prevent double-click double-send
+const recentApprovals = new Map<string, number>()
 
 export async function POST(req: NextRequest) {
   const supabase = await createClient()
@@ -16,7 +19,7 @@ export async function POST(req: NextRequest) {
 
   const admin = createAdminClient()
   const { data: profile } = await admin.from("profiles").select("role").eq("id", user.id).single()
-  const userLevel = roleLevel[profile?.role ?? ""] ?? 0
+  const userLevel = ROLE_LEVEL[profile?.role as keyof typeof ROLE_LEVEL] ?? 0
   if (userLevel < 2) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
 
   const body = await req.json()
@@ -25,9 +28,19 @@ export async function POST(req: NextRequest) {
   if (!leadId || !message?.trim()) {
     return NextResponse.json({ error: "leadId and message are required" }, { status: 400 })
   }
+  if (!UUID_RE.test(leadId)) {
+    return NextResponse.json({ error: "Invalid leadId" }, { status: 400 })
+  }
   if (message.trim().length > 2000) {
     return NextResponse.json({ error: "Message too long (max 2000 chars)" }, { status: 400 })
   }
+
+  // Debounce: prevent double-click sending the same draft twice
+  const lastApproval = recentApprovals.get(leadId) ?? 0
+  if (Date.now() - lastApproval < 10_000) {
+    return NextResponse.json({ error: "Draft ya fue aprobado recientemente. Espera unos segundos." }, { status: 429 })
+  }
+  recentApprovals.set(leadId, Date.now())
 
   // Validate lead ownership for restricted roles
   if (userLevel < 3) {
@@ -43,12 +56,16 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // Read current conversation_turn before clearing draft
+  // Idempotency: check the draft still exists before proceeding
   const { data: conv } = await admin
     .from("conversations")
-    .select("conversation_turn")
+    .select("conversation_turn, ai_reply_draft, ai_reply_scheduled_at")
     .eq("lead_id", leadId)
     .maybeSingle()
+
+  if (!conv?.ai_reply_draft && !conv?.ai_reply_scheduled_at) {
+    return NextResponse.json({ error: "No hay draft pendiente para este lead (ya fue enviado o cancelado)" }, { status: 409 })
+  }
 
   // Clear draft + increment turn counter + cancel any pending scheduled send
   await admin
