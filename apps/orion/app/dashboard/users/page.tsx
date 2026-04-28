@@ -120,7 +120,7 @@ export default async function UsersPage() {
   return (
     <div className="p-8 space-y-8">
       <div>
-        <h1 className="text-2xl font-bold text-white">Gestión de Usuarios</h1>
+        <h1 className="text-2xl font-bold text-gray-50">Gestión de Usuarios</h1>
         <p className="text-gray-400 text-sm mt-0.5">{users?.length ?? 0} usuarios registrados</p>
       </div>
 
@@ -151,7 +151,7 @@ export default async function UsersPage() {
                           {u.email?.[0]?.toUpperCase()}
                         </div>
                         <div>
-                          <p className="text-white font-medium">{u.email}</p>
+                          <p className="text-gray-50 font-medium">{u.email}</p>
                           {isMe && <span className="text-xs text-blue-400">Tú</span>}
                         </div>
                       </div>
@@ -188,7 +188,7 @@ export default async function UsersPage() {
                                 name="company_name"
                                 defaultValue={p?.company_name ?? ""}
                                 placeholder="Nombre de empresa"
-                                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                               />
                             </div>
                             <div className="space-y-1">
@@ -196,7 +196,7 @@ export default async function UsersPage() {
                               <select
                                 name="role"
                                 defaultValue={p?.role ?? "user"}
-                                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                               >
                                 <option value="god_admin">god_admin — Superadmin</option>
                                 <option value="admin">admin — Acceso total</option>
@@ -209,7 +209,7 @@ export default async function UsersPage() {
                               <select
                                 name="linkedin_account_id"
                                 defaultValue={p?.linkedin_account_id ?? ""}
-                                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                               >
                                 <option value="">Sin vincular</option>
                                 {(accounts ?? []).map((a: any) => (
@@ -223,10 +223,10 @@ export default async function UsersPage() {
                                 name="new_password"
                                 type="password"
                                 placeholder="Dejar vacío para no cambiar"
-                                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                               />
                             </div>
-                            <button type="submit" className="w-full py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium rounded-lg transition-colors">
+                            <button type="submit" className="w-full py-2 bg-blue-600 hover:bg-blue-500 text-white  text-xs font-medium rounded-lg transition-colors">
                               Guardar cambios
                             </button>
                           </form>
@@ -251,33 +251,33 @@ export default async function UsersPage() {
 
       {/* Create user form */}
       <div className="bg-gray-900 border border-gray-800 border-dashed rounded-xl p-6">
-        <h2 className="text-white font-semibold mb-1">Crear nuevo usuario</h2>
+        <h2 className="text-gray-50 font-semibold mb-1">Crear nuevo usuario</h2>
         <p className="text-gray-400 text-xs mb-4">El usuario puede iniciar sesión de inmediato con las credenciales asignadas.</p>
         <form action={createUser} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           <div className="space-y-1">
             <label className="block text-xs text-gray-400">Email *</label>
             <input
               name="email" type="email" required placeholder="usuario@empresa.com"
-              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-50 placeholder-gray-500 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
           <div className="space-y-1">
             <label className="block text-xs text-gray-400">Contraseña *</label>
             <input
               name="password" type="password" required minLength={8} placeholder="Mínimo 8 caracteres"
-              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-50 placeholder-gray-500 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
           <div className="space-y-1">
             <label className="block text-xs text-gray-400">Empresa</label>
             <input
               name="company_name" placeholder="Nombre empresa"
-              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-50 placeholder-gray-500 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
           <div className="space-y-1">
             <label className="block text-xs text-gray-400">Rol</label>
-            <select name="role" className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <select name="role" className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
               <option value="user">user — Solo su cuenta</option>
               <option value="admin">admin — Acceso total</option>
               <option value="god_admin">god_admin — Superadmin</option>
@@ -286,7 +286,7 @@ export default async function UsersPage() {
           </div>
           <div className="space-y-1">
             <label className="block text-xs text-gray-400">Cuenta LinkedIn vinculada</label>
-            <select name="linkedin_account_id" className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <select name="linkedin_account_id" className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
               <option value="">Sin vincular</option>
               {(accounts ?? []).map((a: any) => (
                 <option key={a.id} value={a.id}>{a.label}</option>
@@ -294,7 +294,7 @@ export default async function UsersPage() {
             </select>
           </div>
           <div className="flex items-end">
-            <button type="submit" className="w-full px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold rounded-lg transition-colors">
+            <button type="submit" className="w-full px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white  text-sm font-semibold rounded-lg transition-colors">
               Crear usuario
             </button>
           </div>

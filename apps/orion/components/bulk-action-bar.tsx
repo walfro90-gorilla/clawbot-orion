@@ -66,10 +66,10 @@ export function BulkActionBar({ action }: { action: (fd: FormData) => Promise<vo
         ? "bg-blue-500/10 border-blue-500/30 opacity-100"
         : "bg-gray-900 border-gray-800 opacity-60"
     }`}>
-      <button type="button" onClick={selectAll} className="text-xs text-gray-400 hover:text-white transition-colors">
+      <button type="button" onClick={selectAll} className="text-xs text-gray-400 hover:text-gray-50 transition-colors">
         Sel. todos
       </button>
-      <button type="button" onClick={clearAll} className="text-xs text-gray-400 hover:text-white transition-colors">
+      <button type="button" onClick={clearAll} className="text-xs text-gray-400 hover:text-gray-50 transition-colors">
         Limpiar
       </button>
       {count > 0 && (
@@ -87,7 +87,7 @@ export function BulkActionBar({ action }: { action: (fd: FormData) => Promise<vo
             </select>
             <button
               type="submit"
-              className="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium rounded-lg transition-colors"
+              className="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white  text-xs font-medium rounded-lg transition-colors"
             >
               Cambiar estado
             </button>

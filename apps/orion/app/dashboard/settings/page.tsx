@@ -228,7 +228,7 @@ export default async function SettingsPage({
 
             <button
               type="submit"
-              className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium rounded-lg transition-colors"
+              className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 text-white  text-sm font-medium rounded-lg transition-colors"
             >
               Guardar configuración
             </button>

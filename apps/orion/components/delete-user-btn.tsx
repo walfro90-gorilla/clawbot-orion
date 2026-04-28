@@ -33,7 +33,7 @@ export function DeleteUserBtn({ userId, userEmail, action }: DeleteUserBtnProps)
         <button
           type="button"
           onClick={() => setConfirming(false)}
-          className="flex-1 py-1.5 text-xs rounded-lg border border-gray-600 text-gray-400 hover:text-white hover:bg-gray-700 transition-colors"
+          className="flex-1 py-1.5 text-xs rounded-lg border border-gray-600 text-gray-400 hover:text-gray-50 hover:bg-gray-700 transition-colors"
         >
           Cancelar
         </button>

@@ -54,7 +54,7 @@ export default async function MeetingsPage() {
         <td className="px-4 py-3">
           <Link
             href={`/dashboard/conversations/${m.id}`}
-            className="text-white hover:text-blue-400 font-medium"
+            className="text-gray-50 hover:text-blue-400 font-medium"
           >
             {m.full_name ?? "Sin nombre"}
           </Link>
@@ -70,7 +70,7 @@ export default async function MeetingsPage() {
         <td className="px-4 py-3">
           {meetingDate ? (
             <div>
-              <div className="text-white text-sm">
+              <div className="text-gray-50 text-sm">
                 {meetingDate.toLocaleDateString("es-MX", {
                   weekday: "short", day: "numeric", month: "short", year: "numeric",
                 })}
@@ -119,7 +119,7 @@ export default async function MeetingsPage() {
   return (
     <div className="p-8 space-y-8">
       <div>
-        <h1 className="text-2xl font-bold text-white">Reuniones</h1>
+        <h1 className="text-2xl font-bold text-gray-50">Reuniones</h1>
         <p className="text-gray-400 text-sm mt-0.5">
           {upcoming.length} próxima{upcoming.length !== 1 ? "s" : ""} · {past.length} pasada{past.length !== 1 ? "s" : ""}
         </p>
@@ -128,7 +128,7 @@ export default async function MeetingsPage() {
       {list.length === 0 ? (
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-12 text-center">
           <p className="text-4xl mb-3">📅</p>
-          <p className="text-white font-semibold">Sin reuniones agendadas</p>
+          <p className="text-gray-50 font-semibold">Sin reuniones agendadas</p>
           <p className="text-gray-400 text-sm mt-1">
             Las reuniones aparecerán aquí cuando un lead agende a través del link de Cal.com.
           </p>

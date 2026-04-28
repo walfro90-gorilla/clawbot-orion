@@ -59,13 +59,13 @@ export function ReplyBtn({ leadId, leadName }: ReplyBtnProps) {
           <div className="relative bg-gray-900 border border-gray-700 rounded-2xl p-6 w-full max-w-md shadow-2xl">
             {result === null ? (
               <>
-                <h2 className="text-white font-semibold text-lg mb-1">Responder a {leadName}</h2>
+                <h2 className="text-gray-50 font-semibold text-lg mb-1">Responder a {leadName}</h2>
                 <p className="text-gray-400 text-xs mb-4">
                   El mensaje se enviará vía LinkedIn Playwright. Proceso ~90s.
                 </p>
 
                 <textarea
-                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 resize-none focus:outline-none focus:border-blue-500"
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-50 placeholder-gray-500 resize-none focus:outline-none focus:border-blue-500"
                   rows={5}
                   maxLength={2000}
                   placeholder="Escribe tu respuesta..."
@@ -82,14 +82,14 @@ export function ReplyBtn({ leadId, leadName }: ReplyBtnProps) {
                   <button
                     onClick={() => setOpen(false)}
                     disabled={loading}
-                    className="flex-1 px-4 py-2 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 text-sm transition-colors"
+                    className="flex-1 px-4 py-2 rounded-lg border border-gray-700 text-gray-400 hover:text-gray-50 hover:bg-gray-800 text-sm transition-colors"
                   >
                     Cancelar
                   </button>
                   <button
                     onClick={handleSend}
                     disabled={loading || !message.trim()}
-                    className="flex-1 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-sm font-medium transition-colors"
+                    className="flex-1 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-gray-50  text-sm font-medium transition-colors"
                   >
                     {loading ? (
                       <span className="flex items-center justify-center gap-2">

@@ -102,7 +102,7 @@ export function RefreshInboxBtn({ accounts }: Props) {
         return (
           <div key={a.id} className="bg-gray-900 border border-gray-800 rounded-xl px-4 py-3 flex items-center gap-4 min-w-[280px]">
             <div className="flex-1 min-w-0">
-              <p className="text-white text-sm font-medium">{a.label ?? "Cuenta LinkedIn"}</p>
+              <p className="text-gray-50 text-sm font-medium">{a.label ?? "Cuenta LinkedIn"}</p>
               <p className="text-gray-500 text-xs mt-0.5">
                 Última revisión: <span className="text-gray-400">{formatAgo(lastCheck[a.id])}</span>
               </p>
@@ -134,7 +134,7 @@ export function RefreshInboxBtn({ accounts }: Props) {
                   ? "bg-blue-600/30 text-blue-400 cursor-wait"
                   : inCooldown
                   ? "bg-gray-800 text-gray-600 cursor-not-allowed"
-                  : "bg-blue-600 hover:bg-blue-500 text-white cursor-pointer"
+                  : "bg-blue-600 hover:bg-blue-500 text-white  cursor-pointer"
               }`}
             >
               {state === "running" ? (

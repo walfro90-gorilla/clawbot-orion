@@ -80,11 +80,11 @@ export default function ImportLeadsPage() {
   return (
     <div className="p-8 max-w-2xl mx-auto space-y-6">
       <div className="flex items-center gap-3">
-        <Link href="/dashboard/leads" className="text-gray-500 hover:text-white text-sm">
+        <Link href="/dashboard/leads" className="text-gray-500 hover:text-gray-50 text-sm">
           ← Leads
         </Link>
         <span className="text-gray-700">/</span>
-        <h1 className="text-xl font-bold text-white">Importar leads desde CSV</h1>
+        <h1 className="text-xl font-bold text-gray-50">Importar leads desde CSV</h1>
       </div>
 
       {/* Instructions */}
@@ -109,7 +109,7 @@ export default function ImportLeadsPage() {
           value={campaignId}
           onChange={e => setCampaignId(e.target.value)}
           onFocus={loadCampaigns}
-          className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+          className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-50 focus:outline-none focus:border-blue-500"
         >
           <option value="">— Seleccionar campaña —</option>
           {campaigns.map(c => (
@@ -135,7 +135,7 @@ export default function ImportLeadsPage() {
         >
           {file ? (
             <div>
-              <p className="text-white font-medium">{file.name}</p>
+              <p className="text-gray-50 font-medium">{file.name}</p>
               <p className="text-gray-400 text-xs mt-1">{(file.size / 1024).toFixed(1)} KB</p>
               <button
                 onClick={e => { e.stopPropagation(); handleFile(null); if (fileInputRef.current) fileInputRef.current.value = "" }}
@@ -201,9 +201,9 @@ export default function ImportLeadsPage() {
             {result.imported > 0 ? "✅ Importación completada" : "Sin leads nuevos"}
           </p>
           <div className="mt-2 space-y-1 text-xs text-gray-400">
-            <p>Importados: <span className="text-white font-medium">{result.imported}</span></p>
-            <p>Omitidos (duplicados o inválidos): <span className="text-white font-medium">{result.skipped}</span></p>
-            <p>Total procesados: <span className="text-white font-medium">{result.total}</span></p>
+            <p>Importados: <span className="text-gray-50 font-medium">{result.imported}</span></p>
+            <p>Omitidos (duplicados o inválidos): <span className="text-gray-50 font-medium">{result.skipped}</span></p>
+            <p>Total procesados: <span className="text-gray-50 font-medium">{result.total}</span></p>
           </div>
           {result.errors && result.errors.length > 0 && (
             <div className="mt-2">
@@ -221,14 +221,14 @@ export default function ImportLeadsPage() {
       <div className="flex gap-3">
         <Link
           href="/dashboard/leads"
-          className="flex-1 text-center px-4 py-2.5 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 text-sm transition-colors"
+          className="flex-1 text-center px-4 py-2.5 rounded-lg border border-gray-700 text-gray-400 hover:text-gray-50 hover:bg-gray-800 text-sm transition-colors"
         >
           Cancelar
         </Link>
         <button
           onClick={handleImport}
           disabled={importing || !file || !campaignId}
-          className="flex-1 px-4 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors"
+          className="flex-1 px-4 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-gray-50  text-sm font-medium transition-colors"
         >
           {importing ? (
             <span className="flex items-center justify-center gap-2">

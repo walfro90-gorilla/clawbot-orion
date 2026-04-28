@@ -16,13 +16,13 @@ export default function DashboardError({
   return (
     <div className="flex flex-col items-center justify-center min-h-[60vh] p-8 text-center">
       <div className="text-5xl mb-4">⚠️</div>
-      <h2 className="text-white text-xl font-semibold mb-2">Algo salió mal</h2>
+      <h2 className="text-gray-50 text-xl font-semibold mb-2">Algo salió mal</h2>
       <p className="text-gray-400 text-sm max-w-sm mb-6">
         {error.message || "Ocurrió un error inesperado en el dashboard."}
       </p>
       <button
         onClick={reset}
-        className="px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium rounded-lg transition-colors"
+        className="px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white  text-sm font-medium rounded-lg transition-colors"
       >
         Reintentar
       </button>

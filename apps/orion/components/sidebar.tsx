@@ -51,8 +51,8 @@ export function Sidebar({ email, role, alertCount = 0, unreadCount = 0 }: Sideba
       <Link href={href} onClick={() => setSidebarOpen(false)}
         className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
           active
-            ? "bg-blue-600 text-white font-medium"
-            : "text-gray-500 hover:text-gray-50 hover:bg-gray-800"
+            ? "bg-blue-600 text-white font-semibold shadow-sm"
+            : "text-gray-400 hover:text-gray-50 hover:bg-gray-800"
         }`}>
         <span>{icon}</span>
         {label}

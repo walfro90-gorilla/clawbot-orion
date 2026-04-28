@@ -78,7 +78,7 @@ export default async function NewCampaignPage() {
   return (
     <div className="p-8 max-w-4xl mx-auto space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-white">Nueva campaña</h1>
+        <h1 className="text-2xl font-bold text-gray-50">Nueva campaña</h1>
         <p className="text-gray-400 text-sm mt-0.5">Configura todos los parámetros de la campaña y el template de mensaje IA.</p>
       </div>
 
@@ -269,7 +269,7 @@ NUNCA uses el cargo/título como si fuera el nombre de una empresa.`}
         {/* ── ACTIONS ─────────────────────────────────────────────────── */}
         <div className="flex gap-3 pt-2">
           <button type="submit"
-            className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 text-white font-semibold text-sm rounded-lg transition-colors">
+            className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 text-white  font-semibold text-sm rounded-lg transition-colors">
             Crear campaña
           </button>
           <a href="/dashboard/campaigns"
@@ -284,7 +284,7 @@ NUNCA uses el cargo/título como si fuera el nombre de una empresa.`}
 
 // ── Sub-components ──────────────────────────────────────────────────────────────
 
-const inp = "w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+const inp = "w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-50 placeholder-gray-500 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
 
 function Section({ title, icon, description, children }: {
   title: string; icon?: string; description?: string; children: React.ReactNode
@@ -292,7 +292,7 @@ function Section({ title, icon, description, children }: {
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">
       <div>
-        <h2 className="text-white font-semibold">{icon && <span className="mr-2">{icon}</span>}{title}</h2>
+        <h2 className="text-gray-50 font-semibold">{icon && <span className="mr-2">{icon}</span>}{title}</h2>
         {description && <p className="text-gray-500 text-xs mt-0.5">{description}</p>}
       </div>
       {children}

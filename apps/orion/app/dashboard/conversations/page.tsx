@@ -98,7 +98,7 @@ export default async function ConversationsPage() {
   return (
     <div className="p-8 space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-white">Conversaciones</h1>
+        <h1 className="text-2xl font-bold text-gray-50">Conversaciones</h1>
         <p className="text-gray-400 text-sm mt-0.5">
           {list.length} conversación{list.length !== 1 ? "es" : ""} — bandeja de mensajes recibidos
         </p>
@@ -116,7 +116,7 @@ export default async function ConversationsPage() {
       {list.length === 0 ? (
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-12 text-center">
           <p className="text-4xl mb-3">💬</p>
-          <p className="text-white font-semibold">Sin conversaciones aún</p>
+          <p className="text-gray-50 font-semibold">Sin conversaciones aún</p>
           <p className="text-gray-400 text-sm mt-1">
             Las respuestas de LinkedIn aparecerán aquí cuando el inbox las capture.
           </p>
@@ -148,7 +148,7 @@ export default async function ConversationsPage() {
                         <div className="flex items-center gap-1.5">
                           <Link
                             href={`/dashboard/conversations/${c.lead_id}`}
-                            className="text-white hover:text-blue-400 font-medium"
+                            className="text-gray-50 hover:text-blue-400 font-medium"
                           >
                             {lead?.full_name ?? "Sin nombre"}
                           </Link>
@@ -170,7 +170,7 @@ export default async function ConversationsPage() {
                       <td className="px-4 py-3 text-xs max-w-[300px]">
                         {c.last_message_text ? (
                           <Link href={`/dashboard/conversations/${c.lead_id}`} className="group">
-                            <span className="text-gray-200 group-hover:text-white line-clamp-2 leading-relaxed">
+                            <span className="text-gray-200 group-hover:text-gray-50 line-clamp-2 leading-relaxed">
                               "{c.last_message_text.slice(0, 120)}{c.last_message_text.length > 120 ? "…" : ""}"
                             </span>
                           </Link>

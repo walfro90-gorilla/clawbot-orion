@@ -32,7 +32,7 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
   return (
     <div className="p-8 max-w-5xl space-y-6">
       {/* Back */}
-      <Link href="/dashboard/leads" className="text-gray-400 hover:text-white text-sm flex items-center gap-1">
+      <Link href="/dashboard/leads" className="text-gray-400 hover:text-gray-50 text-sm flex items-center gap-1">
         ← Volver a Leads
       </Link>
 
@@ -40,7 +40,7 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
       <div className="bg-gray-900 border border-gray-800 rounded-xl p-6">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-bold text-white">{lead.full_name ?? "Sin nombre"}</h1>
+            <h1 className="text-2xl font-bold text-gray-50">{lead.full_name ?? "Sin nombre"}</h1>
             <p className="text-gray-400 text-sm mt-1">{profile.headline}</p>
             <a
               href={lead.linkedin_url ?? "#"}
@@ -71,7 +71,7 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
             {lead.ai_subject && (
               <p className="text-gray-300 text-xs font-medium">Asunto: {lead.ai_subject}</p>
             )}
-            <p className="text-white text-sm leading-relaxed whitespace-pre-wrap bg-gray-800/50 rounded-lg p-3">
+            <p className="text-gray-50 text-sm leading-relaxed whitespace-pre-wrap bg-gray-800/50 rounded-lg p-3">
               {lead.ai_message}
             </p>
           </div>
@@ -114,7 +114,7 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
                     {e.sent_at ? new Date(e.sent_at).toLocaleString("es-MX") : ""}
                   </span>
                 </div>
-                <p className="text-white whitespace-pre-wrap">{e.content}</p>
+                <p className="text-gray-50 whitespace-pre-wrap">{e.content}</p>
               </div>
             ))}
           </div>
@@ -132,7 +132,7 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
                   <span>{n.author}</span>
                   <span>{new Date(n.created_at).toLocaleString("es-MX")}</span>
                 </div>
-                <p className="text-white">{n.content}</p>
+                <p className="text-gray-50">{n.content}</p>
               </div>
             ))}
           </div>
@@ -148,7 +148,7 @@ function MetaItem({ label, value }: { label: string; value: string }) {
   return (
     <div>
       <p className="text-xs text-gray-500">{label}</p>
-      <p className="text-sm text-white mt-0.5">{value}</p>
+      <p className="text-sm text-gray-50 mt-0.5">{value}</p>
     </div>
   )
 }
@@ -157,7 +157,7 @@ function Row({ label, value }: { label: string; value: string }) {
   return (
     <div className="grid grid-cols-3 gap-2">
       <dt className="text-gray-500">{label}</dt>
-      <dd className="col-span-2 text-white">{value}</dd>
+      <dd className="col-span-2 text-gray-50">{value}</dd>
     </div>
   )
 }

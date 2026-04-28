@@ -75,7 +75,7 @@ export function RunNowBtn({ jobType, campaignId, accountId, color = "blue" }: Ru
               <>
                 <div className="mb-4">
                   <div className="text-2xl mb-2">⚡</div>
-                  <h2 className="text-white font-semibold text-lg">
+                  <h2 className="text-gray-50 font-semibold text-lg">
                     Ejecutar {jobLabel} ahora
                   </h2>
                   <p className="text-gray-400 text-sm mt-1">
@@ -97,7 +97,7 @@ export function RunNowBtn({ jobType, campaignId, accountId, color = "blue" }: Ru
                   <button
                     onClick={() => setOpen(false)}
                     disabled={loading}
-                    className="flex-1 px-4 py-2 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 text-sm transition-colors"
+                    className="flex-1 px-4 py-2 rounded-lg border border-gray-700 text-gray-400 hover:text-gray-50 hover:bg-gray-800 text-sm transition-colors"
                   >
                     Cancelar
                   </button>

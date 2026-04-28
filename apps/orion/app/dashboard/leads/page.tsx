@@ -120,20 +120,20 @@ export default async function LeadsPage({
     <div className="p-8 space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-white">Leads</h1>
+          <h1 className="text-2xl font-bold text-gray-50">Leads</h1>
           <p className="text-gray-400 text-sm mt-0.5">{count ?? leadList.length} leads en total</p>
         </div>
         <div className="flex gap-2">
           <a
             href={`/api/leads/export?${sp.status ? `status=${sp.status}` : ""}${sp.campaign ? `&campaign=${sp.campaign}` : ""}`}
-            className="px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-white text-sm font-medium rounded-lg transition-colors"
+            className="px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-50 text-sm font-medium rounded-lg transition-colors"
           >
             ↓ Exportar CSV
           </a>
           {!isRestricted && (
             <Link
               href="/dashboard/leads/import"
-              className="px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-white text-sm font-medium rounded-lg transition-colors"
+              className="px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-50 text-sm font-medium rounded-lg transition-colors"
             >
               ↑ Importar CSV
             </Link>
@@ -147,12 +147,12 @@ export default async function LeadsPage({
           name="q"
           defaultValue={sp.q}
           placeholder="Buscar por nombre..."
-          className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-56"
+          className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-50 placeholder-gray-500 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-56"
         />
         <select
           name="status"
           defaultValue={sp.status ?? ""}
-          className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
         >
           <option value="">Todos los estados</option>
           {statuses.map((s) => (
@@ -162,7 +162,7 @@ export default async function LeadsPage({
         <select
           name="campaign"
           defaultValue={sp.campaign ?? ""}
-          className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
         >
           <option value="">Todas las campañas</option>
           {campList.map((c) => (
@@ -171,12 +171,12 @@ export default async function LeadsPage({
         </select>
         <button
           type="submit"
-          className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium rounded-lg transition-colors"
+          className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white  text-sm font-medium rounded-lg transition-colors"
         >
           Filtrar
         </button>
         {(sp.status || sp.campaign || sp.q) && (
-          <Link href="/dashboard/leads" className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white text-sm font-medium rounded-lg transition-colors">
+          <Link href="/dashboard/leads" className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-gray-50 text-sm font-medium rounded-lg transition-colors">
             Limpiar
           </Link>
         )}
@@ -239,7 +239,7 @@ export default async function LeadsPage({
                     <BulkSelectRow leadId={lead.id as string} />
                   </td>
                   <td className="px-4 py-3">
-                    <Link href={`/dashboard/leads/${lead.id}`} className="text-white hover:text-blue-400 font-medium text-sm">
+                    <Link href={`/dashboard/leads/${lead.id}`} className="text-gray-50 hover:text-blue-400 font-medium text-sm">
                       {lead.full_name ?? "Sin nombre"}
                     </Link>
                     <div className="text-gray-500 text-xs mt-0.5 truncate max-w-[180px]">
@@ -323,12 +323,12 @@ export default async function LeadsPage({
         <div className="flex justify-center gap-2">
           {page > 1 && (
             <Link href={`?page=${page - 1}&status=${sp.status ?? ""}&campaign=${sp.campaign ?? ""}&q=${sp.q ?? ""}`}
-              className="px-4 py-2 bg-gray-800 text-white rounded-lg text-sm hover:bg-gray-700">
+              className="px-4 py-2 bg-gray-800 text-gray-50 rounded-lg text-sm hover:bg-gray-700">
               ← Anterior
             </Link>
           )}
           <Link href={`?page=${page + 1}&status=${sp.status ?? ""}&campaign=${sp.campaign ?? ""}&q=${sp.q ?? ""}`}
-            className="px-4 py-2 bg-gray-800 text-white rounded-lg text-sm hover:bg-gray-700">
+            className="px-4 py-2 bg-gray-800 text-gray-50 rounded-lg text-sm hover:bg-gray-700">
             Siguiente →
           </Link>
         </div>

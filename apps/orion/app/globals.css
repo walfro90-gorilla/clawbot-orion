@@ -5,23 +5,27 @@
 
 /* ── Theme tokens ──────────────────────────────────────────────────────────── */
 /* Light = LinkedIn-inspired (DEFAULT — no .dark class needed)                  */
-/* Dark  = current theme (requires .dark class on <html>)                       */
+/* Dark  = original dark theme (requires .dark class on <html>)                 */
 
 :root {
   /* Backgrounds */
   --th-950: #F3F2EE;   /* page bg      — LinkedIn warm off-white */
   --th-900: #FFFFFF;   /* card/sidebar — white                   */
-  --th-800: #EAE8E4;   /* hover/surface                          */
+  --th-800: #F0EFEB;   /* surface/input bg                       */
   --th-700: #D4D2CF;   /* border strong                          */
   --th-600: #B8B6B3;   /* border subtle                          */
 
-  /* Text — gray tokens flip to dark values in light mode */
-  --th-50:  #191919;   /* was near-white; now near-black */
+  /* Text */
+  --th-50:  #191919;   /* primary text    — near-black */
   --th-100: #2D2D2D;
   --th-200: #3D3D3D;
   --th-300: #555555;
-  --th-400: #666666;   /* secondary text */
-  --th-500: #888888;   /* muted text     */
+  --th-400: #6B6B6B;   /* secondary text  */
+  --th-500: #999999;   /* muted / placeholder */
+
+  /* Light-mode specific elevation */
+  --shadow-card:  0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.05);
+  --shadow-hover: 0 4px 12px rgba(0,0,0,0.10);
 }
 
 .dark {
@@ -39,9 +43,12 @@
   --th-300: #d1d5db;
   --th-400: #9ca3af;
   --th-500: #6b7280;
+
+  --shadow-card:  none;
+  --shadow-hover: none;
 }
 
-/* ── Register in Tailwind — bg/border/text-gray-* auto-switch between themes ─ */
+/* ── Register in Tailwind ───────────────────────────────────────────────────── */
 @theme inline {
   --color-gray-50:  var(--th-50);
   --color-gray-100: var(--th-100);
@@ -64,4 +71,50 @@ body {
   color: var(--th-50);
   font-family: Arial, Helvetica, sans-serif;
   transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+/* ── Light mode: card elevation ─────────────────────────────────────────────── */
+/* Cards (bg-gray-900 = white in light) get a subtle shadow instead of being flat */
+:root:not(.dark) .bg-gray-900,
+:root:not(.dark) [class*="bg-gray-900"] {
+  box-shadow: var(--shadow-card);
+}
+
+/* ── Light mode: input fields ───────────────────────────────────────────────── */
+/* Inputs with bg-gray-800 (light surface) get a visible border */
+:root:not(.dark) input,
+:root:not(.dark) select,
+:root:not(.dark) textarea {
+  color: var(--th-50);
+}
+
+/* ── Light mode: sidebar polish ─────────────────────────────────────────────── */
+:root:not(.dark) aside {
+  border-right-color: var(--th-700);
+  box-shadow: 1px 0 0 var(--th-700);
+}
+
+/* ── Light mode: table rows ─────────────────────────────────────────────────── */
+:root:not(.dark) thead tr {
+  background: var(--th-800);
+}
+
+/* ── Notification / avatar badges always use white text ─────────────────────── */
+/* These are on colored backgrounds where white is always correct */
+.badge-dot,
+[class*="rounded-full"][class*="bg-red-"],
+[class*="rounded-full"][class*="bg-green-"],
+[class*="rounded-full"][class*="bg-blue-"],
+[class*="rounded-full"][class*="bg-yellow-"],
+[class*="bg-gradient-to-br"] {
+  color: white;
+}
+
+/* ── Light mode: divider lines more visible ─────────────────────────────────── */
+:root:not(.dark) .divide-y > * + * {
+  border-top-color: var(--th-700);
+}
+
+:root:not(.dark) [class*="border-gray-800"] {
+  border-color: var(--th-700);
 }

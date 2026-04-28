@@ -97,12 +97,12 @@ export default async function ConversationThreadPage({
             </svg>
           </Link>
           {/* Avatar */}
-          <div className="w-9 h-9 rounded-full bg-gradient-to-br from-blue-600 to-purple-600 flex items-center justify-center text-white text-sm font-bold flex-shrink-0">
+          <div className="w-9 h-9 rounded-full bg-gradient-to-br from-blue-600 to-purple-600 flex items-center justify-center text-gray-50 text-sm font-bold flex-shrink-0">
             {(lead.full_name ?? "?")[0].toUpperCase()}
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <span className="text-white font-semibold text-sm">{lead.full_name}</span>
+              <span className="text-gray-50 font-semibold text-sm">{lead.full_name}</span>
               <span className={`text-[10px] px-2 py-0.5 rounded-full border font-medium ${STATUS_COLORS[lead.status ?? ""] ?? "bg-gray-500/15 text-gray-400 border-gray-500/30"}`}>
                 {lead.status}
               </span>

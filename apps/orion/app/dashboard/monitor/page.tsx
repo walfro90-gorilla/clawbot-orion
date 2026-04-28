@@ -196,7 +196,7 @@ export default async function MonitorPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-white">Monitor del Sistema</h1>
+          <h1 className="text-2xl font-bold text-gray-50">Monitor del Sistema</h1>
           <p className="text-gray-400 text-sm mt-0.5">Estado en tiempo real de todos los jobs y alertas críticas</p>
         </div>
         <div className={`flex items-center gap-2 px-4 py-2 rounded-xl border text-sm font-medium ${
@@ -263,7 +263,7 @@ export default async function MonitorPage() {
               : "bg-gray-900 border-gray-800"
           }`}>
             <div className="text-xl mb-1">{icon}</div>
-            <div className={`text-2xl font-bold ${danger && value > 0 ? "text-red-400" : "text-white"}`}>
+            <div className={`text-2xl font-bold ${danger && value > 0 ? "text-red-400" : "text-gray-50"}`}>
               {value}
             </div>
             <div className="text-gray-500 text-xs mt-0.5 leading-tight">{label}</div>
@@ -273,7 +273,7 @@ export default async function MonitorPage() {
 
       {/* ── Pipeline de Leads ─────────────────────────────────────────────────── */}
       <div>
-        <h2 className="text-white font-semibold mb-3">Pipeline de Leads por Campaña</h2>
+        <h2 className="text-gray-50 font-semibold mb-3">Pipeline de Leads por Campaña</h2>
         <div className="space-y-3">
           {(campaigns ?? []).map(c => {
             const p = pipeline[c.id] ?? { pending: 0, invite_sent: 0, connected: 0, replied: 0 }
@@ -294,7 +294,7 @@ export default async function MonitorPage() {
                 <div className="flex items-center justify-between gap-4">
                   <div className="flex items-center gap-2">
                     <span className={`w-2 h-2 rounded-full ${c.is_active ? "bg-green-400" : "bg-gray-600"}`} />
-                    <span className="text-white font-medium text-sm">{c.name}</span>
+                    <span className="text-gray-50 font-medium text-sm">{c.name}</span>
                     {acc && (
                       <span className="text-xs text-gray-500">· {acc.label}</span>
                     )}
@@ -353,7 +353,7 @@ export default async function MonitorPage() {
 
       {/* ── Job Controls ─────────────────────────────────────────────────────── */}
       <div>
-        <h2 className="text-white font-semibold mb-3">Control de Jobs</h2>
+        <h2 className="text-gray-50 font-semibold mb-3">Control de Jobs</h2>
         <div className="space-y-3">
           {(campaigns ?? []).map(c => {
             const acc = accounts?.find(a => a.id === c.linkedin_account_id)
@@ -366,7 +366,7 @@ export default async function MonitorPage() {
                 {/* Campaign header */}
                 <div className="flex items-center justify-between mb-4">
                   <div>
-                    <h3 className="text-white font-medium">{c.name}</h3>
+                    <h3 className="text-gray-50 font-medium">{c.name}</h3>
                     <span className={`text-xs px-2 py-0.5 rounded-full ${
                       !c.is_active ? "bg-gray-700 text-gray-400" :
                       "bg-green-500/15 text-green-400"
@@ -523,7 +523,7 @@ export default async function MonitorPage() {
       {/* ── Alertas de Automatización ────────────────────────────────────────── */}
       {(activeAlerts ?? []).length > 0 && (
         <div>
-          <h2 className="text-white font-semibold mb-3">
+          <h2 className="text-gray-50 font-semibold mb-3">
             Alertas
             <span className="ml-2 text-xs font-normal text-gray-400">
               {(activeAlerts ?? []).filter(a => !a.resolved_at).length} sin resolver ·{" "}
@@ -578,7 +578,7 @@ export default async function MonitorPage() {
 
       {/* ── System Log ───────────────────────────────────────────────────────── */}
       <div>
-        <h2 className="text-white font-semibold mb-3">Log del Sistema</h2>
+        <h2 className="text-gray-50 font-semibold mb-3">Log del Sistema</h2>
         <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
@@ -658,7 +658,7 @@ export default async function MonitorPage() {
 
       {/* ── Cuentas LinkedIn ─────────────────────────────────────────────────── */}
       <div>
-        <h2 className="text-white font-semibold mb-3">Estado de Cuentas LinkedIn</h2>
+        <h2 className="text-gray-50 font-semibold mb-3">Estado de Cuentas LinkedIn</h2>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {(accounts ?? []).map(acc => (
             <div key={acc.id} className={`bg-gray-900 border rounded-xl p-4 ${
@@ -668,7 +668,7 @@ export default async function MonitorPage() {
             }`}>
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-white font-medium">{acc.label ?? acc.linkedin_profile_url ?? acc.id}</p>
+                  <p className="text-gray-50 font-medium">{acc.label ?? acc.linkedin_profile_url ?? acc.id}</p>
                   <p className="text-gray-500 text-xs mt-0.5">
                     Último inbox: {acc.last_inbox_check_at
                       ? `hace ${minAgo(acc.last_inbox_check_at)} min`
@@ -769,7 +769,7 @@ function ConfigField({ label, name, value, min, max, hint }: {
         min={min}
         max={max}
         defaultValue={value}
-        className="w-full px-2 py-1.5 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+        className="w-full px-2 py-1.5 bg-gray-700 border border-gray-600 rounded-lg text-gray-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
       />
       {hint && <p className="text-gray-600 text-xs">{hint}</p>}
     </div>

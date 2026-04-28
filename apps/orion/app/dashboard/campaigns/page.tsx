@@ -183,12 +183,12 @@ export default async function CampaignsPage() {
     <div className="p-4 sm:p-8 space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-white">Campañas</h1>
+          <h1 className="text-2xl font-bold text-gray-50">Campañas</h1>
           <p className="text-gray-400 text-sm mt-0.5">{campaigns.length} campañas</p>
         </div>
         {!isRestricted && (
           <Link href="/dashboard/campaigns/new"
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold rounded-lg transition-colors">
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white  text-sm font-semibold rounded-lg transition-colors">
             + Nueva campaña
           </Link>
         )}
@@ -243,7 +243,7 @@ export default async function CampaignsPage() {
                                   "bg-green-400 animate-pulse"
                   }`} />
                   <div className="min-w-0">
-                    <h2 className="text-white font-semibold truncate">{c.name}</h2>
+                    <h2 className="text-gray-50 font-semibold truncate">{c.name}</h2>
                     <div className="flex items-center gap-2 mt-0.5 flex-wrap text-xs">
                       <span className={`px-2 py-0.5 rounded-full font-medium ${
                         acct?.status === "active"       ? "bg-green-500/15 text-green-400" :
@@ -394,23 +394,23 @@ export default async function CampaignsPage() {
                         <label className="block text-xs text-gray-500">Inv/día</label>
                         <input name="daily_invite_target" type="number" min="1" max="20"
                           defaultValue={c.daily_invite_target ?? 8}
-                          className="w-full px-2 py-1.5 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                          className="w-full px-2 py-1.5 bg-gray-700 border border-gray-600 rounded-lg text-gray-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
                       </div>
                       <div className="space-y-1">
                         <label className="block text-xs text-gray-500">Gap (min)</label>
                         <input name="min_batch_gap_min" type="number" min="30" max="480"
                           defaultValue={c.min_batch_gap_min ?? 120}
-                          className="w-full px-2 py-1.5 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                          className="w-full px-2 py-1.5 bg-gray-700 border border-gray-600 rounded-lg text-gray-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
                       </div>
                       <div className="space-y-1">
                         <label className="block text-xs text-gray-500">Umbral cola</label>
                         <input name="min_pending_threshold" type="number" min="5" max="100"
                           defaultValue={c.min_pending_threshold ?? 15}
-                          className="w-full px-2 py-1.5 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                          className="w-full px-2 py-1.5 bg-gray-700 border border-gray-600 rounded-lg text-gray-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
                       </div>
                     </div>
                     <button type="submit"
-                      className="w-full py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium rounded-lg transition-colors">
+                      className="w-full py-1.5 bg-blue-600 hover:bg-blue-500 text-white  text-xs font-medium rounded-lg transition-colors">
                       Guardar
                     </button>
                   </form>

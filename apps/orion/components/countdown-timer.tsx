@@ -103,7 +103,7 @@ export function CountdownTimer({ scheduledAt, leadId, draft, leadName }: Countdo
         <button
           onClick={handleSendNow}
           disabled={!!loadingAction}
-          className="flex-1 text-xs bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-2 py-1.5 rounded-lg transition-colors"
+          className="flex-1 text-xs bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-gray-50  px-2 py-1.5 rounded-lg transition-colors"
         >
           {loadingAction === "send" ? "Enviando..." : "Enviar ahora"}
         </button>

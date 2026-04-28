@@ -72,7 +72,7 @@ export function ApproveDraftBtn({ leadId, leadName, draft }: ApproveDraftBtnProp
               <>
                 <div className="flex items-center gap-2 mb-1">
                   <span className="text-yellow-400 text-lg">✨</span>
-                  <h2 className="text-white font-semibold text-lg">Draft IA — {leadName}</h2>
+                  <h2 className="text-gray-50 font-semibold text-lg">Draft IA — {leadName}</h2>
                 </div>
                 <p className="text-gray-400 text-xs mb-4">
                   Borrador generado por Gemini. Edítalo si lo necesitas antes de aprobar.
@@ -80,7 +80,7 @@ export function ApproveDraftBtn({ leadId, leadName, draft }: ApproveDraftBtnProp
                 </p>
 
                 <textarea
-                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-500 resize-none focus:outline-none focus:border-yellow-500/60 leading-relaxed"
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-gray-50 placeholder-gray-500 resize-none focus:outline-none focus:border-yellow-500/60 leading-relaxed"
                   rows={6}
                   maxLength={2000}
                   value={message}
@@ -103,14 +103,14 @@ export function ApproveDraftBtn({ leadId, leadName, draft }: ApproveDraftBtnProp
                   <button
                     onClick={() => setOpen(false)}
                     disabled={loading}
-                    className="flex-1 px-4 py-2 rounded-lg border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-800 text-sm transition-colors"
+                    className="flex-1 px-4 py-2 rounded-lg border border-gray-700 text-gray-400 hover:text-gray-50 hover:bg-gray-800 text-sm transition-colors"
                   >
                     Cancelar
                   </button>
                   <button
                     onClick={handleApprove}
                     disabled={loading || !message.trim()}
-                    className="flex-1 px-4 py-2 rounded-lg bg-yellow-600 hover:bg-yellow-500 disabled:opacity-50 text-white text-sm font-medium transition-colors"
+                    className="flex-1 px-4 py-2 rounded-lg bg-yellow-600 hover:bg-yellow-500 disabled:opacity-50 text-gray-50 text-sm font-medium transition-colors"
                   >
                     {loading ? (
                       <span className="flex items-center justify-center gap-2">
@@ -134,7 +134,7 @@ export function ApproveDraftBtn({ leadId, leadName, draft }: ApproveDraftBtnProp
                 <p className="text-gray-500 text-sm mt-1">{errorMsg ?? "Revisa los logs del servidor"}</p>
                 <button
                   onClick={() => setResult(null)}
-                  className="mt-4 px-4 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-white text-sm"
+                  className="mt-4 px-4 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-50 text-sm"
                 >
                   Reintentar
                 </button>

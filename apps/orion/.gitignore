@@ -39,3 +39,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Local test scripts (may contain env references)
+e2e-stress-test.mjs
+*.test.local.*

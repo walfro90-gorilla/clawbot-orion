@@ -115,7 +115,7 @@ export default async function DashboardPage() {
   return (
     <div className="p-4 sm:p-8 space-y-8">
       <div>
-        <h1 className="text-2xl font-bold text-white">Dashboard</h1>
+        <h1 className="text-2xl font-bold text-gray-50">Dashboard</h1>
         <p className="text-gray-400 text-sm mt-1">Vista general de todas tus campañas</p>
       </div>
 
@@ -279,7 +279,7 @@ function CookieHealthCard({ account }: { account: any }) {
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
           <span className={`w-2 h-2 rounded-full shrink-0 ${statusDot[account.status] ?? "bg-gray-500"}`} />
-          <span className="text-white text-sm font-medium truncate">{account.label ?? "Sin nombre"}</span>
+          <span className="text-gray-50 text-sm font-medium truncate">{account.label ?? "Sin nombre"}</span>
         </div>
         <span className={`text-xs px-2 py-0.5 rounded-full border font-semibold ${s.bg} ${s.text} ${s.ring}`}>
           {s.label}
@@ -347,7 +347,7 @@ function KpiCard({ label, value, color, icon }: { label: string; value: number; 
     <div className={`rounded-xl border p-5 ${colors[color]}`}>
       <div className="flex items-center justify-between">
         <span className="text-2xl">{icon}</span>
-        <span className="text-3xl font-bold text-white">{value}</span>
+        <span className="text-3xl font-bold text-gray-50">{value}</span>
       </div>
       <p className="text-sm mt-2 font-medium">{label}</p>
     </div>
@@ -371,7 +371,7 @@ function AccountCard({ account: a }: { account: AccountToday }) {
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
       <div className="flex items-center justify-between">
-        <span className="text-sm font-medium text-white">
+        <span className="text-sm font-medium text-gray-50">
           {a.label ?? a.linkedin_profile_url ?? "Cuenta sin nombre"}
         </span>
         <span className={`text-xs font-medium ${statusColor[a.status ?? ""] ?? "text-gray-400"}`}>
@@ -437,7 +437,7 @@ function PipelineFunnel({ counts }: { counts: Record<string, number> }) {
                   style={{ width: `${pct}%`, backgroundColor: stage.color, opacity: val === 0 ? 0.2 : 0.8 }}
                 />
               </div>
-              <div className="w-8 text-right text-sm font-bold text-white shrink-0">{val}</div>
+              <div className="w-8 text-right text-sm font-bold text-gray-50 shrink-0">{val}</div>
               <div className="w-12 text-right shrink-0">
                 {conv !== null ? (
                   <span className={`text-[10px] font-medium ${conv >= 50 ? "text-green-400" : conv >= 20 ? "text-yellow-400" : "text-red-400"}`}>
@@ -476,7 +476,7 @@ function CampaignRow({ campaign: c }: { campaign: CampaignStats }) {
         <div>
           <div className="flex items-center gap-2">
             <span className={`w-2 h-2 rounded-full ${c.is_active ? "bg-green-400" : "bg-gray-600"}`} />
-            <span className="text-white font-medium text-sm">{c.campaign_name}</span>
+            <span className="text-gray-50 font-medium text-sm">{c.campaign_name}</span>
           </div>
           <p className="text-xs text-gray-500 mt-0.5">
             {c.account_label ?? "Sin cuenta asignada"}

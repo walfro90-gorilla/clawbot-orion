@@ -113,7 +113,7 @@ export default async function AccountsPage() {
   return (
     <div className="p-8 space-y-8">
       <div>
-        <h1 className="text-2xl font-bold text-white">Cuentas LinkedIn</h1>
+        <h1 className="text-2xl font-bold text-gray-50">Cuentas LinkedIn</h1>
         <p className="text-gray-400 text-sm mt-0.5">{accounts.length} cuentas configuradas</p>
       </div>
 
@@ -133,7 +133,7 @@ export default async function AccountsPage() {
             <div key={a.account_id} className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-4">
               <div className="flex items-start justify-between">
                 <div>
-                  <p className="text-white font-semibold">{a.label ?? "Sin etiqueta"}</p>
+                  <p className="text-gray-50 font-semibold">{a.label ?? "Sin etiqueta"}</p>
                   <p className="text-gray-500 text-xs mt-0.5 truncate max-w-[240px]">
                     {a.linkedin_profile_url ?? "Sin URL"}
                   </p>
@@ -168,15 +168,15 @@ export default async function AccountsPage() {
                 </div>
                 <div className="grid grid-cols-3 gap-2 text-xs text-center pt-1">
                   <div className="bg-gray-800/50 rounded px-2 py-1">
-                    <div className="text-white font-medium">{a.invites_sent_today ?? 0}</div>
+                    <div className="text-gray-50 font-medium">{a.invites_sent_today ?? 0}</div>
                     <div className="text-gray-500">Invitaciones</div>
                   </div>
                   <div className="bg-gray-800/50 rounded px-2 py-1">
-                    <div className="text-white font-medium">{a.messages_sent_today ?? 0}</div>
+                    <div className="text-gray-50 font-medium">{a.messages_sent_today ?? 0}</div>
                     <div className="text-gray-500">Mensajes</div>
                   </div>
                   <div className="bg-gray-800/50 rounded px-2 py-1">
-                    <div className="text-white font-medium">{a.errors_today ?? 0}</div>
+                    <div className="text-gray-50 font-medium">{a.errors_today ?? 0}</div>
                     <div className="text-gray-500">Errores</div>
                   </div>
                 </div>
@@ -248,7 +248,7 @@ export default async function AccountsPage() {
                     <div className="space-y-1">
                       <label className="block text-xs text-gray-400">Usuario asignado</label>
                       <select name="assigned_user_id" defaultValue={raw?.user_id ?? ""}
-                        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
                         <option value="">— Sin asignar —</option>
                         {profiles.map((p: any) => (
                           <option key={p.id} value={p.id}>
@@ -261,7 +261,7 @@ export default async function AccountsPage() {
                   <div className="space-y-1">
                     <label className="block text-xs text-gray-400">Estado de conexión</label>
                     <select name="status" defaultValue={raw?.status ?? "active"}
-                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
                       <option value="active">active</option>
                       <option value="disconnected">disconnected</option>
                       <option value="rate_limited">rate_limited</option>
@@ -271,7 +271,7 @@ export default async function AccountsPage() {
                   <div className="space-y-1">
                     <label className="block text-xs text-gray-400">Temperatura de cuenta (warmup)</label>
                     <select name="warmup_status" defaultValue={(raw as any)?.warmup_status ?? "cold"}
-                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
                       <option value="cold">❄️ Fría — nueva / sin historial (cap: 3/día)</option>
                       <option value="warming">🌡️ Tibia — calentando 1-4 semanas (cap: 8/día)</option>
                       <option value="warm">☀️ Cálida — activa 1-3 meses (cap: 15/día)</option>
@@ -279,7 +279,7 @@ export default async function AccountsPage() {
                     </select>
                     <p className="text-gray-600 text-xs">El scheduler respeta este cap independiente del límite de campaña.</p>
                   </div>
-                  <button type="submit" className="w-full py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium rounded-lg transition-colors">
+                  <button type="submit" className="w-full py-2 bg-blue-600 hover:bg-blue-500 text-white  text-sm font-medium rounded-lg transition-colors">
                     Guardar cambios
                   </button>
                 </form>
@@ -291,14 +291,14 @@ export default async function AccountsPage() {
 
       {/* Add new account */}
       <div className="bg-gray-900 border border-gray-800 border-dashed rounded-xl p-6">
-        <h2 className="text-white font-semibold mb-4">+ Agregar cuenta LinkedIn</h2>
+        <h2 className="text-gray-50 font-semibold mb-4">+ Agregar cuenta LinkedIn</h2>
         <form action={createAccount} className="space-y-3 max-w-lg">
           <Field name="label" label="Etiqueta" placeholder="Ej: Cuenta Jorge" />
           <Field name="linkedin_profile_url" label="URL de perfil LinkedIn" placeholder="https://linkedin.com/in/..." />
           <Field name="li_at_cookie" label="li_at Cookie *" placeholder="Pegar el valor de la cookie li_at" />
           <Field name="daily_connection_limit" label="Límite diario de invitaciones" defaultValue="20" type="number" />
           <Field name="proxy_url" label="Proxy URL (opcional)" placeholder="http://user:pass@host:port" />
-          <button type="submit" className="px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold rounded-lg transition-colors">
+          <button type="submit" className="px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white  text-sm font-semibold rounded-lg transition-colors">
             Agregar cuenta
           </button>
         </form>
@@ -315,7 +315,7 @@ function Field({ name, label, defaultValue, placeholder, type = "text" }: {
       <label className="block text-xs text-gray-400">{label}</label>
       <input
         type={type} name={name} defaultValue={defaultValue} placeholder={placeholder}
-        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-50 placeholder-gray-500 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
       />
     </div>
   )

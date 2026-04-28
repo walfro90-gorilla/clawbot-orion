@@ -186,7 +186,7 @@ export function GuidedTour({ show, role }: { show: boolean; role: string }) {
         {!isFirst && (
           <button
             onClick={() => setCurrent(c => c - 1)}
-            className="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors rounded-lg hover:bg-white/10"
+            className="px-4 py-2 text-sm text-gray-400 hover:text-gray-50 transition-colors rounded-lg hover:bg-white/10"
           >
             Anterior
           </button>
@@ -195,14 +195,14 @@ export function GuidedTour({ show, role }: { show: boolean; role: string }) {
           <button
             onClick={completeTour}
             disabled={loading}
-            className="px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold rounded-lg transition-colors disabled:opacity-60"
+            className="px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white  text-sm font-semibold rounded-lg transition-colors disabled:opacity-60"
           >
             {loading ? "Guardando…" : "Comenzar →"}
           </button>
         ) : (
           <button
             onClick={() => setCurrent(c => c + 1)}
-            className="px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold rounded-lg transition-colors"
+            className="px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white  text-sm font-semibold rounded-lg transition-colors"
           >
             Siguiente →
           </button>
@@ -237,7 +237,7 @@ export function GuidedTour({ show, role }: { show: boolean; role: string }) {
           {Progress}
           <div className="text-center text-5xl mb-5">{step.icon}</div>
           <div className="text-center space-y-3">
-            <h2 className="text-xl font-bold text-white">{step.title}</h2>
+            <h2 className="text-xl font-bold text-gray-50">{step.title}</h2>
             <p className="text-gray-400 text-sm leading-relaxed">{step.description}</p>
             <p className="text-gray-600 text-xs pt-1">{current + 1} de {steps.length}</p>
           </div>
@@ -312,7 +312,7 @@ export function GuidedTour({ show, role }: { show: boolean; role: string }) {
         <div className="bg-gray-900 border border-gray-700 rounded-2xl p-6 shadow-2xl">
           {Progress}
           <div className="text-3xl mb-3">{step.icon}</div>
-          <h2 className="text-base font-bold text-white mb-2">{step.title}</h2>
+          <h2 className="text-base font-bold text-gray-50 mb-2">{step.title}</h2>
           <p className="text-gray-400 text-sm leading-relaxed">{step.description}</p>
           <p className="text-gray-600 text-xs mt-3">{current + 1} de {steps.length}</p>
           {Nav}
