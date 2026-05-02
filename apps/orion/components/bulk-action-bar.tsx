@@ -8,11 +8,14 @@ const STATUS_OPTIONS = [
   { value: "disqualified",     label: "Descalificado" },
   { value: "invite_sent",      label: "Invitación enviada" },
   { value: "connected",        label: "Conectado" },
-  { value: "follow_up_sent",   label: "FU1 enviado" },
-  { value: "follow_up_sent_2", label: "FU2 enviado" },
+  { value: "follow_up_sent",   label: "FU1 — Post-conexión" },
+  { value: "follow_up_sent_2", label: "FU2 — La historia" },
+  { value: "follow_up_sent_3", label: "FU3 — La pregunta" },
+  { value: "follow_up_sent_4", label: "FU4 — Urgencia" },
+  { value: "follow_up_sent_5", label: "FU5 — El cierre" },
   { value: "replied",          label: "Respondió" },
   { value: "meeting_booked",   label: "Reunión agendada" },
-  { value: "dead",             label: "Muerto" },
+  { value: "dead",             label: "Archivado" },
 ]
 
 export function BulkSelectRow({ leadId }: { leadId: string }) {

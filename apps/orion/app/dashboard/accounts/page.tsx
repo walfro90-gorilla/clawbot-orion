@@ -31,6 +31,12 @@ async function updateAccount(formData: FormData) {
     cal_com_url:            formData.get("cal_com_url") as string || null,
     reply_delay_min:        (formData.get("reply_delay_min") as string) ? parseInt(formData.get("reply_delay_min") as string) : null,
     reply_delay_max:        (formData.get("reply_delay_max") as string) ? parseInt(formData.get("reply_delay_max") as string) : null,
+    inbox_gap_min:                parseInt(formData.get("inbox_gap_min") as string) || 60,
+    inbox_paused:                 formData.get("inbox_paused") === "true",
+    inbound_enabled:              formData.get("inbound_enabled") === "true",
+    inbound_reply_mode:           (formData.get("inbound_reply_mode") as string) || "manual",
+    inbound_decline_template:     (formData.get("inbound_decline_template") as string) || null,
+    inbound_qualification_rules:  (formData.get("inbound_qualification_rules") as string) || null,
     user_id:                assignedUserId || null,
     warmup_status:          newWarmupStatus || "cold",
     ...(cookieChanged ? { li_at_cookie_updated_at: new Date().toISOString() } : {}),
@@ -104,10 +110,10 @@ export default async function AccountsPage() {
   }
 
   const warmupMeta: Record<string, { icon: string; label: string; cap: string; color: string; bg: string; border: string }> = {
-    cold:    { icon: "❄️", label: "Fría",     cap: "máx 3/día",  color: "text-blue-400",   bg: "bg-blue-500/10",   border: "border-blue-500/30" },
-    warming: { icon: "🌡️", label: "Tibia",    cap: "máx 8/día",  color: "text-yellow-400", bg: "bg-yellow-500/10", border: "border-yellow-500/30" },
-    warm:    { icon: "☀️", label: "Cálida",   cap: "máx 15/día", color: "text-orange-400", bg: "bg-orange-500/10", border: "border-orange-500/30" },
-    hot:     { icon: "🔥", label: "Caliente", cap: "sin límite", color: "text-red-400",    bg: "bg-red-500/10",    border: "border-red-500/30" },
+    cold:    { icon: "❄️", label: "Fría",     cap: "máx 5/día",  color: "text-blue-400",   bg: "bg-blue-500/10",   border: "border-blue-500/30" },
+    warming: { icon: "🌡️", label: "Tibia",    cap: "máx 12/día", color: "text-yellow-400", bg: "bg-yellow-500/10", border: "border-yellow-500/30" },
+    warm:    { icon: "☀️", label: "Cálida",   cap: "máx 20/día", color: "text-orange-400", bg: "bg-orange-500/10", border: "border-orange-500/30" },
+    hot:     { icon: "🔥", label: "Caliente", cap: "máx 25/día", color: "text-red-400",    bg: "bg-red-500/10",    border: "border-red-500/30" },
   }
 
   return (
@@ -224,7 +230,23 @@ export default async function AccountsPage() {
                   <Field name="label" label="Etiqueta" defaultValue={raw?.label ?? ""} placeholder="Mi cuenta principal" />
                   <Field name="linkedin_profile_url" label="URL de perfil" defaultValue={raw?.linkedin_profile_url ?? ""} placeholder="https://linkedin.com/in/..." />
                   <Field name="li_at_cookie" label="li_at Cookie" defaultValue={raw?.li_at_cookie ?? ""} placeholder="Pegar cookie aquí" />
-                  <Field name="daily_connection_limit" label="Límite diario" defaultValue={String(raw?.daily_connection_limit ?? 20)} type="number" />
+                  <div className="space-y-1">
+                    <label className="block text-xs text-gray-400 font-medium">Límite diario de conexiones (sin nota)</label>
+                    <input type="number" name="daily_connection_limit" min="1" max="30"
+                      defaultValue={raw?.daily_connection_limit ?? ""}
+                      placeholder={`default por temperatura: ${
+                        (raw as any)?.warmup_status === "cold"    ? "5" :
+                        (raw as any)?.warmup_status === "warming" ? "12" :
+                        (raw as any)?.warmup_status === "hot"     ? "25" : "20"
+                      }`}
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-50 placeholder-gray-500 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                    <p className="text-xs text-gray-600">
+                      Vacío = usa cap automático por temperatura ({ws.icon} {ws.label}).
+                      Recomendado sin nota: ❄️ 5 · 🌡️ 12 · ☀️ 20 · 🔥 25/día.
+                      Máximo seguro absoluto: 20/día (= 100/semana, límite oficial LinkedIn).
+                    </p>
+                  </div>
                   <Field name="proxy_url" label="Proxy URL (opcional)" defaultValue={raw?.proxy_url ?? ""} placeholder="http://user:pass@host:port" />
                   <Field name="cal_com_url" label="Link de Cal.com" defaultValue={(raw as any)?.cal_com_url ?? ""} placeholder="https://cal.com/josh" />
                   {/* ── Velocidad de respuesta IA ───────────────────────── */}
@@ -242,6 +264,66 @@ export default async function AccountsPage() {
                     <div className="grid grid-cols-2 gap-2">
                       <Field name="reply_delay_min" label="Mín (minutos)" defaultValue={(raw as any)?.reply_delay_min ?? ""} placeholder="ej: 1" type="number" />
                       <Field name="reply_delay_max" label="Máx (minutos)" defaultValue={(raw as any)?.reply_delay_max ?? ""} placeholder="ej: 3" type="number" />
+                    </div>
+                  </div>
+                  {/* ── Inbox ───────────────────────────────────────────── */}
+                  <div className="pt-2 border-t border-gray-700 space-y-2">
+                    <p className="text-xs text-gray-400 font-medium">Inbox</p>
+                    <Field name="inbox_gap_min" label="Gap entre chequeos de inbox (min)" defaultValue={String((raw as any)?.inbox_gap_min ?? 60)} placeholder="60" type="number" />
+                    <p className="text-xs text-gray-600">Mínimo de minutos entre un chequeo de inbox y el siguiente para esta cuenta. Default: 60.</p>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input type="hidden" name="inbox_paused" value="false" />
+                      <input name="inbox_paused" type="checkbox" value="true"
+                        defaultChecked={(raw as any)?.inbox_paused ?? false}
+                        className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-yellow-500 focus:ring-yellow-500" />
+                      <span className="text-sm text-gray-300">⏸ Pausar inbox de esta cuenta</span>
+                    </label>
+                  </div>
+
+                  {/* ── Mensajes entrantes (Inbound) ─────────────────────── */}
+                  <div className="pt-2 border-t border-gray-700 space-y-3">
+                    <div>
+                      <p className="text-xs text-gray-400 font-medium">📥 Mensajes entrantes</p>
+                      <p className="text-xs text-gray-600 mt-0.5">Cuando alguien nos escribe directamente sin que lo hayamos contactado, Gemini lo clasifica y responde automáticamente.</p>
+                    </div>
+
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input type="hidden" name="inbound_enabled" value="false" />
+                      <input name="inbound_enabled" type="checkbox" value="true"
+                        defaultChecked={(raw as any)?.inbound_enabled !== false}
+                        className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-500" />
+                      <span className="text-sm text-gray-300">Activar clasificación de mensajes entrantes</span>
+                    </label>
+
+                    <div className="space-y-1">
+                      <label className="block text-xs text-gray-400">Modo de respuesta a compradores</label>
+                      <select name="inbound_reply_mode" defaultValue={(raw as any)?.inbound_reply_mode ?? "manual"}
+                        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="manual">Manual — aparece en bandeja para aprobación</option>
+                        <option value="semi_auto">Semi-auto — countdown + cancelación</option>
+                        <option value="auto">Automático — envía solo tras delay</option>
+                      </select>
+                      <p className="text-xs text-gray-600">Aplica a leads clasificados como comprador potencial.</p>
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="block text-xs text-gray-400">Rechazo para vendedores / recruiters</label>
+                      <textarea name="inbound_decline_template" rows={3}
+                        defaultValue={(raw as any)?.inbound_decline_template ?? ""}
+                        placeholder={`Hola [Nombre], gracias por contactarme. Por ahora no estamos buscando ese tipo de servicio, pero lo tendré en mente. ¡Éxito!`}
+                        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-50 placeholder-gray-500 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+                      />
+                      <p className="text-xs text-gray-600">Usa <code className="bg-gray-700 px-1 rounded">[Nombre]</code> para personalizar. Vacío = Gemini genera el rechazo automáticamente.</p>
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="block text-xs text-gray-400">Reglas de calificación personalizadas (opcional)</label>
+                      <textarea name="inbound_qualification_rules" rows={3}
+                        defaultValue={(raw as any)?.inbound_qualification_rules ?? ""}
+                        placeholder="Deja vacío para usar las reglas por defecto de Gemini. Puedes sobreescribirlas aquí si necesitas criterios específicos para esta cuenta."
+                        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-50 placeholder-gray-500 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+                      />
+                      <p className="text-xs text-gray-600">Override del prompt de clasificación de Gemini. Vacío = reglas por defecto.</p>
                     </div>
                   </div>
                   {isAdmin && profiles && profiles.length > 0 && (
@@ -272,10 +354,10 @@ export default async function AccountsPage() {
                     <label className="block text-xs text-gray-400">Temperatura de cuenta (warmup)</label>
                     <select name="warmup_status" defaultValue={(raw as any)?.warmup_status ?? "cold"}
                       className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                      <option value="cold">❄️ Fría — nueva / sin historial (cap: 3/día)</option>
-                      <option value="warming">🌡️ Tibia — calentando 1-4 semanas (cap: 8/día)</option>
-                      <option value="warm">☀️ Cálida — activa 1-3 meses (cap: 15/día)</option>
-                      <option value="hot">🔥 Caliente — veterana 3+ meses (sin cap extra)</option>
+                      <option value="cold">❄️ Fría — nueva / sin historial (default: 5/día)</option>
+                      <option value="warming">🌡️ Tibia — calentando 1-4 semanas (default: 12/día)</option>
+                      <option value="warm">☀️ Cálida — activa 1-3 meses (default: 20/día)</option>
+                      <option value="hot">🔥 Caliente — veterana 3+ meses (default: 25/día)</option>
                     </select>
                     <p className="text-gray-600 text-xs">El scheduler respeta este cap independiente del límite de campaña.</p>
                   </div>

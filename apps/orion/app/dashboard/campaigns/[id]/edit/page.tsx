@@ -17,7 +17,6 @@ async function saveCampaign(formData: FormData) {
   await admin.from("campaigns").update({
     name:                  formData.get("name") as string,
     target_audience:       (formData.get("target_audience") as string) || null,
-    gemini_system_prompt:  (formData.get("gemini_system_prompt") as string) || "",
     is_active:             formData.get("is_active") === "true",
     linkedin_account_id:   (formData.get("linkedin_account_id") as string) || null,
     search_keywords:       parseList("search_keywords"),
@@ -36,14 +35,21 @@ async function saveCampaign(formData: FormData) {
     schedule_days:         formData.getAll("schedule_days").length
       ? formData.getAll("schedule_days") as string[]
       : ["lunes","martes","miércoles","jueves","viernes"],
-    search_gap_hours:      Number(formData.get("search_gap_hours") || 20),
-    follow_up_message:          (formData.get("follow_up_message") as string) || null,
-    follow_up_delay_days:       Number(formData.get("follow_up_delay_days") || 3),
-    follow_up_step2_message:    (formData.get("follow_up_step2_message") as string) || null,
-    follow_up_step2_delay_days: Number(formData.get("follow_up_step2_delay_days") || 12),
-    follow_up_step3_message:    (formData.get("follow_up_step3_message") as string) || null,
-    follow_up_step3_delay_days: Number(formData.get("follow_up_step3_delay_days") || 21),
-    auto_dead_after_days:       Number(formData.get("auto_dead_after_days") || 21),
+    search_gap_hours:          Number(formData.get("search_gap_hours") || 20),
+    search_2nd_degree_only:    formData.get("search_2nd_degree_only") === "true",
+    follow_up_message:           (formData.get("follow_up_message") as string) || null,
+    follow_up_step2_message:     (formData.get("follow_up_step2_message") as string) || null,
+    follow_up_step2_delay_hours: Number(formData.get("follow_up_step2_delay_hours") || 15),
+    follow_up_step3_message:     (formData.get("follow_up_step3_message") as string) || null,
+    follow_up_step3_delay_hours: Number(formData.get("follow_up_step3_delay_hours") || 28),
+    follow_up_step4_message:     (formData.get("follow_up_step4_message") as string) || null,
+    follow_up_step4_delay_hours: Number(formData.get("follow_up_step4_delay_hours") || 96),
+    follow_up_step5_message:     (formData.get("follow_up_step5_message") as string) || null,
+    follow_up_step5_delay_hours: Number(formData.get("follow_up_step5_delay_hours") || 84),
+    auto_dead_after_days:        Number(formData.get("auto_dead_after_days") || 21),
+    fm1_example_reply:           (formData.get("fm1_example_reply") as string) || null,
+    fm2_example_reply:           (formData.get("fm2_example_reply") as string) || null,
+    fm3_example_reply:           (formData.get("fm3_example_reply") as string) || null,
     auto_reply_mode:            (formData.get("auto_reply_mode") as string) || "manual",
     auto_reply_delay_min:       Number(formData.get("auto_reply_delay_min") || 45),
     auto_reply_delay_max:       Number(formData.get("auto_reply_delay_max") || 90),
@@ -234,59 +240,87 @@ export default async function CampaignEditPage({ params }: { params: Promise<{ i
 
         {/* ── FOLLOW-UP ───────────────────────────────────────────────── */}
         <Section title="Seguimiento automático" icon="💬"
-          description="Mensajes automáticos a leads que aceptaron la invitación pero no han respondido. Máximo 2 seguimientos por lead.">
+          description="Hasta 5 pasos de seguimiento automáticos. Cada paso se envía solo una vez por lead; si el lead responde en cualquier momento sale de la secuencia. Déjalo vacío para desactivarlo.">
           <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-4 text-xs text-amber-300 space-y-1">
-            <p>Cada follow-up se envía <strong>solo una vez</strong> por lead. Si el lead responde en cualquier momento no se le envía el siguiente. Déjalo vacío para desactivarlo.</p>
+            <p>FU1 se envía en el siguiente tick (~30 min) tras aceptar la conexión. FU2-5 respetan el delay en horas configurado desde el envío del paso anterior.</p>
           </div>
 
           {/* Step 1 */}
           <div className="space-y-3">
-            <p className="text-gray-400 text-xs font-semibold uppercase tracking-wide">Seguimiento 1 (día {(c as any).follow_up_delay_days ?? 3})</p>
+            <p className="text-gray-400 text-xs font-semibold uppercase tracking-wide">Seguimiento 1 — tras conectar</p>
             <Field label="Mensaje de seguimiento 1"
-              hint="Texto exacto. Menciona valor concreto. Máx. 2000 caracteres.">
+              hint="Se envía en el primer tick después de que el lead acepta la conexión. Usa [Nombre] para personalizar.">
               <textarea name="follow_up_message" rows={3}
                 defaultValue={c.follow_up_message ?? ""}
-                placeholder="Hola {nombre}, quería retomar el contacto. ¿Tienes unos minutos esta semana?"
+                placeholder="Hola [Nombre], gracias por conectar. ¿Tienes 15 min esta semana para conversar?"
                 className={inp} />
-            </Field>
-            <Field label="Días de espera (step 1)" hint="Días después del envío de invitación para enviar el primer seguimiento.">
-              <input name="follow_up_delay_days" type="number" min="1" max="30"
-                defaultValue={(c as any).follow_up_delay_days ?? 5} className={inp} />
             </Field>
           </div>
 
           {/* Step 2 */}
           <div className="space-y-3 pt-2 border-t border-gray-800">
-            <p className="text-gray-400 text-xs font-semibold uppercase tracking-wide">Seguimiento 2 (día {(c as any).follow_up_step2_delay_days ?? 12}) — opcional</p>
+            <p className="text-gray-400 text-xs font-semibold uppercase tracking-wide">Seguimiento 2 — {(c as any).follow_up_step2_delay_hours ?? 15}h después del FU1 — opcional</p>
             <Field label="Mensaje de seguimiento 2"
-              hint="Se envía a leads que recibieron el seguimiento 1 pero tampoco respondieron. Déjalo vacío para no enviar.">
+              hint="Se envía si no hubo respuesta tras el delay configurado. Déjalo vacío para desactivar.">
               <textarea name="follow_up_step2_message" rows={3}
                 defaultValue={(c as any).follow_up_step2_message ?? ""}
-                placeholder="Hola de nuevo {nombre}. Sé que estás ocupado — ¿te viene bien 15 min esta semana para conversar?"
+                placeholder="Hola de nuevo [Nombre]. Sé que estás ocupado — ¿te viene bien 15 min esta semana?"
                 className={inp} />
             </Field>
-            <Field label="Días de espera (step 2)" hint="Días desde el envío de la invitación original para enviar el segundo seguimiento.">
-              <input name="follow_up_step2_delay_days" type="number" min="5" max="60"
-                defaultValue={(c as any).follow_up_step2_delay_days ?? 12} className={inp} />
+            <Field label="Horas de espera desde FU1" hint="Default: 15h">
+              <input name="follow_up_step2_delay_hours" type="number" min="6" max="240"
+                defaultValue={(c as any).follow_up_step2_delay_hours ?? 15} className={inp} />
             </Field>
           </div>
 
-          {/* Step 3 — Closing */}
+          {/* Step 3 */}
           <div className="space-y-3 pt-2 border-t border-gray-800">
-            <p className="text-gray-400 text-xs font-semibold uppercase tracking-wide">Cierre (día {(c as any).follow_up_step3_delay_days ?? 21}) — opcional</p>
-            <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-3 text-xs text-amber-300">
-              Último intento. Tono de bajo compromiso — no agresivo. Déjalo vacío para desactivarlo.
-            </div>
-            <Field label="Mensaje de cierre"
-              hint="Último mensaje antes de marcar como perdido. Breve y sin presión.">
+            <p className="text-gray-400 text-xs font-semibold uppercase tracking-wide">Seguimiento 3 — {(c as any).follow_up_step3_delay_hours ?? 28}h después del FU2 — opcional</p>
+            <Field label="Mensaje de seguimiento 3"
+              hint="Déjalo vacío para desactivar.">
               <textarea name="follow_up_step3_message" rows={3}
                 defaultValue={(c as any).follow_up_step3_message ?? ""}
-                placeholder="Hola [Nombre], entiendo que no es el momento. Queda la puerta abierta — si en algún momento tiene sentido conversar, aquí estaré."
+                placeholder="[Nombre], ¿pudiste ver mi mensaje anterior? Solo quiero asegurarme de que llegó."
                 className={inp} />
             </Field>
-            <Field label="Días de espera (cierre)" hint="Días desde la invitación original para el mensaje de cierre. Recomendado: ≥14 días.">
-              <input name="follow_up_step3_delay_days" type="number" min="12" max="90"
-                defaultValue={(c as any).follow_up_step3_delay_days ?? 21} className={inp} />
+            <Field label="Horas de espera desde FU2" hint="Default: 28h">
+              <input name="follow_up_step3_delay_hours" type="number" min="12" max="480"
+                defaultValue={(c as any).follow_up_step3_delay_hours ?? 28} className={inp} />
+            </Field>
+          </div>
+
+          {/* Step 4 */}
+          <div className="space-y-3 pt-2 border-t border-gray-800">
+            <p className="text-gray-400 text-xs font-semibold uppercase tracking-wide">Seguimiento 4 — {(c as any).follow_up_step4_delay_hours ?? 96}h después del FU3 — opcional</p>
+            <Field label="Mensaje de seguimiento 4"
+              hint="Déjalo vacío para desactivar. Recomendado: cambio de ángulo (nuevo argumento o caso de éxito).">
+              <textarea name="follow_up_step4_message" rows={3}
+                defaultValue={(c as any).follow_up_step4_message ?? ""}
+                placeholder="[Nombre], le ayudamos a [empresa similar] a conseguir X en 30 días. ¿Aplica en tu caso?"
+                className={inp} />
+            </Field>
+            <Field label="Horas de espera desde FU3" hint="Default: 96h (~4 días)">
+              <input name="follow_up_step4_delay_hours" type="number" min="24" max="720"
+                defaultValue={(c as any).follow_up_step4_delay_hours ?? 96} className={inp} />
+            </Field>
+          </div>
+
+          {/* Step 5 — Closing */}
+          <div className="space-y-3 pt-2 border-t border-gray-800">
+            <p className="text-gray-400 text-xs font-semibold uppercase tracking-wide">Cierre (FU5) — {(c as any).follow_up_step5_delay_hours ?? 84}h después del FU4 — opcional</p>
+            <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-3 text-xs text-amber-300">
+              Último intento. Tono de bajo compromiso — sin presión. Después de este paso, el lead puede marcarse como dead automáticamente.
+            </div>
+            <Field label="Mensaje de cierre"
+              hint="Breve y sin presión. Déjalo vacío para desactivar.">
+              <textarea name="follow_up_step5_message" rows={3}
+                defaultValue={(c as any).follow_up_step5_message ?? ""}
+                placeholder="[Nombre], entiendo que no es el momento. Queda la puerta abierta — si en algún momento tiene sentido conversar, aquí estaré."
+                className={inp} />
+            </Field>
+            <Field label="Horas de espera desde FU4" hint="Default: 84h (~3.5 días)">
+              <input name="follow_up_step5_delay_hours" type="number" min="24" max="720"
+                defaultValue={(c as any).follow_up_step5_delay_hours ?? 84} className={inp} />
             </Field>
           </div>
 
@@ -305,6 +339,59 @@ export default async function CampaignEditPage({ params }: { params: Promise<{ i
                 className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-yellow-500 focus:ring-yellow-500" />
               <span className="text-sm text-gray-300">⏸ Pausar todos los seguimientos</span>
             </label>
+          </div>
+
+          {/* ── Flujo de Mensajes FM1 / FM2 / FM3 ───────────────────────── */}
+          <div className="space-y-4 pt-2 border-t border-gray-800">
+            <div>
+              <p className="text-gray-300 text-xs font-semibold uppercase tracking-wide">💬 Flujo de Mensajes — FM1 / FM2 / FM3</p>
+              <p className="text-gray-500 text-xs mt-1">
+                Cuando un contacto responde (a la conexión o a cualquier FU), Gemini lleva la conversación en hasta 3 turnos para agendar una reunión vía Cal.com.
+                Proporciona un ejemplo de respuesta para cada turno para calibrar el tono y la longitud exacta que quieres.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 gap-1 text-xs text-gray-500 bg-gray-800/40 rounded-xl p-3 border border-gray-700">
+              <div className="flex gap-2 items-start">
+                <span className="text-blue-400 font-bold shrink-0">FM1</span>
+                <span>Turno 0 — <strong className="text-gray-300">Rapport.</strong> Reconoce su mensaje, menciona 1 dato de su perfil, haz UNA pregunta abierta. Sin mencionar el producto ni Cal.com.</span>
+              </div>
+              <div className="flex gap-2 items-start mt-1">
+                <span className="text-yellow-400 font-bold shrink-0">FM2</span>
+                <span>Turnos 1-2 — <strong className="text-gray-300">Profundizar.</strong> Responde directo a lo que dijo, muestra valor con contexto EBOOMS. Si hay interés claro → ofrece llamada de 20 min.</span>
+              </div>
+              <div className="flex gap-2 items-start mt-1">
+                <span className="text-green-400 font-bold shrink-0">FM3</span>
+                <span>Turno 3+ — <strong className="text-gray-300">Cierre.</strong> Propone la sesión de 20 min directamente con el link de Cal.com. Si rechaza, acepta con gracia y deja la puerta abierta.</span>
+              </div>
+            </div>
+
+            <Field
+              label="🔵 FM1 — Ejemplo de respuesta de rapport (turno 0)"
+              hint="Cómo debe sonar la PRIMERA respuesta cuando alguien contesta. Calibra longitud y tono. Vacío = Gemini usa su criterio.">
+              <textarea name="fm1_example_reply" rows={3}
+                defaultValue={(c as any).fm1_example_reply ?? ""}
+                placeholder={`Ej: "Qué bueno que lo mencionas, [Nombre]. Vi que llevas el área comercial en [Empresa] — justo ese contexto me parece interesante. ¿Cómo está funcionando la generación de nuevos clientes para ustedes este año?"`}
+                className={`${inp} resize-none`} />
+            </Field>
+
+            <Field
+              label="🟡 FM2 — Ejemplo de respuesta de profundidad (turnos 1-2)"
+              hint="Cómo mostrar valor sin vender directamente. Responde a lo que dijo el lead, conecta con EBOOMS.">
+              <textarea name="fm2_example_reply" rows={3}
+                defaultValue={(c as any).fm2_example_reply ?? ""}
+                placeholder={`Ej: "Tiene sentido lo que mencionas. Justo ese es el problema que más escucho en empresas de tu tamaño — los equipos comerciales dedican menos del 30% a atraer negocio nuevo. ¿Cuántos vendedores tienen activos prospectando hoy?"`}
+                className={`${inp} resize-none`} />
+            </Field>
+
+            <Field
+              label="🟢 FM3 — Ejemplo de respuesta de cierre con Cal.com (turno 3+)"
+              hint="Cómo proponer la reunión de 20 min de forma natural. Gemini incluirá automáticamente el link de Cal.com configurado en la cuenta.">
+              <textarea name="fm3_example_reply" rows={3}
+                defaultValue={(c as any).fm3_example_reply ?? ""}
+                placeholder={`Ej: "Creo que vale la pena que lo veamos en una llamada rápida — 20 minutos. Aquí puedes elegir el horario que mejor te quede: [CAL_URL]. ¿Te parece?"`}
+                className={`${inp} resize-none`} />
+            </Field>
           </div>
 
           {/* Auto-respuesta IA */}
@@ -476,6 +563,23 @@ Qué bien que lo mencionas. Justo ese es el problema que más escucho en empresa
             </Field>
           </div>
 
+          <div className="bg-blue-500/5 border border-blue-500/20 rounded-xl p-4 text-xs text-blue-300 space-y-3">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="font-semibold text-blue-200">Solo conexiones de 2do grado</p>
+                <p className="mt-0.5 text-blue-300/80">Personas con las que tienes contactos mutuos. Tienen ~40% más tasa de aceptación que contactos de 3er grado porque LinkedIn muestra una conexión en común como señal de confianza.</p>
+              </div>
+              <label className="flex items-center gap-2 cursor-pointer shrink-0">
+                <input type="hidden" name="search_2nd_degree_only" value="false" />
+                <input name="search_2nd_degree_only" type="checkbox" value="true"
+                  defaultChecked={(c as any).search_2nd_degree_only !== false}
+                  className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-500" />
+                <span className="text-blue-200 font-medium">Activado</span>
+              </label>
+            </div>
+            <p className="text-blue-300/60">Desactivar solo si necesitas más volumen y el 2do grado se agota. Con cuentas frías, 2do grado siempre es mejor.</p>
+          </div>
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Field label="✅ Whitelist — Cargos que SÍ queremos"
               hint="Vacío = no filtrar. Busca substring en el headline.">
@@ -548,22 +652,13 @@ NUNCA uses el cargo/título como si fuera el nombre de una empresa.`}
               className={inp} />
           </Field>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Field label="Hint de apertura"
-              hint="Cómo debe empezar el mensaje. Gemini respeta esto como punto de partida.">
-              <textarea name="opening_hint" rows={2}
-                defaultValue={t?.opening_hint ?? ""}
-                placeholder="Empieza con su nombre de pila. Menciona su empresa o rol actual en la primera oración."
-                className={inp} />
-            </Field>
-            <Field label="System prompt adicional"
-              hint="Contexto extra sobre el emisor del mensaje (persona que envía la invitación).">
-              <textarea name="gemini_system_prompt" rows={2}
-                defaultValue={c.gemini_system_prompt ?? ""}
-                placeholder="Eres un consultor de negocios B2B especializado en..."
-                className={inp} />
-            </Field>
-          </div>
+          <Field label="Hint de apertura"
+            hint="Cómo debe empezar el mensaje. Gemini respeta esto como punto de partida.">
+            <textarea name="opening_hint" rows={2}
+              defaultValue={t?.opening_hint ?? ""}
+              placeholder="Empieza con su nombre de pila. Menciona su empresa o rol actual en la primera oración."
+              className={inp} />
+          </Field>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Field label="✅ Ejemplo de mensaje BUENO"

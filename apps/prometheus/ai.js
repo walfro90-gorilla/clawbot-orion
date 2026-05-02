@@ -1,4 +1,5 @@
 import { GoogleGenAI } from '@google/genai';
+import { supabase } from './lib/supabase.js';
 
 // ── Build system prompt from a message_template DB row ───────────────────
 // Falls back to hardcoded defaults if template fields are null.
@@ -147,6 +148,8 @@ export async function generateReplyDraft({
   senderPersona = null,
   companyContext = null,
   exampleMessages = null,
+  turnExample = null,     // ejemplo específico para el turno actual (FM1/FM2/FM3)
+  playbookExamples = '',  // ejemplos del Cerebro relevantes al perfil del lead
 } = {}) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY not set');
@@ -266,10 +269,23 @@ Responde ÚNICAMENTE con el texto del mensaje. Sin comillas, sin prefijos, sin m
 ${senderPersona.trim()}`
     : `QUIÉN ERES: Un SDR experto representando a la empresa descrita abajo.`
 
-  // Example messages block
+  // Example messages block (estilo general)
   const examplesBlock = exampleMessages?.trim()
     ? `\nEJEMPLOS DE TU ESTILO DE ESCRITURA (replica este tono y longitud exactamente):
 ${exampleMessages.trim()}\n`
+    : ''
+
+  // Turn-specific example (FM1/FM2/FM3 — calibración exacta para este turno)
+  const turnLabel   = turnCount === 0 ? 'FM1 (rapport)' : turnCount <= 2 ? `FM${turnCount + 1} (profundidad)` : 'FM3+ (cierre)'
+  const turnExBlock = turnExample?.trim()
+    ? `\nEJEMPLO DE RESPUESTA PARA ESTE TURNO (${turnLabel}) — escribe con esta estructura y longitud:
+"${turnExample.trim()}"\n`
+    : ''
+
+  // Playbook examples block (ejemplos del Cerebro relevantes al perfil del lead)
+  const playbookBlock = playbookExamples?.trim()
+    ? `\nEJEMPLOS REALES DE CONVERSACIONES EXITOSAS (extrae el patrón, no copies literalmente):
+${playbookExamples.trim()}\n`
     : ''
 
   const finalPrompt = `${activeCompanyContext}
@@ -279,7 +295,7 @@ ${exampleMessages.trim()}\n`
 ${personaBlock}
 
 TONO DE COMUNICACIÓN: ${toneInstruction}
-${examplesBlock}
+${examplesBlock}${turnExBlock}${playbookBlock}
 ---
 
 PERFIL DEL LEAD — ${leadName ?? 'Lead'} (datos del scraping, PUEDEN estar desactualizados):
@@ -344,31 +360,41 @@ Responde ÚNICAMENTE con el texto del mensaje. Sin comillas, sin prefijos, sin m
 // ── Qualify an inbound message — is this a potential lead or a vendor/spam? ──
 // Fast, cheap call. Returns { qualified, reason, signal }
 // signal: 'lead' | 'vendor' | 'spam' | 'recruiter' | 'unknown'
-export async function qualifyInboundMessage({ senderName, messageText, accountContext = '' }) {
+export async function qualifyInboundMessage({
+  senderName,
+  senderHeadline = null,
+  messageText,
+  qualificationRules = null,
+  accountContext = '',
+}) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY not set');
 
   const ai = new GoogleGenAI({ apiKey });
 
+  const defaultRules = `Clasifica el mensaje en UNA de estas categorías:
+- "lead": Persona que puede ser cliente potencial. Muestra interés, curiosidad, hace preguntas sobre servicios, es un decisor (CEO, Director, VP, Gerente, Fundador), o quiere conectar. Da el beneficio de la duda a mensajes cortos como "Hola" o "¿Cómo estás?".
+- "vendor": Alguien que quiere VENDERNOS algo. Señales en headline: SDR, BDR, Sales, Ventas, Account Executive, Marketing Agency, Agencia. Señales en mensaje: "te ofrezco", "ofrecemos", "somos una agencia", "podemos ayudarte a", propuestas comerciales directas.
+- "recruiter": Headhunter o reclutador buscando contratar. Señales: "oportunidad laboral", "vacante", "posición", "estamos buscando", "talento".
+- "spam": Mensaje genérico masivo, copy-paste evidente, sin ninguna personalización, links sospechosos.
+- "unknown": No hay suficiente información para clasificar con confianza.
+
+Regla crítica: si el headline indica claramente vendedor/agencia/recruiter, clasifica por headline aunque el mensaje sea ambiguo.
+Regla: ante la duda entre "lead" y "unknown", clasifica como "lead".`;
+
   const prompt = `Analiza este mensaje de LinkedIn y clasifícalo.
 
 REMITENTE: ${senderName ?? 'Desconocido'}
+${senderHeadline ? `HEADLINE/CARGO: ${senderHeadline}` : ''}
 MENSAJE:
 "${messageText ?? ''}"
 
 ${accountContext ? `CONTEXTO DE LA CUENTA RECEPTORA: ${accountContext}` : ''}
 
-Clasifica el mensaje en UNA de estas categorías:
-- "lead": Persona que puede ser un cliente potencial. Muestra interés, curiosidad, hace preguntas sobre los servicios, es un decisor, o simplemente quiere conectar (dar el beneficio de la duda a mensajes cortos como "Hola").
-- "vendor": Alguien que quiere VENDERNOS algo. Señales: "te ofrezco", "ofrecemos", "somos una agencia/empresa", "podemos ayudarte a", propuestas comerciales.
-- "recruiter": Headhunter o reclutador buscando contratar.
-- "spam": Mensaje genérico masivo, sin personalización, copy-paste evidente.
-- "unknown": No se puede determinar con la información disponible.
-
-Regla: ante la duda entre "lead" y "unknown", clasifica como "lead".
+${qualificationRules || defaultRules}
 
 Responde ÚNICAMENTE con JSON válido:
-{"signal": "lead|vendor|recruiter|spam|unknown", "qualified": true|false, "reason": "una frase corta explicando la clasificación"}
+{"signal": "lead|vendor|recruiter|spam|unknown", "qualified": true|false, "reason": "una frase corta"}
 
 qualified = true solo si signal es "lead".`;
 
@@ -376,8 +402,8 @@ qualified = true solo si signal es "lead".`;
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
       config: {
-        temperature: 0.3,
-        maxOutputTokens: 100,
+        temperature: 0.2,
+        maxOutputTokens: 120,
         thinkingConfig: { thinkingBudget: 0 },
         responseMimeType: 'application/json',
       },
@@ -387,4 +413,225 @@ qualified = true solo si signal es "lead".`;
   } catch {
     return { signal: 'unknown', qualified: true, reason: 'No se pudo clasificar — asumiendo lead por defecto' };
   }
+}
+
+// Genera un mensaje de rechazo educado para vendedores / recruiters que nos contactan
+export async function generateInboundDeclineReply({
+  senderName,
+  senderHeadline = null,
+  inboundMessage,
+  declineTemplate = null,
+  senderPersona = null,
+}) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error('GEMINI_API_KEY not set');
+
+  // Si hay template configurado, solo personalizar el nombre
+  if (declineTemplate) {
+    const firstName = senderName?.split(' ')[0] ?? senderName ?? 'hola';
+    return declineTemplate.replace(/\[Nombre\]/gi, firstName);
+  }
+
+  // Sin template → Gemini genera el rechazo personalizado
+  const ai = new GoogleGenAI({ apiKey });
+  const firstName = senderName?.split(' ')[0] ?? senderName ?? 'hola';
+
+  const prompt = `Alguien nos contactó en LinkedIn queriendo vendernos algo o reclutarnos. Escribe UN mensaje de rechazo educado, breve y sin quemar puentes.
+
+REMITENTE: ${senderName}${senderHeadline ? ` (${senderHeadline})` : ''}
+SU MENSAJE: "${inboundMessage ?? ''}"
+${senderPersona ? `NUESTRA VOZ: ${senderPersona}` : ''}
+
+Instrucciones:
+- Usa su nombre de pila: ${firstName}
+- Máx 80 palabras
+- Tono cordial, no agresivo ni frío
+- No des explicaciones largas — solo agradece y declina
+- Deja la puerta abierta por si el contexto cambia
+- Sin markdown, sin comillas, solo el texto del mensaje`;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      config: { temperature: 0.4, maxOutputTokens: 150, thinkingConfig: { thinkingBudget: 0 } },
+      contents: prompt,
+    });
+    return response.text.trim();
+  } catch {
+    return `Hola ${firstName}, gracias por contactarme. Por ahora no estamos buscando ese tipo de servicio, pero lo tendré en mente para más adelante. ¡Éxito!`;
+  }
+}
+
+// ── Fetch active playbook examples relevant to this lead + turn ──────────────
+// Queries ai_playbook for active entries whose tags overlap with lead profile
+// keywords and that apply to the given turn number. Returns a formatted string
+// ready to inject into a Gemini prompt.
+export async function fetchPlaybookExamples({ leadProfileData = {}, turnNumber = 0, limit = 3 } = {}) {
+  try {
+    const { data, error } = await supabase
+      .from('ai_playbook')
+      .select('title, situation, example_message, tags, applies_to_turns, outcome_count')
+      .eq('is_active', true)
+      .contains('applies_to_turns', [turnNumber])
+      .order('outcome_count', { ascending: false })
+      .limit(limit * 4) // over-fetch, then filter by tag relevance
+
+    if (error || !data?.length) return ''
+
+    // Build keyword set from lead profile for tag matching
+    const profile = leadProfileData ?? {}
+    const profileText = [
+      profile.headline, profile.company, profile.headlineCompany,
+      profile.currentPosition, profile.about,
+    ].filter(Boolean).join(' ').toLowerCase()
+
+    // Score each entry by tag overlap with profile text
+    const scored = data
+      .map(entry => {
+        const tags = entry.tags ?? []
+        const overlap = tags.filter(t => profileText.includes(t.toLowerCase())).length
+        return { ...entry, score: overlap + (entry.outcome_count ?? 0) * 0.1 }
+      })
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit)
+
+    if (!scored.length) return ''
+
+    const lines = scored.map(e => {
+      const situationLine = e.situation ? `  Situación: ${e.situation}\n` : ''
+      return `— ${e.title}\n${situationLine}  Mensaje: "${e.example_message}"`
+    }).join('\n\n')
+
+    return `\nEJEMPLOS DE MENSAJES QUE HAN FUNCIONADO (úsalos como referencia de tono y estilo, NO los copies literalmente):\n${lines}\n`
+  } catch (err) {
+    console.warn('[AI] fetchPlaybookExamples error:', err.message)
+    return ''
+  }
+}
+
+// ── Generate AI follow-up message for connected leads who haven't replied ────
+// Used by followup.js when campaign.auto_reply_mode !== 'manual'.
+// Completely different from generateReplyDraft: this generates an OUTBOUND
+// message to someone who hasn't responded yet, not a reply to their message.
+export async function generateFollowUpMessage({
+  leadName,
+  leadProfileData = {},
+  inviteMessage = null,      // the original invitation message we sent
+  previousFollowUps = [],    // previous FU messages we sent (for steps 2/3)
+  followUpStep = 1,          // 1, 2, or 3
+  calUrl = null,
+  aiTone = 'casual',
+  senderPersona = null,
+  companyContext = null,
+  exampleMessages = null,
+  playbookExamples = '',
+} = {}) {
+  const apiKey = process.env.GEMINI_API_KEY
+  if (!apiKey) throw new Error('GEMINI_API_KEY not set')
+
+  const ai = new GoogleGenAI({ apiKey })
+
+  const profile = leadProfileData ?? {}
+  const profileSnippet = [
+    profile.headline        ? `Cargo/Headline: ${profile.headline}` : null,
+    (profile.headlineCompany ?? profile.company) ? `Empresa: ${profile.headlineCompany ?? profile.company}` : null,
+    profile.currentPosition ? `Posición actual: ${profile.currentPosition}` : null,
+    profile.about           ? `Sobre él/ella: ${profile.about.slice(0, 250)}` : null,
+    profile.location        ? `Ubicación: ${profile.location}` : null,
+  ].filter(Boolean).join('\n') || 'Sin datos de perfil disponibles.'
+
+  const inviteBlock = inviteMessage
+    ? `MENSAJE DE INVITACIÓN QUE YA ENVIAMOS:\n"${inviteMessage.slice(0, 400)}"`
+    : '(sin registro del mensaje de invitación)'
+
+  const prevFuBlock = previousFollowUps.length > 0
+    ? `SEGUIMIENTOS ANTERIORES YA ENVIADOS:\n${previousFollowUps.map((m, i) => `FU${i + 1}: "${m.slice(0, 300)}"`).join('\n')}`
+    : ''
+
+  // Strategy per step
+  let stepStrategy
+  if (followUpStep === 1) {
+    stepStrategy = `ESTRATEGIA FU1 — PRIMER SEGUIMIENTO (conectó pero no respondió):
+- Tono cálido y casual. No presionar. No repetir la invitación.
+- Retoma el hilo de forma natural. Menciona UN detalle fresco de su perfil o empresa.
+- Haz UNA sola pregunta abierta sobre su trabajo o desafío actual.
+- NO menciones ORION ni automatización. NO incluyas Cal.com. Máx 80 palabras.
+- Escríbelo como si retomáramos una conversación, no como primer contacto.`
+  } else if (followUpStep === 2) {
+    stepStrategy = `ESTRATEGIA FU2 — SEGUNDO SEGUIMIENTO (no respondió al FU1):
+- Cambia el ángulo. No repitas lo del FU1.
+- Menciona un desafío concreto que probablemente enfrenta según su industria/rol.
+- Conecta sutilmente con cómo EBOOMS/ORION lo resuelve (sin ser muy agresivo).
+- Si el momento se presta, puedes hacer un soft-offer de la sesión 20 min.${calUrl ? ` Link: ${calUrl}` : ''}
+- Máx 100 palabras.`
+  } else {
+    stepStrategy = `ESTRATEGIA FU3 — ÚLTIMO SEGUIMIENTO (no respondió al FU2):
+- Mensaje breve. Directo. Sin presión.
+- Ofrece la sesión de 20 min de forma natural.${calUrl ? `\n- Incluye el link: ${calUrl}` : '\n- Pregunta cuándo tienen disponibilidad.'}
+- Deja la puerta abierta si no es buen momento.
+- Máx 60 palabras.`
+  }
+
+  const toneGuide = {
+    casual:       'Tono casual y humano. Frases cortas, naturales. Como colega de industria.',
+    professional: 'Tono profesional. Claro, sin jerga. Respeto entre pares.',
+    executive:    'Tono ejecutivo y conciso. Ve al punto. Sin relleno.',
+    technical:    'Tono técnico y preciso. Demuestra conocimiento del sector.',
+  }
+  const toneInstruction = toneGuide[aiTone] ?? toneGuide.casual
+
+  const activeCompanyContext = companyContext?.trim() || EBOOMS_CONTEXT
+  const personaBlock = senderPersona?.trim()
+    ? `QUIÉN ERES (escribe SIEMPRE con esta voz):\n${senderPersona.trim()}`
+    : `QUIÉN ERES: Un SDR representando a la empresa descrita abajo.`
+
+  const examplesBlock = exampleMessages?.trim()
+    ? `\nEJEMPLOS DE TU ESTILO (replica este tono y longitud):\n${exampleMessages.trim()}\n`
+    : ''
+
+  const prompt = `${activeCompanyContext}
+
+---
+
+${personaBlock}
+
+TONO DE COMUNICACIÓN: ${toneInstruction}
+${examplesBlock}${playbookExamples}
+---
+
+PERFIL DEL LEAD — ${leadName ?? 'Lead'}:
+${profileSnippet}
+
+CONTEXTO DE LA CONVERSACIÓN:
+${inviteBlock}
+${prevFuBlock ? '\n' + prevFuBlock : ''}
+
+SITUACIÓN: ${leadName ?? 'este lead'} aceptó tu invitación de conexión hace varios días pero no ha respondido ningún mensaje.
+
+---
+
+${stepStrategy}
+
+REGLAS ABSOLUTAS:
+- NO menciones "LinkedIn", "notificaciones", "mensajes anteriores" ni nada que revele automatización.
+- NO copies los mensajes anteriores. Escribe algo completamente nuevo.
+- ANTI-ALUCINACIÓN: SOLO puedes mencionar datos que aparecen LITERALMENTE en el perfil de arriba. No inferir logros, expansiones, noticias, ni eventos de la empresa. Si el perfil solo tiene headline y ubicación, trabaja únicamente con eso.
+- NO inventes: "expansión", "crecimiento", "lanzamiento", "adquisición", "felicidades por", ni ningún acontecimiento que no esté en el perfil.
+- Si no hay suficientes datos del perfil, sé warm y casual con una pregunta abierta sobre su rol — sin inventar contexto.
+- NO incluyas firma, despedida ni cierre: sin "Saludos", "¡Saludos!", "Atentamente", "Un abrazo", "Hasta pronto", ni "[Tu nombre]". El mensaje termina con la pregunta, sin nada más.
+
+Responde ÚNICAMENTE con el cuerpo del mensaje. Sin comillas, sin prefijos, sin markdown. Sin firma. Sin despedida.`
+
+  const response = await ai.models.generateContent({
+    model: 'gemini-2.5-flash',
+    config: {
+      systemInstruction: `Eres un SDR experto que escribe mensajes de LinkedIn personalizados. Tu trabajo es escribir seguimientos que suenen 100% humanos y naturales, nunca automáticos. Siempre lees el historial antes de escribir para no repetirte.`,
+      temperature: 0.85,
+      maxOutputTokens: 300,
+      thinkingConfig: { thinkingBudget: 0 },
+    },
+    contents: prompt,
+  })
+
+  return response.text.trim()
 }

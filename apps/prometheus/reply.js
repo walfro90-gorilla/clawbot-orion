@@ -181,6 +181,17 @@ async function sendViaThread(page, threadId, leadName) {
     return null // signal fallback
   }
 
+  // Quick name sanity check — the thread header should contain the lead's first name
+  const firstName = leadName.split(' ')[0]
+  const headerText = await page.locator(
+    'h2[class*="msg"], .msg-thread__top-bar-title, .msg-entity-lockup__entity-title'
+  ).first().textContent({ timeout: 3000 }).catch(() => null)
+
+  if (headerText && !headerText.toLowerCase().includes(firstName.toLowerCase())) {
+    console.warn(`[REPLY] ⚠️  Thread header "${headerText?.trim()}" no coincide con "${firstName}" — falling back to profile`)
+    return null // signal fallback
+  }
+
   await typeAndSend(page, textarea, leadName)
   return 'sent'
 }
@@ -222,6 +233,21 @@ async function sendViaProfile(page, profileUrl, leadName) {
   }
 
   await sleep(randInt(1500, 2500))
+
+  // Verify the overlay/thread that opened belongs to the correct lead
+  // LinkedIn bug: clicking "Message" from a profile can open the last viewed thread instead
+  const firstName = leadName.split(' ')[0]
+  const threadHeader = await page.locator(
+    '.msg-overlay-conversation-bubble--is-active .msg-overlay-conversation-bubble__participants-names, ' +
+    '.msg-thread__top-bar-title, ' +
+    '.msg-entity-lockup__entity-title, ' +
+    'h2[class*="msg"], [class*="conversation-title"]'
+  ).first().textContent({ timeout: 4000 }).catch(() => null)
+
+  if (threadHeader && !threadHeader.toLowerCase().includes(firstName.toLowerCase())) {
+    console.warn(`[REPLY] ⚠️  Thread abierto: "${threadHeader?.trim()}" — esperado: "${firstName}". Thread incorrecto, abortando.`)
+    return 'error'
+  }
 
   // Locate textarea (overlay or messaging page)
   const textarea = page.locator(

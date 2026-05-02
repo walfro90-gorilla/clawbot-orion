@@ -2,7 +2,53 @@ import { createClient } from "@/lib/supabase/server"
 import { createAdminClient } from "@/lib/supabase/admin"
 import { getSessionUser } from "@/lib/auth/role"
 import Link from "next/link"
+import { DashboardFiltersBar } from "@/components/dashboard-filters"
+import { RefreshButton } from "@/components/refresh-button"
 import type { CampaignStats, AccountToday } from "@clawbot/db-types"
+
+// ── Date range helpers ────────────────────────────────────────────────────────
+type Range = "" | "today" | "yesterday" | "7d" | "custom"
+
+function getMxDateRange(
+  range: Range,
+  customFrom?: string,
+  customTo?: string,
+): { from: string; to: string } | null {
+  if (!range) return null
+  // Mexico City — CDT (UTC-5) Apr–Oct, CST (UTC-6) Nov–Mar
+  // We snap to UTC-5 offset; ±1h is acceptable for dashboard stats.
+  const TZ_OFFSET = "-05:00"
+  const now = new Date()
+  const mxDateStr = now.toLocaleDateString("en-CA", { timeZone: "America/Mexico_City" }) // "2026-04-30"
+  const yday = new Date(now.getTime() - 86_400_000)
+  const mxYdayStr = yday.toLocaleDateString("en-CA", { timeZone: "America/Mexico_City" })
+  const ago7 = new Date(now.getTime() - 7 * 86_400_000)
+  const mx7dStr = ago7.toLocaleDateString("en-CA", { timeZone: "America/Mexico_City" })
+
+  switch (range) {
+    case "today":
+      return { from: `${mxDateStr}T00:00:00${TZ_OFFSET}`, to: `${mxDateStr}T23:59:59${TZ_OFFSET}` }
+    case "yesterday":
+      return { from: `${mxYdayStr}T00:00:00${TZ_OFFSET}`, to: `${mxYdayStr}T23:59:59${TZ_OFFSET}` }
+    case "7d":
+      return { from: `${mx7dStr}T00:00:00${TZ_OFFSET}`, to: now.toISOString() }
+    case "custom":
+      if (!customFrom || !customTo) return null
+      return { from: `${customFrom}T00:00:00${TZ_OFFSET}`, to: `${customTo}T23:59:59${TZ_OFFSET}` }
+    default:
+      return null
+  }
+}
+
+function rangeLabel(range: Range, from?: string, to?: string): string {
+  switch (range) {
+    case "today":     return "Hoy"
+    case "yesterday": return "Ayer"
+    case "7d":        return "Últimos 7 días"
+    case "custom":    return from && to ? `${from} → ${to}` : "Personalizado"
+    default:          return "Histórico total"
+  }
+}
 
 // ── Cookie health thresholds (days since last update) ─────────────────────────
 // LinkedIn li_at cookies duran ~1 año pero para automatización rotarlas regularmente
@@ -23,7 +69,17 @@ function cookieHealth(updatedAt: string | null): {
   return { status: "ok", days, label: `${days} días`, daysUntilWarning: COOKIE_WARNING_DAYS - days }
 }
 
-export default async function DashboardPage() {
+export default async function DashboardPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ range?: string; from?: string; to?: string }>
+}) {
+  const sp       = await searchParams
+  const range    = (sp.range ?? "") as Range
+  const spFrom   = sp.from ?? ""
+  const spTo     = sp.to   ?? ""
+  const dateRange = getMxDateRange(range, spFrom, spTo)
+
   const supabase = await createClient()
   const admin    = createAdminClient()
   const me       = await getSessionUser()
@@ -76,6 +132,48 @@ export default async function DashboardPage() {
     alertsQuery,
   ])
 
+  // ── Date-filtered KPI queries ─────────────────────────────────────────────
+  let filteredTotals: { leads: number; invited: number; replied: number; meetings: number } | null = null
+
+  if (dateRange) {
+    let leadsBaseQ = admin.from("leads").select("id", { count: "exact", head: true })
+      .gte("created_at", dateRange.from).lte("created_at", dateRange.to)
+    let inviteBaseQ = admin.from("leads").select("id", { count: "exact", head: true })
+      .gte("sent_at", dateRange.from).lte("sent_at", dateRange.to).not("sent_at", "is", null)
+    let repliesBaseQ = admin.from("conversation_events").select("id", { count: "exact", head: true })
+      .in("event_type", ["reply_received"])
+      .gte("sent_at", dateRange.from).lte("sent_at", dateRange.to)
+    let meetingsBaseQ = admin.from("leads").select("id", { count: "exact", head: true })
+      .eq("status", "meeting_booked")
+      .gte("created_at", dateRange.from).lte("created_at", dateRange.to)
+
+    // Restrict to account's campaigns if non-admin
+    if (isRestricted && linkedAccountId) {
+      const { data: acctCamps2 } = await admin
+        .from("campaigns").select("id").eq("linkedin_account_id", linkedAccountId)
+      const ids2 = (acctCamps2 ?? []).map((c: any) => c.id)
+      if (ids2.length > 0) {
+        leadsBaseQ  = (leadsBaseQ  as any).in("campaign_id", ids2)
+        inviteBaseQ = (inviteBaseQ as any).in("campaign_id", ids2)
+        meetingsBaseQ = (meetingsBaseQ as any).in("campaign_id", ids2)
+      }
+    }
+
+    const [
+      { count: leadsCount },
+      { count: inviteCount },
+      { count: repliesCount },
+      { count: meetingsCount },
+    ] = await Promise.all([leadsBaseQ, inviteBaseQ, repliesBaseQ, meetingsBaseQ])
+
+    filteredTotals = {
+      leads:    leadsCount   ?? 0,
+      invited:  inviteCount  ?? 0,
+      replied:  repliesCount ?? 0,
+      meetings: meetingsCount ?? 0,
+    }
+  }
+
   const stats    = campaigns as CampaignStats[] ?? []
   const accs     = accounts  as AccountToday[]  ?? []
   const rawAccs  = rawAccounts ?? []
@@ -91,10 +189,12 @@ export default async function DashboardPage() {
     { leads: 0, invited: 0, replied: 0, meetings: 0 }
   )
 
-  // ── Pipeline funnel: lead counts per status ───────────────────────────────
+  // ── Pipeline funnel ───────────────────────────────────────────────────────
+  // Without date filter: all leads (current state snapshot)
+  // With date filter: leads whose invite was sent in that period (cohort view)
   let pipelineQuery = admin
     .from("leads")
-    .select("status, campaign_id")
+    .select("status, campaign_id, sent_at, created_at")
 
   if (isRestricted && linkedAccountId) {
     const { data: acctCamps } = await admin
@@ -103,20 +203,69 @@ export default async function DashboardPage() {
     if (ids.length > 0) pipelineQuery = pipelineQuery.in("campaign_id", ids)
   }
 
+  if (dateRange) {
+    // Show status distribution for leads whose invite was sent in the period
+    // Leads without sent_at (pending) are included if created in the period
+    pipelineQuery = (pipelineQuery as any).or(
+      `and(sent_at.gte.${dateRange.from},sent_at.lte.${dateRange.to}),` +
+      `and(sent_at.is.null,created_at.gte.${dateRange.from},created_at.lte.${dateRange.to})`
+    )
+  }
+
   const { data: pipelineRaw } = await pipelineQuery
   const pipelineCounts: Record<string, number> = {}
   for (const l of pipelineRaw ?? []) {
     pipelineCounts[l.status ?? "unknown"] = (pipelineCounts[l.status ?? "unknown"] ?? 0) + 1
   }
 
+  // ── FM pipeline: leads replied con su conversation_turn ──────────────────
+  let fmQuery = admin
+    .from("leads")
+    .select(`
+      id, full_name, status, replied_at, source, inbound_signal,
+      profile_data,
+      conversations ( conversation_turn, last_message_text, last_message_at, ai_reply_scheduled_at, ai_reply_draft )
+    `)
+    .eq("status", "replied")
+    .order("replied_at", { ascending: false })
+    .limit(60)
+
+  if (isRestricted && linkedAccountId) {
+    const { data: acctCamps3 } = await admin
+      .from("campaigns").select("id").eq("linkedin_account_id", linkedAccountId)
+    const ids3 = (acctCamps3 ?? []).map((c: any) => c.id)
+    if (ids3.length > 0) fmQuery = fmQuery.in("campaign_id", ids3)
+  }
+
+  const { data: fmLeads } = await fmQuery
+
+  // Group by FM stage
+  const fm1: any[] = [], fm2: any[] = [], fm3: any[] = []
+  for (const l of fmLeads ?? []) {
+    const turn = (l.conversations as any)?.[0]?.conversation_turn ?? 0
+    if (turn === 0)       fm1.push(l)
+    else if (turn <= 2)   fm2.push(l)
+    else                  fm3.push(l)
+  }
+
   const criticalAlerts = activeAlerts.filter(a => a.severity === "critical")
   const warningAlerts  = activeAlerts.filter(a => a.severity === "warning")
 
+  const displayTotals = filteredTotals ?? totals
+
   return (
     <div className="p-4 sm:p-8 space-y-8">
-      <div>
-        <h1 className="text-2xl font-bold text-gray-50">Dashboard</h1>
-        <p className="text-gray-400 text-sm mt-1">Vista general de todas tus campañas</p>
+      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-50">Dashboard</h1>
+          <p className="text-gray-400 text-sm mt-1">
+            {rangeLabel(range, spFrom, spTo)}
+          </p>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <RefreshButton />
+          <DashboardFiltersBar initialRange={range} initialFrom={spFrom} initialTo={spTo} />
+        </div>
       </div>
 
       {/* ── Alertas críticas ──────────────────────────────────────────────────── */}
@@ -145,14 +294,39 @@ export default async function DashboardPage() {
 
       {/* ── KPI cards ─────────────────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <KpiCard label="Total Leads"  value={totals.leads}    color="blue"   icon="👥" />
-        <KpiCard label="Invitados"    value={totals.invited}  color="indigo" icon="✉️" />
-        <KpiCard label="Respondieron" value={totals.replied}  color="orange" icon="📩" />
-        <KpiCard label="Reuniones"    value={totals.meetings} color="green"  icon="📅" />
+        <KpiCard
+          label={range ? "Leads nuevos" : "Total Leads"}
+          value={displayTotals.leads}    color="blue"   icon="👥"
+          subtitle={range ? "creados en período" : undefined}
+        />
+        <KpiCard
+          label="Invitados"
+          value={displayTotals.invited}  color="indigo" icon="✉️"
+          subtitle={range ? "enviadas en período" : undefined}
+        />
+        <KpiCard
+          label="Respondieron"
+          value={displayTotals.replied}  color="orange" icon="📩"
+          subtitle={range ? "respuestas recibidas" : undefined}
+        />
+        <KpiCard
+          label="Reuniones"
+          value={displayTotals.meetings} color="green"  icon="📅"
+          subtitle={range ? "agendadas en período" : undefined}
+        />
       </div>
 
       {/* ── Pipeline Funnel ──────────────────────────────────────────────────── */}
-      <PipelineFunnel counts={pipelineCounts} />
+      <PipelineFunnel
+        counts={{ ...pipelineCounts, _fm1: fm1.length, _fm2: fm2.length, _fm3: fm3.length }}
+        filtered={!!dateRange}
+        filterLabel={rangeLabel(range, spFrom, spTo)}
+      />
+
+      {/* ── FM Pipeline ─────────────────────────────────────────────────────��───── */}
+      {(fm1.length + fm2.length + fm3.length) > 0 && (
+        <FmPipeline fm1={fm1} fm2={fm2} fm3={fm3} />
+      )}
 
       {/* ── Cookie health monitor ─────────────────────────────────────────────── */}
       {rawAccs.length > 0 && (
@@ -336,7 +510,9 @@ function CookieHealthCard({ account }: { account: any }) {
 
 // ── KPI card ─────────────────────────────────────────────────────────────────
 
-function KpiCard({ label, value, color, icon }: { label: string; value: number; color: string; icon: string }) {
+function KpiCard({ label, value, color, icon, subtitle }: {
+  label: string; value: number; color: string; icon: string; subtitle?: string
+}) {
   const colors: Record<string, string> = {
     blue:   "bg-blue-500/10 border-blue-500/20 text-blue-400",
     indigo: "bg-indigo-500/10 border-indigo-500/20 text-indigo-400",
@@ -350,6 +526,7 @@ function KpiCard({ label, value, color, icon }: { label: string; value: number; 
         <span className="text-3xl font-bold text-gray-50">{value}</span>
       </div>
       <p className="text-sm mt-2 font-medium">{label}</p>
+      {subtitle && <p className="text-[10px] mt-0.5 opacity-60">{subtitle}</p>}
     </div>
   )
 }
@@ -397,47 +574,72 @@ function AccountCard({ account: a }: { account: AccountToday }) {
 // ── Pipeline Funnel ───────────────────────────────────────────────────────────
 
 const FUNNEL_STAGES = [
-  { value: "pending",          label: "En cola",    icon: "⏳", color: "#64748b" },
-  { value: "invite_sent",      label: "Invitados",  icon: "✉️", color: "#60a5fa" },
-  { value: "connected",        label: "Conectados", icon: "🤝", color: "#34d399" },
-  { value: "follow_up_sent",   label: "FU1",        icon: "📨", color: "#818cf8" },
-  { value: "follow_up_sent_2", label: "FU2",        icon: "📩", color: "#c084fc" },
-  { value: "replied",          label: "Respondió",  icon: "💬", color: "#fb923c" },
-  { value: "meeting_booked",   label: "Reunión",    icon: "📅", color: "#facc15" },
-  { value: "dead",             label: "Perdidos",   icon: "💀", color: "#6b7280" },
+  { value: "pending",          label: "En cola",    icon: "⏳", color: "#64748b", indent: false },
+  { value: "invite_sent",      label: "Invitados",  icon: "✉️", color: "#60a5fa", indent: false },
+  { value: "connected",        label: "Conectados", icon: "🤝", color: "#34d399", indent: false },
+  { value: "follow_up_sent",   label: "FU1",        icon: "📨", color: "#818cf8", indent: false },
+  { value: "follow_up_sent_2", label: "FU2",        icon: "📩", color: "#c084fc", indent: false },
+  { value: "follow_up_sent_3", label: "FU3",        icon: "📬", color: "#e879f9", indent: false },
+  { value: "follow_up_sent_4", label: "FU4",        icon: "📮", color: "#f472b6", indent: false },
+  { value: "follow_up_sent_5", label: "FU5",        icon: "🔔", color: "#fb7185", indent: false },
+  { value: "replied",          label: "Respondió",  icon: "💬", color: "#fb923c", indent: false },
+  { value: "_fm1",             label: "↳ FM1 Rapport",    icon: "🔵", color: "#60a5fa", indent: true },
+  { value: "_fm2",             label: "↳ FM2 Profundizar", icon: "🟡", color: "#fbbf24", indent: true },
+  { value: "_fm3",             label: "↳ FM3 Cierre",     icon: "🟢", color: "#34d399", indent: true },
+  { value: "meeting_booked",   label: "Reunión",    icon: "📅", color: "#facc15", indent: false },
+  { value: "dead",             label: "Perdidos",   icon: "💀", color: "#6b7280", indent: false },
 ]
 
-function PipelineFunnel({ counts }: { counts: Record<string, number> }) {
+function PipelineFunnel({ counts, filtered, filterLabel }: {
+  counts: Record<string, number>
+  filtered?: boolean
+  filterLabel?: string
+}) {
   const activeStages = FUNNEL_STAGES.filter(s => s.value !== "dead")
-  const maxVal = Math.max(...activeStages.map(s => counts[s.value] ?? 0), 1)
+  // maxVal excluye sub-etapas FM para que las barras principales mantengan proporción
+  const maxVal = Math.max(...activeStages.filter(s => !s.value.startsWith("_fm")).map(s => counts[s.value] ?? 0), 1)
   const dead = counts["dead"] ?? 0
   const disq = counts["disqualified"] ?? 0
+  const totalInPipeline = activeStages.reduce((s, st) => s + (counts[st.value] ?? 0), 0)
 
   return (
     <section className="space-y-3">
-      <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">Pipeline de leads</h2>
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">Pipeline de leads</h2>
+          {filtered && (
+            <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-500/15 text-blue-400 border border-blue-500/30 font-medium">
+              {filterLabel} · {totalInPipeline} leads
+            </span>
+          )}
+        </div>
         <Link href="/dashboard/leads" className="text-xs text-blue-400 hover:text-blue-300">Ver todos →</Link>
       </div>
       <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-2">
         {activeStages.map((stage, i) => {
-          const val  = counts[stage.value] ?? 0
-          const prev = i > 0 ? (counts[activeStages[i - 1].value] ?? 0) : null
-          const pct  = Math.round((val / maxVal) * 100)
-          const conv = prev !== null && prev > 0 ? Math.round((val / prev) * 100) : null
+          const val     = counts[stage.value] ?? 0
+          const isFm    = stage.value.startsWith("_fm")
+          // Para las sub-etapas FM, no comparar conversión con la etapa anterior
+          const prev    = (!isFm && i > 0 && !activeStages[i - 1].value.startsWith("_fm"))
+            ? (counts[activeStages[i - 1].value] ?? 0)
+            : null
+          const pct     = Math.round((val / maxVal) * 100)
+          const conv    = prev !== null && prev > 0 ? Math.round((val / prev) * 100) : null
+          const href    = isFm ? "/dashboard/conversations" : `/dashboard/leads?status=${stage.value}`
           return (
-            <Link key={stage.value} href={`/dashboard/leads?status=${stage.value}`}
-              className="flex items-center gap-3 group hover:bg-gray-800/40 rounded-lg px-2 py-1.5 -mx-2 transition-colors">
-              <div className="w-20 text-right text-xs text-gray-400 shrink-0">
-                <span className="text-[10px]">{stage.icon}</span> {stage.label}
+            <Link key={stage.value} href={href}
+              className={`flex items-center gap-3 group hover:bg-gray-800/40 rounded-lg px-2 py-1.5 -mx-2 transition-colors ${isFm ? "ml-4 opacity-80" : ""}`}>
+              <div className={`text-right text-xs text-gray-400 shrink-0 ${isFm ? "w-28" : "w-20"}`}>
+                <span className="text-[10px]">{stage.icon}</span>{" "}
+                <span className={isFm ? "text-gray-500" : ""}>{stage.label}</span>
               </div>
-              <div className="flex-1 h-5 bg-gray-800 rounded-full overflow-hidden">
+              <div className="flex-1 h-4 bg-gray-800 rounded-full overflow-hidden">
                 <div
                   className="h-full rounded-full transition-all"
-                  style={{ width: `${pct}%`, backgroundColor: stage.color, opacity: val === 0 ? 0.2 : 0.8 }}
+                  style={{ width: `${pct}%`, backgroundColor: stage.color, opacity: val === 0 ? 0.15 : isFm ? 0.6 : 0.8 }}
                 />
               </div>
-              <div className="w-8 text-right text-sm font-bold text-gray-50 shrink-0">{val}</div>
+              <div className={`w-8 text-right font-bold text-gray-50 shrink-0 ${isFm ? "text-xs" : "text-sm"}`}>{val}</div>
               <div className="w-12 text-right shrink-0">
                 {conv !== null ? (
                   <span className={`text-[10px] font-medium ${conv >= 50 ? "text-green-400" : conv >= 20 ? "text-yellow-400" : "text-red-400"}`}>
@@ -463,6 +665,185 @@ function PipelineFunnel({ counts }: { counts: Record<string, number> }) {
           </div>
         )}
       </div>
+    </section>
+  )
+}
+
+// ── FM Pipeline ───────────────────────────────────────────────────────────────
+
+const FM_STAGES = [
+  {
+    key: "fm1", label: "FM1 — Rapport", icon: "🔵",
+    desc: "Primera respuesta. Construyendo confianza.",
+    cls: "border-blue-500/30 bg-blue-500/5",
+    badge: "bg-blue-500/15 border-blue-500/30 text-blue-400",
+    bar: "bg-blue-500",
+  },
+  {
+    key: "fm2", label: "FM2 — Profundizar", icon: "🟡",
+    desc: "Mostrando valor. Cerca del interés.",
+    cls: "border-yellow-500/30 bg-yellow-500/5",
+    badge: "bg-yellow-500/15 border-yellow-500/30 text-yellow-400",
+    bar: "bg-yellow-500",
+  },
+  {
+    key: "fm3", label: "FM3 — Cierre", icon: "🟢",
+    desc: "Propuesta de reunión + Cal.com.",
+    cls: "border-green-500/30 bg-green-500/5",
+    badge: "bg-green-500/15 border-green-500/30 text-green-400",
+    bar: "bg-green-500",
+  },
+]
+
+function FmPipeline({ fm1, fm2, fm3 }: { fm1: any[]; fm2: any[]; fm3: any[] }) {
+  const groups = [fm1, fm2, fm3]
+  const total = fm1.length + fm2.length + fm3.length
+
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">
+            Flujo de conversaciones activas
+          </h2>
+          <span className="text-[10px] px-2 py-0.5 rounded-full bg-orange-500/15 text-orange-400 border border-orange-500/30 font-medium">
+            {total} en curso
+          </span>
+        </div>
+        <Link href="/dashboard/conversations" className="text-xs text-blue-400 hover:text-blue-300">
+          Ver bandeja →
+        </Link>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        {FM_STAGES.map((stage, i) => {
+          const leads = groups[i]
+          return (
+            <div key={stage.key} className={`rounded-xl border p-4 space-y-3 ${stage.cls}`}>
+              {/* Stage header */}
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-semibold text-gray-50">{stage.icon} {stage.label}</p>
+                  <p className="text-[10px] text-gray-500 mt-0.5">{stage.desc}</p>
+                </div>
+                <span className={`text-lg font-bold px-2.5 py-0.5 rounded-full border ${stage.badge}`}>
+                  {leads.length}
+                </span>
+              </div>
+
+              {/* Progress bar */}
+              {total > 0 && (
+                <div className="w-full bg-gray-800 rounded-full h-1">
+                  <div
+                    className={`h-1 rounded-full ${stage.bar}`}
+                    style={{ width: `${Math.round((leads.length / total) * 100)}%` }}
+                  />
+                </div>
+              )}
+
+              {/* Lead cards */}
+              <div className="space-y-2 max-h-72 overflow-y-auto pr-0.5">
+                {leads.length === 0 ? (
+                  <p className="text-gray-600 text-xs text-center py-3">Sin prospectos en esta etapa</p>
+                ) : (
+                  leads.slice(0, 8).map((lead: any) => {
+                    const conv = lead.conversations?.[0]
+                    const turn = conv?.conversation_turn ?? 0
+                    const lastMsg = conv?.last_message_text
+                    const hasDraft = !!(conv?.ai_reply_draft || conv?.ai_reply_scheduled_at)
+                    const isInbound = lead.source === "inbound"
+                    const headline = (lead.profile_data as any)?.headline ?? null
+
+                    return (
+                      <Link
+                        key={lead.id}
+                        href={`/dashboard/conversations/${lead.id}`}
+                        className="block bg-gray-900/80 hover:bg-gray-800/80 border border-gray-700/50 hover:border-gray-600 rounded-lg p-3 transition-colors group"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="text-gray-50 text-xs font-semibold group-hover:text-blue-300 transition-colors truncate">
+                                {lead.full_name ?? "—"}
+                              </span>
+                              {isInbound && (
+                                <span className="text-[8px] px-1 py-0.5 rounded bg-purple-500/20 text-purple-400 font-bold shrink-0">IN</span>
+                              )}
+                            </div>
+                            {headline && (
+                              <p className="text-gray-500 text-[10px] mt-0.5 truncate">{headline}</p>
+                            )}
+                            {lastMsg && (
+                              <p className="text-gray-400 text-[10px] mt-1 line-clamp-2 leading-snug">
+                                {lastMsg.startsWith("[Tú]:") ? (
+                                  <span className="text-gray-600">{lastMsg.slice(0, 80)}</span>
+                                ) : (
+                                  `"${lastMsg.slice(0, 80)}${lastMsg.length > 80 ? "…" : ""}"`
+                                )}
+                              </p>
+                            )}
+                          </div>
+                          <div className="flex flex-col items-end gap-1 shrink-0">
+                            <span className={`text-[8px] px-1.5 py-0.5 rounded-full border font-bold ${stage.badge}`}>
+                              T{turn}
+                            </span>
+                            {hasDraft && (
+                              <span className="text-[8px] px-1 py-0.5 rounded bg-yellow-500/15 text-yellow-400 font-bold">
+                                ✨
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        {conv?.last_message_at && (
+                          <p className="text-gray-700 text-[9px] mt-1.5">
+                            {new Date(conv.last_message_at).toLocaleDateString("es-MX", {
+                              day: "numeric", month: "short", hour: "2-digit", minute: "2-digit"
+                            })}
+                          </p>
+                        )}
+                      </Link>
+                    )
+                  })
+                )}
+                {leads.length > 8 && (
+                  <Link
+                    href="/dashboard/conversations"
+                    className="block text-center text-[10px] text-gray-500 hover:text-gray-300 py-1 transition-colors"
+                  >
+                    +{leads.length - 8} más →
+                  </Link>
+                )}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+
+      {/* Summary bar */}
+      {total > 0 && (
+        <div className="bg-gray-900 border border-gray-800 rounded-xl px-5 py-3 flex flex-wrap gap-6 text-xs text-gray-400">
+          <div>
+            <span className="font-semibold text-gray-50">{total}</span> prospectos en conversación activa
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-blue-500" />
+            <span>FM1: {fm1.length}</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-yellow-500" />
+            <span>FM2: {fm2.length}</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-green-500" />
+            <span>FM3+: {fm3.length}</span>
+          </div>
+          <div className="ml-auto">
+            <Link href="/dashboard/conversations" className="text-blue-400 hover:text-blue-300">
+              Ver todos con drafts pendientes →
+            </Link>
+          </div>
+        </div>
+      )}
     </section>
   )
 }

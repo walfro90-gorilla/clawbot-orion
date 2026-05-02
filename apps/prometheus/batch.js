@@ -112,7 +112,7 @@ function parseOutcome(lines, exitCode) {
   if (/DISQUALIFIED/i.test(all))  return 'disqualified';
   if (/SENT|invitation sent|invitación/i.test(all)) return 'sent';
   if (/staged|STAGING/i.test(all)) return 'staged';
-  if (/DRY.?RUN/i.test(all))      return 'dry_run';
+  if (/DRY.?RUN MODE|modo prueba/i.test(all)) return 'dry_run';
   if (/error|fatal/i.test(all))   return 'error';
   return 'unknown';
 }

@@ -13,10 +13,12 @@ const EVENT_LABELS: Record<string, string> = {
   message_sent:     "Mensaje enviado",
   message_failed:   "Mensaje fallido",
   reply_received:   "Respuesta recibida",
-  follow_up_sent:   "Seguimiento enviado",
-  follow_up_sent_2: "Seguimiento 2 enviado",
-  follow_up_sent_3: "Seguimiento 3 enviado",
-  reply_sent:       "Respuesta enviada",
+  follow_up_sent:   "FU1 — Post-conexión",
+  follow_up_sent_2: "FU2 — La historia",
+  follow_up_sent_3: "FU3 — La pregunta que incomoda",
+  follow_up_sent_4: "FU4 — Urgencia real",
+  follow_up_sent_5: "FU5 — El cierre",
+  reply_sent:       "Respuesta enviada (IA)",
   meeting_booked:   "Reunión agendada",
   meeting_proposed: "Reunión propuesta",
   meeting_confirmed:"Reunión confirmada",
@@ -27,10 +29,13 @@ const STATUS_COLORS: Record<string, string> = {
   replied:          "bg-green-500/15 text-green-400 border-green-500/30",
   connected:        "bg-blue-500/15 text-blue-400 border-blue-500/30",
   invite_sent:      "bg-purple-500/15 text-purple-400 border-purple-500/30",
-  follow_up_sent:   "bg-orange-500/15 text-orange-400 border-orange-500/30",
-  follow_up_sent_2: "bg-yellow-500/15 text-yellow-400 border-yellow-500/30",
-  follow_up_sent_3: "bg-amber-500/15 text-amber-400 border-amber-500/30",
+  follow_up_sent:   "bg-indigo-500/15 text-indigo-400 border-indigo-500/30",
+  follow_up_sent_2: "bg-violet-500/15 text-violet-400 border-violet-500/30",
+  follow_up_sent_3: "bg-fuchsia-500/15 text-fuchsia-400 border-fuchsia-500/30",
+  follow_up_sent_4: "bg-pink-500/15 text-pink-400 border-pink-500/30",
+  follow_up_sent_5: "bg-rose-500/15 text-rose-400 border-rose-500/30",
   meeting_booked:   "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
+  dead:             "bg-gray-500/15 text-gray-400 border-gray-500/30",
 }
 
 export default async function ConversationThreadPage({
@@ -45,7 +50,7 @@ export default async function ConversationThreadPage({
 
   const { data: lead } = await admin
     .from("leads")
-    .select("id, full_name, linkedin_url, status, campaigns ( id, name )")
+    .select("id, full_name, linkedin_url, status, source, inbound_signal, inbound_message, campaigns ( id, name )")
     .eq("id", leadId)
     .single()
 
@@ -101,16 +106,45 @@ export default async function ConversationThreadPage({
             {(lead.full_name ?? "?")[0].toUpperCase()}
           </div>
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <span className="text-gray-50 font-semibold text-sm">{lead.full_name}</span>
-              <span className={`text-[10px] px-2 py-0.5 rounded-full border font-medium ${STATUS_COLORS[lead.status ?? ""] ?? "bg-gray-500/15 text-gray-400 border-gray-500/30"}`}>
-                {lead.status}
+              <span className={`text-[10px] px-2 py-0.5 rounded-full border font-medium ${STATUS_COLORS[(lead as any).status ?? ""] ?? "bg-gray-500/15 text-gray-400 border-gray-500/30"}`}>
+                {(lead as any).status}
               </span>
-              {(conv?.conversation_turn ?? 0) > 0 && (
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-gray-800 text-gray-500 border border-gray-700">
-                  Turno {conv!.conversation_turn}
+              {(lead as any).source === "inbound" && (
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-purple-500/15 border border-purple-500/30 text-purple-400 font-bold">
+                  📥 INBOUND
                 </span>
               )}
+              {(lead as any).inbound_signal && (lead as any).source === "inbound" && (() => {
+                const sig = (lead as any).inbound_signal as string
+                const meta: Record<string, { icon: string; cls: string }> = {
+                  lead:      { icon: "🔵 Comprador",   cls: "bg-blue-500/15 border-blue-500/30 text-blue-400" },
+                  vendor:    { icon: "🟡 Vendedor",    cls: "bg-yellow-500/15 border-yellow-500/30 text-yellow-400" },
+                  recruiter: { icon: "🟣 Recruiter",   cls: "bg-purple-500/15 border-purple-500/30 text-purple-400" },
+                  unknown:   { icon: "⚪ Desconocido", cls: "bg-gray-500/15 border-gray-500/30 text-gray-400" },
+                }
+                const m = meta[sig]
+                return m ? (
+                  <span className={`text-[10px] px-2 py-0.5 rounded-full border font-bold ${m.cls}`}>
+                    {m.icon}
+                  </span>
+                ) : null
+              })()}
+              {(conv?.conversation_turn ?? 0) >= 0 && (() => {
+                const t = conv?.conversation_turn ?? 0
+                const fmLabel = t === 0 ? "FM1 — Rapport" : t <= 2 ? `FM${t + 1} — Profundizar` : "FM3+ — Cierre"
+                const fmCls   = t === 0
+                  ? "bg-blue-500/15 border-blue-500/30 text-blue-400"
+                  : t <= 2
+                    ? "bg-yellow-500/15 border-yellow-500/30 text-yellow-400"
+                    : "bg-green-500/15 border-green-500/30 text-green-400"
+                return (
+                  <span className={`text-[10px] px-2 py-0.5 rounded-full border font-bold ${fmCls}`}>
+                    {fmLabel}
+                  </span>
+                )
+              })()}
             </div>
             <div className="flex items-center gap-2 mt-0.5">
               {campaign?.name && (

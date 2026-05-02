@@ -13,6 +13,8 @@ const NAV = [
   { href: "/dashboard/campaigns",         label: "Campañas",   icon: "🎯", adminOnly: false },
   { href: "/dashboard/accounts",          label: "Cuentas LI", icon: "🔗", adminOnly: true  },
   { href: "/dashboard/activity",          label: "Actividad",  icon: "📋", adminOnly: false },
+  { href: "/dashboard/cerebro",           label: "Cerebro IA", icon: "🧠", adminOnly: true  },
+  { href: "/dashboard/help",               label: "Instructivo", icon: "📖", adminOnly: false },
   { href: "/dashboard/settings",          label: "Ajustes",    icon: "⚙️", adminOnly: false },
   { href: "/dashboard/monitor",           label: "Monitor",    icon: "🖥️", adminOnly: true  },
   { href: "/dashboard/users",             label: "Usuarios",   icon: "🛡️", adminOnly: true  },

@@ -72,6 +72,12 @@ function buildSearchUrl(filters) {
   }
   params.set('origin', 'GLOBAL_SEARCH_HEADER');
 
+  // 2nd-degree filter: estas personas comparten conexiones mutuas → tasa de aceptación ~40% mayor
+  // network=["S"] = 2do grado / ["F"] = 1ro / ["O"] = 3ro+
+  if (filters.secondDegreeOnly !== false) {
+    params.set('network', '["S"]');
+  }
+
   return `${base}?${params.toString()}`;
 }
 
@@ -170,7 +176,7 @@ async function run() {
   // ── Load campaign config from Supabase ────────────────────────────────
   const { data: campaign, error: campErr } = await supabase
     .from('campaigns')
-    .select('search_keywords, search_location, search_count, title_blacklist, title_whitelist')
+    .select('search_keywords, search_location, search_count, title_blacklist, title_whitelist, search_2nd_degree_only')
     .eq('id', CAMPAIGN_ID)
     .single();
 
@@ -182,12 +188,15 @@ async function run() {
   const keywords    = cli.keywords || (campaign.search_keywords?.[0] ?? 'Director General Mexico');
   const location    = cli.location || campaign.search_location || null;
   const targetCount = parseInt(cli.count || campaign.search_count || '25');
-  const blacklist   = campaign.title_blacklist || [];
-  const whitelist   = campaign.title_whitelist || [];
+  const blacklist        = campaign.title_blacklist || [];
+  const whitelist        = campaign.title_whitelist || [];
+  // Default true — 2do grado tiene ~40% más tasa de aceptación que 3ro
+  const secondDegreeOnly = campaign.search_2nd_degree_only !== false;
 
   if (!cli.keywords && campaign.search_keywords?.length) {
     console.log(`[SEARCH] Keywords from campaign: ${campaign.search_keywords.join(', ')}`);
   }
+  console.log(`[SEARCH] Filtro de red: ${secondDegreeOnly ? '2do grado solamente (network=S)' : 'todos los grados'}`);
 
   // ── Load or create search_job ──────────────────────────────────────────
   let job;
@@ -198,7 +207,7 @@ async function run() {
     const { data, error } = await supabase.from('search_jobs').insert({
       campaign_id:   CAMPAIGN_ID,
       search_type:   'linkedin_people',
-      filters:       { keywords, location, title: cli.title || null },
+      filters:       { keywords, location, title: cli.title || null, secondDegreeOnly },
       target_count:  targetCount,
       status:        'running',
       started_at:    new Date().toISOString(),

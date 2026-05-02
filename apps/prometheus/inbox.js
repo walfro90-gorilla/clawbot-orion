@@ -20,7 +20,7 @@ import { chromium } from 'playwright-extra'
 import StealthPlugin from 'puppeteer-extra-plugin-stealth'
 import dotenv from 'dotenv'
 import { supabase } from './lib/supabase.js'
-import { generateReplyDraft, qualifyInboundMessage } from './ai.js'
+import { generateReplyDraft, qualifyInboundMessage, generateInboundDeclineReply, fetchPlaybookExamples } from './ai.js'
 import { randomContextOptions } from './lib/browser.js'
 
 dotenv.config()
@@ -30,8 +30,8 @@ const ACCOUNT_ID = process.env.ACCOUNT_ID
 const DRY_RUN    = process.env.DRY_RUN === 'true'
 
 // ── Límites de seguridad ──────────────────────────────────────────────────────
-const MAX_CONVOS_PER_RUN = 8   // máx conversaciones abiertas por ejecución
-const MAX_NOTIFS_READ    = 15  // máx notificaciones procesadas
+const MAX_CONVOS_PER_RUN = 20  // aumentado: procesa más conversaciones por run para no acumular backlog
+const MAX_NOTIFS_READ    = 25  // máx notificaciones procesadas
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function randInt(min, max) {
@@ -114,7 +114,11 @@ async function loadActiveLeads() {
       campaign_id,
       campaigns!inner(linkedin_account_id)
     `)
-    .in('status', ['invite_sent', 'connected', 'replied'])
+    .in('status', [
+      'invite_sent', 'connected', 'replied',
+      'follow_up_sent', 'follow_up_sent_2', 'follow_up_sent_3',
+      'follow_up_sent_4', 'follow_up_sent_5',
+    ])
     .eq('campaigns.linkedin_account_id', ACCOUNT_ID)
 
   if (error) throw new Error(`Could not load leads: ${error.message}`)
@@ -138,7 +142,8 @@ async function markConnected(lead) {
     return
   }
   await supabase.from('leads').update({
-    status: 'connected',
+    status:       'connected',
+    connected_at: new Date().toISOString(),
   }).eq('id', lead.id)
   console.log(`[INBOX] ✓ Connected: ${lead.full_name}`)
 }
@@ -214,7 +219,7 @@ async function markReplied(lead, messageText, threadId) {
 // ── Generate AI reply draft (fire-and-forget) ─────────────────────────────────
 // Llamado después de markReplied(). Genera un borrador con Gemini y lo guarda en
 // conversations.ai_reply_draft para aprobación humana en Orion.
-async function generateDraftAsync(lead, inboundMessageText) {
+async function generateDraftAsync(lead, inboundMessageText, replyModeOverride = null) {
   try {
     // 1. Conversación existente — turno actual + id
     const { data: conv } = await supabase
@@ -234,6 +239,7 @@ async function generateDraftAsync(lead, inboundMessageText) {
           'invite_sent', 'message_sent',
           'reply_received', 'reply_sent',
           'follow_up_sent', 'follow_up_sent_2', 'follow_up_sent_3',
+          'follow_up_sent_4', 'follow_up_sent_5',
         ])
         .order('sent_at', { ascending: true })
       conversationHistory = events ?? []
@@ -249,7 +255,7 @@ async function generateDraftAsync(lead, inboundMessageText) {
     // 4. Config auto-reply + Cal.com URL + delay por cuenta + persona IA
     const { data: campaign } = await supabase
       .from('campaigns')
-      .select('auto_reply_mode, auto_reply_delay_min, auto_reply_delay_max, linkedin_account_id, ai_tone, ai_sender_persona, ai_company_context, ai_example_messages')
+      .select('auto_reply_mode, auto_reply_delay_min, auto_reply_delay_max, linkedin_account_id, ai_tone, ai_sender_persona, ai_company_context, ai_example_messages, fm1_example_reply, fm2_example_reply, fm3_example_reply')
       .eq('id', fullLead?.campaign_id ?? lead.campaign_id)
       .single()
 
@@ -282,6 +288,21 @@ async function generateDraftAsync(lead, inboundMessageText) {
 
     // 5. Generar draft con contexto completo y estrategia por turno
     const turnCount = conv?.conversation_turn ?? 0
+
+    // Seleccionar ejemplo FM del turno actual (FM1/FM2/FM3)
+    const turnExample = turnCount === 0
+      ? (campaign?.fm1_example_reply ?? null)
+      : turnCount <= 2
+        ? (campaign?.fm2_example_reply ?? null)
+        : (campaign?.fm3_example_reply ?? null)
+
+    // Playbook del Cerebro — ejemplos relevantes al perfil del lead para este turno
+    const playbookExamples = await fetchPlaybookExamples({
+      leadProfileData: fullLead?.profile_data ?? {},
+      turnNumber: turnCount,
+      limit: 2,
+    }).catch(() => '')
+
     const draft = await generateReplyDraft({
       leadName:           lead.full_name,
       leadProfileData:    fullLead?.profile_data ?? {},
@@ -293,13 +314,15 @@ async function generateDraftAsync(lead, inboundMessageText) {
       senderPersona:      campaign?.ai_sender_persona ?? null,
       companyContext:     campaign?.ai_company_context ?? null,
       exampleMessages:    campaign?.ai_example_messages ?? null,
+      turnExample,
+      playbookExamples,
     })
 
     if (!draft) return
 
     // 6. Programar envío automático si mode != 'manual'
-    // Prioridad de delay: account override > warmup default > campaign > global
-    const mode     = campaign?.auto_reply_mode ?? 'manual'
+    // replyModeOverride permite que inbound use account.inbound_reply_mode en lugar del de campaña
+    const mode     = replyModeOverride ?? campaign?.auto_reply_mode ?? 'manual'
     const delayMin = accountDelayMin ?? campaign?.auto_reply_delay_min ?? 45
     const delayMax = accountDelayMax ?? campaign?.auto_reply_delay_max ?? 90
     const delayMs  = (Math.floor(Math.random() * (delayMax - delayMin + 1)) + delayMin) * 60_000
@@ -402,15 +425,55 @@ async function checkNotifications(page, leadMap, stats) {
 
 // ── Helpers para el GraphQL de mensajería ─────────────────────────────────────
 
-// Construye mapa de búsqueda por nombre: "nombre completo lowercase" → lead
+// Normaliza nombre: quita acentos, puntuación, espacios extra → para comparación fuzzy
+function normalizeName(str) {
+  return (str ?? '')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')  // quita acentos
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, ' ')                       // reemplaza puntuación con espacio
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+// Construye mapa de búsqueda por nombre (exacto + normalizado) → lead
 function buildLeadNameMap(leads) {
   const map = new Map()
   for (const lead of leads) {
-    if (lead.full_name) {
-      map.set(lead.full_name.toLowerCase().trim(), lead)
-    }
+    if (!lead.full_name) continue
+    // Clave exacta lowercase
+    map.set(lead.full_name.toLowerCase().trim(), lead)
+    // Clave normalizada (sin acentos, sin puntuación)
+    const norm = normalizeName(lead.full_name)
+    if (norm) map.set(norm, lead)
   }
   return map
+}
+
+// Fuzzy match: intenta varios niveles para "J. García" → "Juan García"
+function fuzzyMatchLead(fullName, leadNameMap, leads) {
+  // 1. Exacto
+  const exact = leadNameMap.get(fullName.toLowerCase().trim())
+  if (exact) return exact
+
+  // 2. Normalizado (sin acentos)
+  const norm = normalizeName(fullName)
+  const byNorm = leadNameMap.get(norm)
+  if (byNorm) return byNorm
+
+  // 3. Parcial — todos los tokens de la conversación están en el nombre del lead (o viceversa)
+  const convTokens = norm.split(' ').filter(t => t.length > 1)
+  for (const lead of leads) {
+    const leadNorm = normalizeName(lead.full_name)
+    const leadTokens = leadNorm.split(' ').filter(t => t.length > 1)
+    // Todos los tokens de la conv están en el lead
+    const convInLead = convTokens.every(t => leadNorm.includes(t))
+    // Primer y último token del lead están en la conv
+    const firstLast = leadTokens.length >= 2 &&
+      convTokens.includes(leadTokens[0]) &&
+      convTokens.includes(leadTokens[leadTokens.length - 1])
+    if (convInLead || firstLast) return lead
+  }
+  return null
 }
 
 // Extrae el ID del hilo de mensajes del backendUrn de una conversación GraphQL
@@ -429,11 +492,18 @@ function getOtherParticipant(convo) {
 // ── Procesar mensaje inbound de persona desconocida (no en leadMap) ───────────
 // Califica con IA si es un lead potencial. Si sí, crea lead + genera draft.
 async function processInboundUnknown(member, messageText, threadId, account) {
-  const senderName = `${member.firstName?.text ?? ''} ${member.lastName?.text ?? ''}`.trim()
-  const publicId   = member.publicIdentifier ?? null
-  const profileUrl = publicId ? `https://www.linkedin.com/in/${publicId}/` : null
+  const senderName    = `${member.firstName?.text ?? ''} ${member.lastName?.text ?? ''}`.trim()
+  const senderHeadline = member.headline?.text ?? null
+  const publicId      = member.publicIdentifier ?? null
+  const profileUrl    = publicId ? `https://www.linkedin.com/in/${publicId}/` : null
 
-  console.log(`[INBOX] 📬 Inbound desconocido: ${senderName} — calificando...`)
+  // Respetar flag de inbound por cuenta
+  if (account.inbound_enabled === false) {
+    console.log(`[INBOX] 📬 Inbound desactivado para cuenta "${account.label}" — skip`)
+    return
+  }
+
+  console.log(`[INBOX] 📬 Inbound desconocido: ${senderName}${senderHeadline ? ` (${senderHeadline})` : ''} — calificando...`)
 
   // Evitar duplicados: si ya existe un lead con esta URL, no crear otro
   if (profileUrl) {
@@ -447,26 +517,33 @@ async function processInboundUnknown(member, messageText, threadId, account) {
     }
   }
 
-  // Clasificar con IA
+  // Clasificar con IA — headline + reglas personalizadas si las hay
   const qualification = await qualifyInboundMessage({
     senderName,
+    senderHeadline,
     messageText,
+    qualificationRules: account.inbound_qualification_rules ?? null,
     accountContext: account?.label ? `Cuenta LinkedIn de ${account.label}` : '',
-  }).catch(() => ({ signal: 'unknown', qualified: true, reason: 'Error de clasificación' }))
+  }).catch((err) => {
+    console.warn(`[INBOX] qualifyInboundMessage error:`, err.message)
+    return { signal: 'unknown', qualified: false, reason: 'Error de clasificación' }
+  })
 
-  console.log(`[INBOX]   Clasificación: ${qualification.signal} — ${qualification.reason}`)
+  const signal = qualification.signal // 'lead' | 'vendor' | 'recruiter' | 'spam' | 'unknown'
+  console.log(`[INBOX]   Clasificación: ${signal} — ${qualification.reason}`)
 
-  if (!qualification.qualified) {
-    console.log(`[INBOX]   Descartado (${qualification.signal}) — no es un lead`)
+  // Spam/bot: descartar silenciosamente, no crear lead
+  if (signal === 'spam') {
+    console.log(`[INBOX]   Spam detectado — descartado sin registro`)
     return
   }
 
   if (DRY_RUN) {
-    console.log(`[INBOX][DRY] Lead inbound calificado: ${senderName} — no se crea en dry-run`)
+    console.log(`[INBOX][DRY] Inbound ${signal}: ${senderName} — no se crea en dry-run`)
     return
   }
 
-  // Encontrar campaña activa de esta cuenta para asignar el lead
+  // Campaña activa de esta cuenta (para contexto AI y asignación)
   const { data: campaign } = await supabase.from('campaigns')
     .select('id, name, auto_reply_mode, auto_reply_delay_min, auto_reply_delay_max, ai_tone, ai_sender_persona, ai_company_context, ai_example_messages')
     .eq('linkedin_account_id', account.id)
@@ -475,18 +552,20 @@ async function processInboundUnknown(member, messageText, threadId, account) {
     .limit(1)
     .maybeSingle()
 
-  // Crear lead inbound
+  // Crear lead — todos excepto spam se registran para trazabilidad
   const { data: newLead, error: leadErr } = await supabase.from('leads').insert({
-    campaign_id:   campaign?.id ?? null,
-    linkedin_url:  profileUrl,
-    full_name:     senderName,
-    status:        'replied',
-    source:        'inbound',
-    replied_at:    new Date().toISOString(),
-    ai_qualified:  true,
-    profile_data:  {
-      headline:  member.headline?.text ?? null,
-      location:  member.location?.basicLocation?.countryCode ?? null,
+    campaign_id:      campaign?.id ?? null,
+    linkedin_url:     profileUrl,
+    full_name:        senderName,
+    status:           qualification.qualified ? 'replied' : 'disqualified',
+    source:           'inbound',
+    replied_at:       qualification.qualified ? new Date().toISOString() : null,
+    ai_qualified:     qualification.qualified,
+    inbound_signal:   signal,
+    inbound_message:  messageText?.slice(0, 2000) ?? null,
+    profile_data: {
+      headline: senderHeadline,
+      location: member.location?.basicLocation?.countryCode ?? null,
     },
   }).select('id').single()
 
@@ -495,7 +574,7 @@ async function processInboundUnknown(member, messageText, threadId, account) {
     return
   }
 
-  console.log(`[INBOX] ✅ Lead inbound creado: ${senderName} (${newLead.id}) — campaña: ${campaign?.name ?? 'sin campaña'}`)
+  console.log(`[INBOX] ✅ Lead inbound creado: ${senderName} (${signal}) id=${newLead.id}`)
 
   // Crear conversación
   const { data: conv } = await supabase.from('conversations').upsert({
@@ -519,11 +598,47 @@ async function processInboundUnknown(member, messageText, threadId, account) {
     sent_at:         new Date().toISOString(),
   })
 
-  // Generar draft de respuesta si la campaña tiene auto-reply
-  if (campaign?.auto_reply_mode && campaign.auto_reply_mode !== 'manual') {
-    const fakeLead = { id: newLead.id, full_name: senderName, campaign_id: campaign.id }
-    generateDraftAsync(fakeLead, messageText)
-      .catch(e => console.error(`[INBOX] Draft inbound error para ${senderName}:`, e.message))
+  // ── Flujo según señal ─────────────────────────────────────────────────────
+
+  if (signal === 'lead') {
+    // Comprador potencial → draft de respuesta usando modo de inbound de la cuenta
+    const replyMode = account.inbound_reply_mode ?? 'manual'
+    const fakeLead  = { id: newLead.id, full_name: senderName, campaign_id: campaign?.id ?? null }
+    generateDraftAsync(fakeLead, messageText, replyMode)
+      .catch(e => console.error(`[INBOX] Draft inbound lead error para ${senderName}:`, e.message))
+
+  } else if (signal === 'vendor' || signal === 'recruiter') {
+    // Vendedor/recruiter → siempre generamos rechazo educado
+    const declineText = await generateInboundDeclineReply({
+      senderName,
+      senderHeadline,
+      inboundMessage:  messageText,
+      declineTemplate: account.inbound_decline_template ?? null,
+      senderPersona:   campaign?.ai_sender_persona ?? null,
+    }).catch(() => null)
+
+    if (!declineText) return
+
+    // Calcular scheduling: manual (solo draft) o auto (con delay)
+    const replyMode = account.inbound_reply_mode ?? 'manual'
+    const delayMin  = account.reply_delay_min  ?? 25
+    const delayMax  = account.reply_delay_max  ?? 60
+    const delayMs   = (Math.floor(Math.random() * (delayMax - delayMin + 1)) + delayMin) * 60_000
+    const scheduledAt = replyMode !== 'manual'
+      ? new Date(Date.now() + delayMs).toISOString()
+      : null
+
+    await supabase.from('conversations').update({
+      ai_reply_draft:        declineText,
+      ai_draft_generated_at: new Date().toISOString(),
+      ...(scheduledAt ? { ai_reply_scheduled_at: scheduledAt } : {}),
+    }).eq('id', conv.id)
+
+    console.log(`[INBOX]   Rechazo educado generado para ${signal} "${senderName}" — modo: ${replyMode}`)
+
+  } else {
+    // unknown → lead creado, sin draft, aparece en Orion para revisión manual
+    console.log(`[INBOX]   Signal "unknown" — queda en Orion para revisión manual`)
   }
 }
 
@@ -658,8 +773,8 @@ async function checkMessaging(page, leadMap, leads, stats, globalApiResponses, a
     const lastName  = member.lastName?.text  ?? ''
     const fullName  = `${firstName} ${lastName}`.trim()
 
-    // Intentar match por nombre en ambos mapas
-    const matchedLead = leadNameMap.get(fullName.toLowerCase())
+    // Intentar match por nombre — exacto primero, luego fuzzy (sin acentos, parcial)
+    const matchedLead = fuzzyMatchLead(fullName, leadNameMap, leads)
 
     if (!matchedLead) {
       // Persona desconocida — si tiene mensajes sin leer, calificar como inbound potencial
@@ -734,12 +849,19 @@ async function checkMessaging(page, leadMap, leads, stats, globalApiResponses, a
       }
 
       try {
-        await page.goto(`https://www.linkedin.com/messaging/thread/${threadId}/`, {
-          waitUntil: 'domcontentloaded',
-          timeout: 25000,
+        // Intento 1 — navegar al thread
+        const gotoThread = async () => {
+          await page.goto(`https://www.linkedin.com/messaging/thread/${threadId}/`, {
+            waitUntil: 'domcontentloaded',
+            timeout: 25000,
+          })
+          await page.waitForTimeout(5000)
+        }
+        await gotoThread().catch(async (err) => {
+          console.warn(`[INBOX] Thread nav attempt 1 failed (${err.message}) — retrying...`)
+          await page.waitForTimeout(3000)
+          await gotoThread()  // retry once
         })
-
-        await page.waitForTimeout(5000) // Dar tiempo al SPA para disparar el GraphQL call
 
         // Buscar la respuesta de mensajes en el interceptor global
         let messagesData = null
@@ -748,6 +870,18 @@ async function checkMessaging(page, leadMap, leads, stats, globalApiResponses, a
             messagesData = json
             console.log(`[INBOX] Found messengerMessages: ${url.replace('https://www.linkedin.com', '').slice(0, 100)}`)
             break
+          }
+        }
+
+        // Si no se capturó aún, esperar un poco más y reintentar búsqueda
+        if (!messagesData) {
+          await page.waitForTimeout(3000)
+          for (const [url, json] of globalApiResponses) {
+            if (url.toLowerCase().includes('messengermessages')) {
+              messagesData = json
+              console.log(`[INBOX] Found messengerMessages (delayed): ${url.slice(0, 80)}`)
+              break
+            }
           }
         }
 
@@ -812,10 +946,27 @@ async function checkMessaging(page, leadMap, leads, stats, globalApiResponses, a
       continue
     }
 
-    // Si no hay texto real del hilo → no generar draft (evita que Gemini responda sobre "notificaciones")
-    // El admin verá la conversación en Orion para revisión manual
+    // Si no hay texto del API, intentar leer del DOM como último recurso
+    if (!messageText && threadId) {
+      console.warn(`[INBOX] ⚠️  Sin texto API para ${matchedLead.full_name} — intentando DOM...`)
+      try {
+        // El thread ya está cargado. Los mensajes del lead están en elementos de texto.
+        const domTexts = await page.evaluate(() => {
+          const msgs = document.querySelectorAll('.msg-s-message-list__event .msg-s-event-listitem__body, .msg-thread .msg-message .body, [class*="message-group"] [class*="body"]')
+          return [...msgs].map(el => el.textContent?.trim()).filter(Boolean)
+        })
+        if (domTexts.length > 0) {
+          // Tomar los últimos mensajes (más recientes)
+          messageText = domTexts.slice(-3).join('\n\n')
+          console.log(`[INBOX]   DOM fallback extrajo ${domTexts.length} msgs: "${messageText.slice(0, 80)}"`)
+        }
+      } catch {
+        // DOM fallback también falló
+      }
+    }
+
     if (!messageText) {
-      console.warn(`[INBOX] ⚠️  No se pudo leer el texto del hilo de ${matchedLead.full_name} — marcando para revisión manual (sin draft).`)
+      console.warn(`[INBOX] ⚠️  Sin texto para ${matchedLead.full_name} — marcando para revisión manual.`)
       await supabase.from('conversations').update({
         inbox_checked_at: new Date().toISOString(),
         last_message_text: '[Sin texto — revisar LinkedIn manualmente]',

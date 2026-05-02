@@ -147,6 +147,51 @@ export type Database = {
           },
         ]
       }
+      ai_playbook: {
+        Row: {
+          applies_to_turns: number[]
+          created_at: string
+          created_by: string | null
+          description: string | null
+          example_message: string
+          id: string
+          is_active: boolean
+          outcome: string
+          outcome_count: number
+          situation: string | null
+          tags: string[]
+          title: string
+        }
+        Insert: {
+          applies_to_turns?: number[]
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          example_message: string
+          id?: string
+          is_active?: boolean
+          outcome?: string
+          outcome_count?: number
+          situation?: string | null
+          tags?: string[]
+          title: string
+        }
+        Update: {
+          applies_to_turns?: number[]
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          example_message?: string
+          id?: string
+          is_active?: boolean
+          outcome?: string
+          outcome_count?: number
+          situation?: string | null
+          tags?: string[]
+          title?: string
+        }
+        Relationships: []
+      }
       appointments: {
         Row: {
           conversation_id: string | null
@@ -278,13 +323,22 @@ export type Database = {
           batch_paused: boolean
           created_at: string | null
           daily_invite_target: number
+          fm1_example_reply: string | null
+          fm2_example_reply: string | null
+          fm3_example_reply: string | null
           follow_up_delay_days: number | null
           follow_up_message: string | null
           follow_up_paused: boolean | null
           follow_up_step2_delay_days: number | null
+          follow_up_step2_delay_hours: number | null
           follow_up_step2_message: string | null
           follow_up_step3_delay_days: number | null
+          follow_up_step3_delay_hours: number | null
           follow_up_step3_message: string | null
+          follow_up_step4_delay_hours: number | null
+          follow_up_step4_message: string | null
+          follow_up_step5_delay_hours: number | null
+          follow_up_step5_message: string | null
           gemini_system_prompt: string
           id: string
           is_active: boolean | null
@@ -292,6 +346,8 @@ export type Database = {
           last_followup_at: string | null
           last_followup2_at: string | null
           last_followup3_at: string | null
+          last_followup4_at: string | null
+          last_followup5_at: string | null
           last_searched_at: string | null
           linkedin_account_id: string | null
           min_batch_gap_min: number
@@ -301,6 +357,7 @@ export type Database = {
           schedule_end_hour: number
           schedule_start_hour: number
           scheduler_notes: string | null
+          search_2nd_degree_only: boolean | null
           search_count: number | null
           search_gap_hours: number
           search_keywords: string[] | null
@@ -322,13 +379,22 @@ export type Database = {
           batch_paused?: boolean
           created_at?: string | null
           daily_invite_target?: number
+          fm1_example_reply?: string | null
+          fm2_example_reply?: string | null
+          fm3_example_reply?: string | null
           follow_up_delay_days?: number | null
           follow_up_message?: string | null
           follow_up_paused?: boolean | null
           follow_up_step2_delay_days?: number | null
+          follow_up_step2_delay_hours?: number | null
           follow_up_step2_message?: string | null
           follow_up_step3_delay_days?: number | null
+          follow_up_step3_delay_hours?: number | null
           follow_up_step3_message?: string | null
+          follow_up_step4_delay_hours?: number | null
+          follow_up_step4_message?: string | null
+          follow_up_step5_delay_hours?: number | null
+          follow_up_step5_message?: string | null
           gemini_system_prompt: string
           id?: string
           is_active?: boolean | null
@@ -336,6 +402,8 @@ export type Database = {
           last_followup_at?: string | null
           last_followup2_at?: string | null
           last_followup3_at?: string | null
+          last_followup4_at?: string | null
+          last_followup5_at?: string | null
           last_searched_at?: string | null
           linkedin_account_id?: string | null
           min_batch_gap_min?: number
@@ -345,6 +413,7 @@ export type Database = {
           schedule_end_hour?: number
           schedule_start_hour?: number
           scheduler_notes?: string | null
+          search_2nd_degree_only?: boolean | null
           search_count?: number | null
           search_gap_hours?: number
           search_keywords?: string[] | null
@@ -366,13 +435,22 @@ export type Database = {
           batch_paused?: boolean
           created_at?: string | null
           daily_invite_target?: number
+          fm1_example_reply?: string | null
+          fm2_example_reply?: string | null
+          fm3_example_reply?: string | null
           follow_up_delay_days?: number | null
           follow_up_message?: string | null
           follow_up_paused?: boolean | null
           follow_up_step2_delay_days?: number | null
+          follow_up_step2_delay_hours?: number | null
           follow_up_step2_message?: string | null
           follow_up_step3_delay_days?: number | null
+          follow_up_step3_delay_hours?: number | null
           follow_up_step3_message?: string | null
+          follow_up_step4_delay_hours?: number | null
+          follow_up_step4_message?: string | null
+          follow_up_step5_delay_hours?: number | null
+          follow_up_step5_message?: string | null
           gemini_system_prompt?: string
           id?: string
           is_active?: boolean | null
@@ -380,6 +458,8 @@ export type Database = {
           last_followup_at?: string | null
           last_followup2_at?: string | null
           last_followup3_at?: string | null
+          last_followup4_at?: string | null
+          last_followup5_at?: string | null
           last_searched_at?: string | null
           linkedin_account_id?: string | null
           min_batch_gap_min?: number
@@ -389,6 +469,7 @@ export type Database = {
           schedule_end_hour?: number
           schedule_start_hour?: number
           scheduler_notes?: string | null
+          search_2nd_degree_only?: boolean | null
           search_count?: number | null
           search_gap_hours?: number
           search_keywords?: string[] | null
@@ -417,6 +498,7 @@ export type Database = {
       }
       conversation_events: {
         Row: {
+          ai_generated: boolean
           content: string | null
           conversation_id: string
           created_at: string | null
@@ -428,6 +510,7 @@ export type Database = {
           subject: string | null
         }
         Insert: {
+          ai_generated?: boolean
           content?: string | null
           conversation_id: string
           created_at?: string | null
@@ -439,6 +522,7 @@ export type Database = {
           subject?: string | null
         }
         Update: {
+          ai_generated?: boolean
           content?: string | null
           conversation_id?: string
           created_at?: string | null
@@ -683,13 +767,19 @@ export type Database = {
           ai_qualified: boolean | null
           ai_subject: string | null
           campaign_id: string | null
+          connected_at: string | null
           created_at: string | null
           dead_reason: string | null
           disqualification_reason: string | null
           full_name: string | null
           id: string
+          inbound_message: string | null
+          inbound_signal: string | null
+          last_followup_at: string | null
           last_followup2_at: string | null
           last_followup3_at: string | null
+          last_followup4_at: string | null
+          last_followup5_at: string | null
           linkedin_url: string
           meeting_at: string | null
           meeting_url: string | null
@@ -707,13 +797,19 @@ export type Database = {
           ai_qualified?: boolean | null
           ai_subject?: string | null
           campaign_id?: string | null
+          connected_at?: string | null
           created_at?: string | null
           dead_reason?: string | null
           disqualification_reason?: string | null
           full_name?: string | null
           id?: string
+          inbound_message?: string | null
+          inbound_signal?: string | null
+          last_followup_at?: string | null
           last_followup2_at?: string | null
           last_followup3_at?: string | null
+          last_followup4_at?: string | null
+          last_followup5_at?: string | null
           linkedin_url: string
           meeting_at?: string | null
           meeting_url?: string | null
@@ -731,13 +827,19 @@ export type Database = {
           ai_qualified?: boolean | null
           ai_subject?: string | null
           campaign_id?: string | null
+          connected_at?: string | null
           created_at?: string | null
           dead_reason?: string | null
           disqualification_reason?: string | null
           full_name?: string | null
           id?: string
+          inbound_message?: string | null
+          inbound_signal?: string | null
+          last_followup_at?: string | null
           last_followup2_at?: string | null
           last_followup3_at?: string | null
+          last_followup4_at?: string | null
+          last_followup5_at?: string | null
           linkedin_url?: string
           meeting_at?: string | null
           meeting_url?: string | null
@@ -773,6 +875,10 @@ export type Database = {
           created_at: string | null
           daily_connection_limit: number | null
           id: string
+          inbound_decline_template: string | null
+          inbound_enabled: boolean | null
+          inbound_qualification_rules: string | null
+          inbound_reply_mode: string | null
           inbox_gap_min: number
           inbox_paused: boolean
           label: string | null
@@ -798,6 +904,10 @@ export type Database = {
           created_at?: string | null
           daily_connection_limit?: number | null
           id?: string
+          inbound_decline_template?: string | null
+          inbound_enabled?: boolean | null
+          inbound_qualification_rules?: string | null
+          inbound_reply_mode?: string | null
           inbox_gap_min?: number
           inbox_paused?: boolean
           label?: string | null
@@ -823,6 +933,10 @@ export type Database = {
           created_at?: string | null
           daily_connection_limit?: number | null
           id?: string
+          inbound_decline_template?: string | null
+          inbound_enabled?: boolean | null
+          inbound_qualification_rules?: string | null
+          inbound_reply_mode?: string | null
           inbox_gap_min?: number
           inbox_paused?: boolean
           label?: string | null
@@ -1329,13 +1443,19 @@ export type Database = {
           ai_qualified: boolean | null
           ai_subject: string | null
           campaign_id: string | null
+          connected_at: string | null
           created_at: string | null
           dead_reason: string | null
           disqualification_reason: string | null
           full_name: string | null
           id: string
+          inbound_message: string | null
+          inbound_signal: string | null
+          last_followup_at: string | null
           last_followup2_at: string | null
           last_followup3_at: string | null
+          last_followup4_at: string | null
+          last_followup5_at: string | null
           linkedin_url: string
           meeting_at: string | null
           meeting_url: string | null

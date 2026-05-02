@@ -313,110 +313,80 @@ async function openComposeArea(page, cta) {
       return 'captcha';
     }
 
-    // ── Strategy 1: "Add a note" button (LinkedIn ES/EN + all known text variants)
-    // LinkedIn has changed this text multiple times across A/B tests and locales.
-    const addNoteBtn = page.getByRole('button', {
-      name: /add a note|añadir una nota|añadir nota|add a personalised note|add a personalized note|personalizar|personali[sz]e|con nota|agregar nota|with a note/i,
+    // ── Nuevo comportamiento: enviar SIEMPRE sin nota ─────────────────────────
+    // La nota de conexión fue eliminada del flujo. El primer mensaje real llega
+    // como FU1 (followup.js) después de que el lead acepte la conexión.
+    // Esto reduce la fricción inicial y preserva los mensajes para los FU.
+
+    // Prioridad 1: clic directo en "Enviar sin nota" si el modal ya lo muestra
+    const sendWithoutBtn = page.getByRole('button', {
+      name: /send without note|enviar sin nota|skip note|omitir nota|send now|enviar ahora/i,
     }).first();
-    let hasModal = await addNoteBtn.isVisible({ timeout: 5000 }).catch(() => false);
-
-    // ── Strategy 2: LinkedIn new modal shows "Enviar sin nota" alongside "Añadir nota"
-    // If we see "send without note" it means the modal IS open, just different structure.
-    if (!hasModal) {
-      const sendWithoutBtn = page.getByRole('button', {
-        name: /send without note|enviar sin nota|skip note|omitir nota|send now|enviar ahora/i,
-      }).first();
-      const hasSendWithout = await sendWithoutBtn.isVisible({ timeout: 3000 }).catch(() => false);
-      if (hasSendWithout) {
-        console.log('[CLAWBOT] "Send without note" detected — modal IS open, scanning for note button...');
-        // Modal is present: look for any note-related button via text scan
-        const noteBtn = page.locator('button').filter({
-          hasText: /nota|note/i,
-        }).first();
-        const hasNote = await noteBtn.isVisible({ timeout: 2000 }).catch(() => false);
-        if (hasNote) {
-          hasModal = true;
-          await noteBtn.click();
-          await page.waitForTimeout(randInt(600, 1000));
-        }
-      }
-    }
-
-    // ── Strategy 3: Textarea already visible in shadow DOM (no "Add a note" click needed)
-    if (!hasModal) {
-      const directInShadow = await page.evaluate(() => {
-        const host = document.querySelector('#interop-outlet, [data-testid="interop-shadowdom"]');
-        const root = host?.shadowRoot;
-        if (!root) return false;
-        return root.querySelectorAll('textarea').length > 0;
-      });
-      if (directInShadow) {
-        console.log('[CLAWBOT] Note textarea visible directly in shadow DOM (new LinkedIn flow).');
-        // Skip clicking "Add a note" — fall through to shadow DOM focus below
-        hasModal = true;
-      }
-    }
-
-    // ── Debug: log all visible button texts before giving up
-    if (!hasModal) {
-      const visibleBtns = await page.evaluate(() => {
-        const host = document.querySelector('#interop-outlet');
-        const shadowBtns = host?.shadowRoot
-          ? Array.from(host.shadowRoot.querySelectorAll('button')).map(b => b.textContent?.trim())
-          : [];
-        const domBtns = Array.from(document.querySelectorAll('button')).map(b => b.textContent?.trim());
-        return [...new Set([...shadowBtns, ...domBtns])].filter(t => t && t.length > 0 && t.length < 60);
-      });
-      console.log('[CLAWBOT] Visible buttons after Connect click:', JSON.stringify(visibleBtns));
-      console.warn('[CLAWBOT] ⚠️  Quick Connect — invitation sent WITHOUT note (no modal found).');
+    const hasSendWithout = await sendWithoutBtn.isVisible({ timeout: 5000 }).catch(() => false);
+    if (hasSendWithout) {
+      console.log('[CLAWBOT] Modal detectado — haciendo clic en "Enviar sin nota"...');
+      await sendWithoutBtn.click();
+      await page.waitForTimeout(randInt(800, 1400));
+      console.log('[CLAWBOT] ✓ Invitación enviada sin nota (modal "Enviar sin nota").');
       return 'quick-connect';
     }
 
-    // Only click "Add a note" if we found it via Strategy 1 (not 2 or 3 which already handled it)
-    const needsAddNoteClick = await addNoteBtn.isVisible({ timeout: 500 }).catch(() => false);
-    if (needsAddNoteClick) {
-      console.log('[CLAWBOT] Note modal detected — clicking "Añadir una nota"...');
-      await addNoteBtn.click();
-      await page.waitForTimeout(randInt(700, 1200));
+    // Prioridad 2: si el modal muestra "Añadir nota", buscar el botón hermano "Enviar sin nota"
+    const addNoteBtn = page.getByRole('button', {
+      name: /add a note|añadir una nota|añadir nota|add a personalised note|add a personalized note|personalizar|personali[sz]e|con nota|agregar nota|with a note/i,
+    }).first();
+    const hasAddNote = await addNoteBtn.isVisible({ timeout: 3000 }).catch(() => false);
+    if (hasAddNote) {
+      // El modal está abierto — buscar "Enviar sin nota" en el mismo contexto
+      const skipBtn = page.getByRole('button', {
+        name: /send without note|enviar sin nota|skip|omitir|send now|enviar ahora/i,
+      }).first();
+      const hasSkip = await skipBtn.isVisible({ timeout: 2000 }).catch(() => false);
+      if (hasSkip) {
+        console.log('[CLAWBOT] Modal con "Añadir nota" — haciendo clic en "Enviar sin nota"...');
+        await skipBtn.click();
+        await page.waitForTimeout(randInt(800, 1400));
+        console.log('[CLAWBOT] ✓ Invitación enviada sin nota (modal "Añadir nota" → skip).');
+        return 'quick-connect';
+      }
+      // Último recurso: cerrar el modal con Escape (invitación no enviada aún)
+      await page.keyboard.press('Escape');
+      await page.waitForTimeout(500);
     }
 
-    // The note textarea is inside LinkedIn's interop shadow DOM.
-    // getByRole('textbox') matches the search bar first, and pointer events
-    // are intercepted by the shadow host div — we can't click it normally.
-    // Solution: traverse the shadow root in evaluate() to focus the textarea,
-    // then type with page.keyboard (which doesn't need pointer events).
-    const focused = await page.evaluate(() => {
-      // LinkedIn wraps the new UI in a shadow root at #interop-outlet
+    // Prioridad 3: Shadow DOM con textarea ya visible — cerrar sin escribir
+    const shadowHasTextarea = await page.evaluate(() => {
       const host = document.querySelector('#interop-outlet, [data-testid="interop-shadowdom"]');
       const root = host?.shadowRoot;
       if (!root) return false;
-
-      // Find the note textarea — it has a character counter nearby or specific attrs
-      const textareas = Array.from(root.querySelectorAll('textarea'));
-      const noteArea = textareas.find(t =>
-        t.getAttribute('name') === 'message' ||
-        t.id === 'custom-message' ||
-        t.getAttribute('data-testid')?.includes('note') ||
-        // fallback: any textarea that's not tiny (the note field is large)
-        t.rows >= 2 || t.offsetHeight > 40
-      ) ?? textareas[0];
-
-      if (!noteArea) return false;
-      noteArea.focus();
-      noteArea.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      return true;
+      return root.querySelectorAll('textarea').length > 0;
     });
-
-    if (!focused) {
-      console.warn('[CLAWBOT] Could not find note textarea in shadow DOM.');
-      return null;
+    if (shadowHasTextarea) {
+      // Buscar y clickear botón de envío sin nota en el shadow DOM
+      const sent = await page.evaluate(() => {
+        const host = document.querySelector('#interop-outlet, [data-testid="interop-shadowdom"]');
+        const root = host?.shadowRoot;
+        if (!root) return false;
+        const btns = Array.from(root.querySelectorAll('button'));
+        const skipBtn = btns.find(b => /sin nota|without note|skip|omitir|send now|enviar ahora/i.test(b.textContent ?? ''))
+        if (skipBtn) { skipBtn.click(); return true; }
+        return false;
+      });
+      if (sent) {
+        await page.waitForTimeout(randInt(800, 1400));
+        console.log('[CLAWBOT] ✓ Invitación enviada sin nota (shadow DOM skip button).');
+        return 'quick-connect';
+      }
     }
 
-    console.log('[CLAWBOT] Note textarea focused via shadow DOM.');
-    await page.screenshot({ path: 'stage3_modal.png', fullPage: false });
-    console.log('[CLAWBOT] stage3_modal.png saved (connect note modal open).');
-    // Return a sentinel — caller will use page.keyboard.type() directly
-    return 'shadow-keyboard';
+    // Fallback final: si no encontró ningún modal, el quick-connect ya lo envió
+    const visibleBtns = await page.evaluate(() => {
+      const domBtns = Array.from(document.querySelectorAll('button')).map(b => b.textContent?.trim());
+      return [...new Set(domBtns)].filter(t => t && t.length > 0 && t.length < 60);
+    });
+    console.log('[CLAWBOT] Visible buttons after Connect click:', JSON.stringify(visibleBtns));
+    console.warn('[CLAWBOT] ⚠️  Quick Connect — invitation sent WITHOUT note (no modal found).');
+    return 'quick-connect';
   }
 
   return null;
@@ -436,7 +406,7 @@ async function run() {
     console.log('[CLAWBOT] ⚠️  STAGING MODE — types message & detects Send button, but does NOT send.');
     console.log('[CLAWBOT]    Set LIVE_SEND=true in .env when ready to send for real.\n');
   } else {
-    console.log('[CLAWBOT] 🚀 LIVE MODE — DRY_RUN=false + LIVE_SEND=true. Will send for real.\n');
+    console.log('[CLAWBOT] 🚀 LIVE MODE — modo real. Enviando invitaciones.\n');
   }
 
   // ── Rotate User-Agent (realistic pool of Chrome versions on Win/Mac) ─────
@@ -838,10 +808,10 @@ async function run() {
   }
 
   if (textarea === 'quick-connect') {
-    // Invitation was already sent by LinkedIn's Quick Connect flow (no note modal).
+    // Flujo normal: invitación enviada sin nota (comportamiento deseado desde 2026-05-02)
+    // El primer mensaje real llega como FU1 después de que el lead acepte la conexión.
     await page.screenshot({ path: 'stage_quick_connect.png', fullPage: false });
-    console.warn('[CLAWBOT] Quick Connect flow — invitation sent without note. stage_quick_connect.png saved.');
-    // Update DB directly (batch.js also parses output, but this covers standalone runs)
+    console.log('[CLAWBOT] ✓ Invitación enviada sin nota — FU1 se enviará tras aceptación.');
     if (LEAD_ID) {
       await supabase.from('leads').update({
         status:  'invite_sent',
@@ -849,7 +819,7 @@ async function run() {
       }).eq('id', LEAD_ID);
       await logActivity(null, LEAD_ID, 'invite_sent', 'success', {
         profile_url: TARGET_PROFILE,
-        cta_type:    'quick-connect',
+        cta_type:    'no-note',
       });
     }
     await browser.close();
@@ -878,13 +848,10 @@ async function run() {
     console.log('[CLAWBOT] InMail — typing message body...');
     await humanType(page, generatedCopy);
   } else {
-    // Regular message or connect note
-    // For shadow DOM textareas the focus was set via evaluate(); skip .click()
-    if (textarea !== 'shadow-keyboard') {
-      await textarea.click();
-      await page.waitForTimeout(randInt(300, 600));
-    }
-    await page.waitForTimeout(randInt(600, 1400)); // re-read before typing
+    // Regular message compose (InMail reply or direct message — never a connect note)
+    await textarea.click();
+    await page.waitForTimeout(randInt(300, 600));
+    await page.waitForTimeout(randInt(600, 1400));
     console.log('[CLAWBOT] Typing message with human-like key delays...');
     await humanType(page, generatedCopy);
   }

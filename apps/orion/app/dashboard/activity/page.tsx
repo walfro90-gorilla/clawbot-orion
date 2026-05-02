@@ -39,18 +39,38 @@ function getOutcome(log: any): string {
   return "success"
 }
 
-function getBatchDetail(details: any): string | null {
-  if (!details) return null
+function getBatchDetail(details: any): { text: string; reason: string | null } {
+  if (!details) return { text: "—", reason: null }
+
   const parts: string[] = []
-  if (details.sent      != null) parts.push(`${details.sent} enviados`)
-  if (details.errors    != null && details.errors > 0) parts.push(`${details.errors} errores`)
+  if (details.sent        != null) parts.push(`${details.sent} enviados`)
+  if (details.errors      != null && details.errors > 0) parts.push(`${details.errors} errores`)
   if (details.leads_found != null) parts.push(`${details.leads_found} leads`)
   if (details.pages_scraped != null) parts.push(`${details.pages_scraped} págs`)
   if (details.cta_type === "quick-connect") parts.push("sin nota")
   if (details.cta_type === "connect")       parts.push("con nota")
-  if (parts.length) return parts.join(" · ")
-  if (details.skip_reason) return `Motivo: ${details.skip_reason}`
-  return null
+
+  // Detectar razón de omisión
+  let reason: string | null = null
+  const exit = details.exit_code
+  const outcome = details.outcome
+
+  if (outcome === "dry_run" && exit === 1) {
+    reason = "Cookie LinkedIn expirada — LinkedIn rechazó la sesión (ERR_TOO_MANY_REDIRECTS)"
+  } else if (outcome === "dry_run" && exit === 0) {
+    reason = "DRY_RUN activo — modo prueba, no se enviaron invitaciones reales"
+  } else if (outcome === "disqualified") {
+    reason = details.disqualification_reason
+      ? `Descalificado por Gemini: ${details.disqualification_reason}`
+      : "No cumple criterios de calificación"
+  } else if (outcome === "dry_run" && details.skip_reason) {
+    reason = `Omitido: ${details.skip_reason}`
+  } else if (details.skip_reason) {
+    reason = details.skip_reason
+  }
+
+  const text = parts.length ? parts.join(" · ") : (outcome === "dry_run" ? "Procesado sin envío" : "—")
+  return { text, reason }
 }
 
 // ── Row background tint ───────────────────────────────────────────────────────
@@ -245,7 +265,7 @@ export default async function ActivityPage({
                 const outcome     = getOutcome(log)
                 const style       = OUTCOME_STYLE[outcome] ?? OUTCOME_STYLE["success"]
                 const actionMeta  = ACTION_LABEL[log.action] ?? { label: log.action, icon: "•" }
-                const detail      = getBatchDetail(log.details)
+                const { text: detailText, reason } = getBatchDetail(log.details)
                 const bg          = rowBg(outcome)
                 const timeStr     = new Date(log.created_at).toLocaleString("es-MX", {
                   hour: "2-digit", minute: "2-digit", second: "2-digit",
@@ -287,11 +307,18 @@ export default async function ActivityPage({
                     </td>
 
                     {/* Detail */}
-                    <td className="px-4 py-2.5 max-w-xs">
-                      {detail ? (
-                        <span className="text-gray-400 text-xs">{detail}</span>
-                      ) : (
-                        <span className="text-gray-700 text-xs">—</span>
+                    <td className="px-4 py-2.5 max-w-sm">
+                      <span className="text-gray-400 text-xs">{detailText}</span>
+                      {reason && (
+                        <p className={`text-xs mt-0.5 font-medium ${
+                          reason.includes("Cookie") || reason.includes("expirada")
+                            ? "text-red-400"
+                            : reason.includes("DRY_RUN")
+                            ? "text-yellow-500"
+                            : "text-orange-400"
+                        }`}>
+                          ⚠ {reason}
+                        </p>
                       )}
                     </td>
 
