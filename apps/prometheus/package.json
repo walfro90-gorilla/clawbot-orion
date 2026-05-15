@@ -4,9 +4,9 @@
   "type": "module",
   "main": "worker.js",
   "scripts": {
-    "start":   "node worker.js",
-    "search":  "node search.js",
-    "batch":   "node batch.js",
+    "start": "node worker.js",
+    "search": "node search.js",
+    "batch": "node batch.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -17,6 +17,7 @@
     "@google/genai": "^1.48.0",
     "@supabase/supabase-js": "^2.101.1",
     "dotenv": "^17.3.1",
+    "express": "^5.2.1",
     "playwright": "^1.59.0",
     "playwright-extra": "^4.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2"

@@ -44,7 +44,17 @@ export default async function DashboardLayout({
           .eq("status", "active"),
   ])
 
-  const unresolvedAlerts = (alerts ?? []) as AccountAlert[]
+  // Deduplicate alerts: keep only the most recent per (account_id + alert_type).
+  // Without this, recurring scheduler-generated alerts (e.g. cookie_expiry every
+  // tick for the same account) pile up into 20+ duplicates polluting the UI.
+  const allAlerts = (alerts ?? []) as AccountAlert[]
+  const seen = new Set<string>()
+  const unresolvedAlerts = allAlerts.filter(a => {
+    const key = `${a.linkedin_account_id ?? "global"}::${a.alert_type}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
   const showTour = !profile?.onboarded_at
 
   return (

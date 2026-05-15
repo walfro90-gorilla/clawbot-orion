@@ -1,7 +1,8 @@
 import { createClient } from "@/lib/supabase/server"
 import { createAdminClient } from "@/lib/supabase/admin"
 import { redirect } from "next/navigation"
-import { ProxyChecker } from "@/components/proxy-checker"
+import { ProxyChecker }     from "@/components/proxy-checker"
+import { CookieRefreshBtn } from "@/components/cookie-refresh-btn"
 
 async function saveSettings(formData: FormData) {
   "use server"
@@ -108,13 +109,19 @@ export default async function SettingsPage({
                 </a>
               )}
             </div>
-            <span className={`text-xs px-2.5 py-1 rounded-full border font-medium ${
-              account.status === "active"
-                ? "bg-green-500/10 text-green-400 border-green-500/30"
-                : "bg-gray-500/10 text-gray-400 border-gray-500/30"
-            }`}>
-              {account.status}
-            </span>
+            <div className="flex flex-col items-end gap-2">
+              <span className={`text-xs px-2.5 py-1 rounded-full border font-medium ${
+                account.status === "active"
+                  ? "bg-green-500/10 text-green-400 border-green-500/30"
+                  : "bg-gray-500/10 text-gray-400 border-gray-500/30"
+              }`}>
+                {account.status}
+              </span>
+              <CookieRefreshBtn
+                accountId={account.id}
+                accountLabel={account.label ?? "tu cuenta"}
+              />
+            </div>
           </div>
 
           {/* Account stats */}

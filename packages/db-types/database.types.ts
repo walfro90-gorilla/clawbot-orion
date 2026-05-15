@@ -874,6 +874,8 @@ export type Database = {
           cal_com_url: string | null
           created_at: string | null
           daily_connection_limit: number | null
+          fingerprint_json: Json | null
+          fingerprint_locked_at: string | null
           id: string
           inbound_decline_template: string | null
           inbound_enabled: boolean | null
@@ -903,6 +905,8 @@ export type Database = {
           cal_com_url?: string | null
           created_at?: string | null
           daily_connection_limit?: number | null
+          fingerprint_json?: Json | null
+          fingerprint_locked_at?: string | null
           id?: string
           inbound_decline_template?: string | null
           inbound_enabled?: boolean | null
@@ -932,6 +936,8 @@ export type Database = {
           cal_com_url?: string | null
           created_at?: string | null
           daily_connection_limit?: number | null
+          fingerprint_json?: Json | null
+          fingerprint_locked_at?: string | null
           id?: string
           inbound_decline_template?: string | null
           inbound_enabled?: boolean | null

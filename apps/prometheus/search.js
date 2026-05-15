@@ -15,7 +15,7 @@ import { chromium } from 'playwright-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import dotenv from 'dotenv';
 import { supabase, logActivity } from './lib/supabase.js';
-import { randomContextOptions } from './lib/browser.js';
+import { randomContextOptions, getOrCreateAccountFingerprint, contextOptionsFromFingerprint } from './lib/browser.js';
 
 dotenv.config();
 chromium.use(StealthPlugin());
@@ -176,7 +176,7 @@ async function run() {
   // ── Load campaign config from Supabase ────────────────────────────────
   const { data: campaign, error: campErr } = await supabase
     .from('campaigns')
-    .select('search_keywords, search_location, search_count, title_blacklist, title_whitelist, search_2nd_degree_only')
+    .select('search_keywords, search_location, search_count, title_blacklist, title_whitelist, search_2nd_degree_only, linkedin_account_id')
     .eq('id', CAMPAIGN_ID)
     .single();
 
@@ -252,7 +252,14 @@ async function run() {
   const launchArgs = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled'];
   const browser = await chromium.launch({ headless: true, args: launchArgs });
 
-  const context = await browser.newContext(randomContextOptions(proxy ?? undefined));
+  // Use the campaign's account fingerprint when available; fall back to random.
+  const contextOpts = campaign.linkedin_account_id
+    ? contextOptionsFromFingerprint(
+        await getOrCreateAccountFingerprint(supabase, campaign.linkedin_account_id),
+        proxy ?? undefined,
+      )
+    : randomContextOptions(proxy ?? undefined);
+  const context = await browser.newContext(contextOpts);
 
   await context.addCookies([{
     name: 'li_at', value: LI_AT_COOKIE,

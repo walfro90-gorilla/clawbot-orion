@@ -22,8 +22,9 @@ import { chromium } from 'playwright-extra'
 import StealthPlugin from 'puppeteer-extra-plugin-stealth'
 import dotenv from 'dotenv'
 import { supabase, logActivity, incrementDaily } from './lib/supabase.js'
-import { randomContextOptions } from './lib/browser.js'
+import { getOrCreateAccountFingerprint, contextOptionsFromFingerprint } from './lib/browser.js'
 import { generateFollowUpMessage, fetchPlaybookExamples } from './ai.js'
+import { humanClick, humanType, humanFill, readingPause, varyMessage, humanScroll as humanScrollLib } from './lib/humanize.js'
 
 dotenv.config()
 chromium.use(StealthPlugin())
@@ -33,11 +34,15 @@ const DRY_RUN        = process.env.DRY_RUN !== 'false'
 const LIVE_SEND      = process.env.LIVE_SEND === 'true'
 const FOLLOW_UP_STEP = parseInt(process.env.FOLLOW_UP_STEP ?? '1') // 1, 2, or 3
 
-const MAX_FOLLOWUPS_PER_RUN = 4   // máx follow-ups por ejecución (anti-ban)
+// Anti-ban: keep per-run low. Yesterday 4 sends in 20 min triggered LinkedIn
+// session invalidation (ERR_TOO_MANY_REDIRECTS on subsequent attempts). 2 per
+// run with 5-12 min between them = 16-30 min per tick, max 4 sends/hour.
+const MAX_FOLLOWUPS_PER_RUN = 2   // máx follow-ups por ejecución (anti-ban)
 // Cap diario GLOBAL — cuenta todos los tipos de follow-up juntos para no saturar la cuenta.
 const MAX_FOLLOWUPS_PER_DAY = 5   // máx mensajes de follow-up en total por día por cuenta
-const DELAY_MIN_MS          = DRY_RUN ? 3_000  : 45 * 1000
-const DELAY_MAX_MS          = DRY_RUN ? 6_000  : 120 * 1000
+// 5-12 min between leads (was 45-120s). Real users don't message 4 people in 20 min.
+const DELAY_MIN_MS          = DRY_RUN ? 3_000  : 5  * 60 * 1000
+const DELAY_MAX_MS          = DRY_RUN ? 6_000  : 12 * 60 * 1000
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function randInt(min, max) {
@@ -130,14 +135,23 @@ async function loadFollowupLeads(campaign) {
 
   console.log(`[FOLLOWUP] Step ${FOLLOW_UP_STEP} — delay=${cfg.delayHours}h — ref=${cfg.refField} — cutoff=${new Date(cutoff).toLocaleString('es-MX', { timeZone: 'America/Mexico_City' })}`)
 
+  // SINGLE_LEAD_ID env override — used by scripts/run-single-followup.js for
+  // controlled testing (process exactly one lead, minimize proxy exposure).
+  const SINGLE_LEAD_ID = process.env.SINGLE_LEAD_ID
+
   let query = supabase
     .from('leads')
-    .select('id, full_name, linkedin_url, connected_at, sent_at, status, last_followup_at, last_followup2_at, last_followup3_at, last_followup4_at, last_followup5_at, profile_data')
+    .select('id, full_name, linkedin_url, connected_at, sent_at, status, retry_count, last_followup_at, last_followup2_at, last_followup3_at, last_followup4_at, last_followup5_at, profile_data')
     .eq('campaign_id', CAMPAIGN_ID)
     .eq('status', cfg.status)
     .not(cfg.refField, 'is', null)      // ref timestamp must exist
     .lte(cfg.refField, cutoff)          // enough time has passed
-    .limit(50)
+    .limit(SINGLE_LEAD_ID ? 1 : 50)
+
+  if (SINGLE_LEAD_ID) {
+    query = query.eq('id', SINGLE_LEAD_ID)
+    console.log(`[FOLLOWUP] 🎯 SINGLE_LEAD_ID mode — only processing lead ${SINGLE_LEAD_ID.slice(0, 8)}…`)
+  }
 
   // Guard: don't re-send if this step was already sent
   if (cfg.guardField) {
@@ -261,7 +275,7 @@ async function recordFollowUp(lead, message, aiGenerated = false) {
     return
   }
 
-  await supabase.from('conversation_events').insert({
+  const { error: eventErr } = await supabase.from('conversation_events').insert({
     conversation_id: conv.id,
     event_type:      eventType,
     direction:       'outbound',
@@ -269,6 +283,22 @@ async function recordFollowUp(lead, message, aiGenerated = false) {
     sent_at:         now,
     ai_generated:    aiGenerated,
   })
+  // Don't silent-fail: this is what hid the CHECK constraint bug on follow_up_sent_3+.
+  // Without this log, conversation_events would silently never get FU3+ entries
+  // and the Monitor/Mensajes pages would show empty even though messages were sent.
+  if (eventErr) {
+    console.error(`[FOLLOWUP] ❌ conversation_events insert failed for "${lead.full_name}" (event_type=${eventType}): ${eventErr.message}`)
+  }
+
+  // Update conversations.last_message_at — the conversations page orders by this
+  // field. Without this update, sent FUs don't bubble up to the top of the inbox.
+  const { error: convUpdErr } = await supabase
+    .from('conversations')
+    .update({ last_message_at: now })
+    .eq('id', conv.id)
+  if (convUpdErr) {
+    console.error(`[FOLLOWUP] ❌ conversations.last_message_at update failed for "${lead.full_name}": ${convUpdErr.message}`)
+  }
 
   const { error: leadErr } = await supabase.from('leads').update({
     status:    newStatus,
@@ -434,14 +464,87 @@ async function sendFollowUp(page, lead, message) {
     ? lead.linkedin_url
     : lead.linkedin_url + '/'
 
-  console.log(`[FOLLOWUP] Navigating to ${lead.full_name} → ${profileUrl}`)
-
   // Close any lingering overlays from the previous lead before navigating
   await closeOpenOverlays(page)
 
-  // Use networkidle so React finishes rendering action buttons
-  await page.goto(profileUrl, { waitUntil: 'networkidle', timeout: 45000 })
-    .catch(() => page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }))
+  // ── FAST PATH: if we already know this lead's thread_id (FU2/FU3), navigate
+  // DIRECTLY to that thread URL. This bypasses the unreliable "click Message
+  // on profile" flow that lands on /messaging/ (no thread id) where the
+  // verifier reads stale headers from the background page.
+  // Verified by scripts/test-thread-render.js (3/3 scenarios pass).
+  const { data: existingConv } = await supabase
+    .from('conversations')
+    .select('linkedin_thread_id')
+    .eq('lead_id', lead.id)
+    .maybeSingle()
+
+  let useFastPath = false
+  if (existingConv?.linkedin_thread_id) {
+    const threadUrl = `https://www.linkedin.com/messaging/thread/${existingConv.linkedin_thread_id}/`
+    console.log(`[FOLLOWUP] FAST PATH: known thread → ${threadUrl}`)
+    try {
+      // With fresh per-lead context, no SPA state bleed is possible — simple
+      // goto suffices. The clearStorage/about:blank tricks needed when contexts
+      // were reused are no longer required.
+      await page.goto(threadUrl, { waitUntil: 'commit', timeout: 60000 })
+      await page.waitForLoadState('domcontentloaded', { timeout: 20000 }).catch(() => {})
+      await page.waitForSelector(
+        '.msg-entity-lockup__entity-title, .msg-thread-top-bar-contact-info, .msg-thread-detail__header',
+        { timeout: 18000 }
+      ).catch(() => null)
+      await page.waitForTimeout(2500)
+
+      // STEP 3 — SELF-HEAL: verify the rendered thread actually matches the lead.
+      // If the stored thread_id was wrong (rare data corruption — e.g. an earlier
+      // FU run captured the wrong URL due to SPA stale state), the page will
+      // render a different person. Detect this, clear the bad thread_id from DB,
+      // and fall back to the profile-click flow.
+      const expectedFirst = lead.full_name.split(' ')[0].toLowerCase()
+      let renderedHeader = ''
+      for (const sel of [
+        '.msg-entity-lockup__entity-title',
+        '.msg-thread-top-bar-contact-info .t-bold',
+        '.msg-thread-top-bar-contact-info h2',
+        '.msg-thread-detail__header .t-bold',
+      ]) {
+        const el = page.locator(sel).first()
+        if (await el.isVisible({ timeout: 600 }).catch(() => false)) {
+          const txt = (await el.textContent().catch(() => '')).trim()
+          if (txt && txt.length > 1) { renderedHeader = txt; break }
+        }
+      }
+      const headerMatches = renderedHeader.toLowerCase().includes(expectedFirst)
+      if (!headerMatches && renderedHeader) {
+        console.error(`[FOLLOWUP] FAST PATH self-heal: stored thread renders "${renderedHeader}" but lead is "${lead.full_name}" — clearing bad thread_id from DB`)
+        await supabase.from('conversations')
+          .update({ linkedin_thread_id: null })
+          .eq('lead_id', lead.id)
+        // Fall back to profile click flow
+      } else {
+        useFastPath = true
+      }
+    } catch (err) {
+      console.warn(`[FOLLOWUP] FAST PATH navigation failed: ${err.message.slice(0, 80)} — falling back`)
+    }
+  }
+  // If fast path activated, skip the profile navigation + Message button click —
+  // the rest of sendFollowUp's flow (textarea find, verify, type, send) handles
+  // the thread page correctly because we already landed on /messaging/thread/<id>/.
+  if (useFastPath) {
+    console.log(`[FOLLOWUP] FAST PATH active — skipping profile click flow, going straight to thread verify+send`)
+  } else {
+    console.log(`[FOLLOWUP] Navigating to ${lead.full_name} → ${profileUrl}`)
+  }
+
+  // 'commit' fires as soon as navigation starts (resilient through cold proxies).
+  // Then wait for DOM separately so a hung 'networkidle' can't time us out.
+  // Verified by scripts/stress-test-cookie.js: 10/10 profile loads OK in <2s each.
+  if (!useFastPath) {
+    await page.goto(profileUrl, { waitUntil: 'commit', timeout: 60000 })
+    await page.waitForLoadState('domcontentloaded', { timeout: 20000 }).catch(() => {})
+    // Brief pause for React to render the action buttons (Message/Connect/Follow)
+    await page.waitForTimeout(2500)
+  }
 
   // Checkpoint / captcha detection
   if (page.url().includes('/checkpoint') || page.url().includes('/challenge')) {
@@ -451,19 +554,22 @@ async function sendFollowUp(page, lead, message) {
 
   // Wait for the profile top section to be present (LinkedIn renders it early)
   await page.waitForSelector('main, .scaffold-layout__main, #main', { timeout: 10000 }).catch(() => null)
-  await page.waitForTimeout(randInt(2000, 3500))
 
-  // Scroll down slightly to trigger lazy rendering of action buttons — but NOT too far
-  // (over-scrolling causes the page to show activity feed where spurious "Mensaje" buttons exist)
-  await page.evaluate(() => window.scrollBy(0, 150))
-  await page.waitForTimeout(randInt(800, 1500))
-
-  // Scroll BACK to top so the profile action buttons are in the viewport
-  await page.evaluate(() => window.scrollTo(0, 0))
-  await page.waitForTimeout(randInt(500, 800))
+  // ── HUMANIZATION: "reading time" on the profile before acting ──────────────
+  // Real users land on a profile and READ it before clicking Message. Anti-bot
+  // looks for "<2s between page load and action" → strong bot signal.
+  // readingPause: 4-12s with natural scroll up/down patterns.
+  if (!useFastPath) {
+    await readingPause(page, { minMs: 4000, maxMs: 9000 })
+    // Always end back at top so the action buttons are in viewport
+    await page.evaluate(() => window.scrollTo(0, 0))
+    await page.waitForTimeout(randInt(400, 800))
+  }
 
   // ── Attempt A: find "Message" button on profile page ─────────────────────
-  let clickedMessage = false
+  // SKIPPED when fast-path active (we already navigated directly to thread URL)
+  let clickedMessage = useFastPath  // pretend we clicked if we used fast path
+  if (!useFastPath) {
 
   // Dump all visible buttons first for debugging
   async function dumpButtons() {
@@ -500,7 +606,7 @@ async function sendFollowUp(page, lead, message) {
       loc = page.locator(`button:text-is("${txt}"), [role="button"]:text-is("${txt}")`).first()
     }
     if (await loc.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await loc.click()
+      await humanClick(page, loc)  // mouse trajectory + hover + click
       clickedMessage = true
       console.log(`[FOLLOWUP] ✓ Message button found: text="${txt}"`)
       break
@@ -518,7 +624,7 @@ async function sendFollowUp(page, lead, message) {
       '[data-control-name="message"]',
     ].join(', ')).first()
     if (await loc.isVisible({ timeout: 3000 }).catch(() => false)) {
-      await loc.click()
+      await humanClick(page, loc)
       clickedMessage = true
       console.log(`[FOLLOWUP] ✓ Message button found via aria-label`)
     }
@@ -528,7 +634,7 @@ async function sendFollowUp(page, lead, message) {
   if (!clickedMessage) {
     const loc = page.locator('a[href*="/messaging/"]').first()
     if (await loc.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await loc.click()
+      await humanClick(page, loc)
       clickedMessage = true
       console.log(`[FOLLOWUP] ✓ Message link found (href)`)
     }
@@ -586,9 +692,7 @@ async function sendFollowUp(page, lead, message) {
     ]
     const convSearch = page.locator(convSearchSelectors.join(', ')).first()
     if (await convSearch.isVisible({ timeout: 5000 }).catch(() => false)) {
-      await convSearch.click()
-      await page.waitForTimeout(500)
-      await convSearch.fill(searchQuery)  // full name — more specific than first name
+      await humanFill(page, convSearch, searchQuery)
       await page.waitForTimeout(2000)
 
       // Verify each result's name before clicking — avoid wrong conversations
@@ -637,7 +741,7 @@ async function sendFollowUp(page, lead, message) {
 
         const recipientInput = page.locator('input[placeholder*="Search" i], input[placeholder*="Buscar" i], input[aria-label*="recipient" i], input[aria-label*="destinatario" i]').first()
         if (await recipientInput.isVisible({ timeout: 4000 }).catch(() => false)) {
-          await recipientInput.fill(firstName)
+          await humanFill(page, recipientInput, firstName)
           await page.waitForTimeout(2000)
 
           const result = page.locator('[class*="type-ahead"] li, [role="option"], [class*="autocomplete"] li, [class*="typeahead"] li').first()
@@ -658,8 +762,10 @@ async function sendFollowUp(page, lead, message) {
     return 'no_button'
   }
 
+  } // ← end of if (!useFastPath) — Message button click flow
+
   // Wait for navigation or overlay to appear
-  await page.waitForTimeout(randInt(1500, 2500))
+  await page.waitForTimeout(useFastPath ? 0 : randInt(1500, 2500))
   const afterClickUrl = page.url()
   console.log(`[FOLLOWUP] After click — URL: ${afterClickUrl}`)
 
@@ -675,21 +781,38 @@ async function sendFollowUp(page, lead, message) {
     const threadId = afterClickUrl.split('/messaging/thread/')[1]?.replace(/\//g, '')
     console.log(`[FOLLOWUP] Thread page mode — thread ID: ${threadId ?? 'unknown'}`)
 
-    // Wait for thread header to render so we can verify the contact name
-    await page.waitForSelector('h2, h3, [class*="thread"] [class*="name"], [class*="participant"]', { timeout: 8000 }).catch(() => null)
-    await page.waitForTimeout(1500)
+    // CRITICAL: LinkedIn's messaging UI is a SPA that doesn't always re-render
+    // the thread panel when the URL changes via in-app navigation (clicking
+    // "Message" from a profile). The URL becomes /messaging/thread/<correctId>/
+    // but the right panel still shows the LAST opened conversation. Forcing a
+    // hard reload guarantees the DOM matches the URL.
+    console.log(`[FOLLOWUP] Forzando reload del thread URL para asegurar render fresco...`)
+    // Per-lead fresh context already guarantees no SPA state bleed, but reloading
+    // the thread URL still helps when LinkedIn's in-app navigation (click Message
+    // → URL change) leaves the panel in a transitional state.
+    await page.goto(afterClickUrl, { waitUntil: 'commit', timeout: 30000 }).catch(() => {})
+    await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {})
+
+    // Wait specifically for the thread's contact name to render. Scoped to
+    // msg-thread-* selectors so we don't match nav noise ("más buzones", etc.).
+    await page.waitForSelector(
+      '.msg-entity-lockup__entity-title, .msg-thread-top-bar-contact-info, .msg-thread-detail__header, [class*="msg-thread"] [class*="participant"]',
+      { timeout: 12000 }
+    ).catch(() => null)
+    await page.waitForTimeout(2500)
 
     // Verify this thread belongs to our lead (not a previously open conversation).
-    // Se leen múltiples selectores hasta encontrar el nombre del participante.
+    // Selectores en orden de especificidad — todos scopados a msg-* para evitar
+    // matchear nav elements globales.
     const expectedFirst = lead.full_name.split(' ')[0].toLowerCase()
     const threadHeaderSelectors = [
       '.msg-entity-lockup__entity-title',
       '.msg-thread-top-bar-contact-info .t-bold',
+      '.msg-thread-top-bar-contact-info h2',
       '.msg-thread-detail__header .t-bold',
+      '.msg-thread-detail__header h2',
       '.msg-thread-participant-list__participant-name',
-      'h2[class*="msg"], h3[class*="msg"]',
-      '[class*="thread"] h2, [class*="thread"] h3',
-      'h2, h3',
+      '[class*="msg-thread"] h2',
     ]
     let headerText = ''
     for (const sel of threadHeaderSelectors) {
@@ -723,9 +846,7 @@ async function sendFollowUp(page, lead, message) {
       ]
       const convSearch = page.locator(convSearchSelectors.join(', ')).first()
       if (await convSearch.isVisible({ timeout: 5000 }).catch(() => false)) {
-        await convSearch.click()
-        await page.waitForTimeout(500)
-        await convSearch.fill(lead.full_name)
+        await humanFill(page, convSearch, lead.full_name)
         await page.waitForTimeout(2000)
 
         const convItems = page.locator([
@@ -852,7 +973,9 @@ async function sendFollowUp(page, lead, message) {
 async function verifyCorrectOverlay(page, lead) {
   const expectedFirst = lead.full_name.split(' ')[0].toLowerCase()
 
-  // Selectores ordenados: overlay primero, luego thread page, luego genéricos
+  // Selectores SCOPADOS a msg-* — nunca selectores genéricos como 'h2' que
+  // matchean elementos de la nav global ("más buzones", "0 notificaciones") y
+  // causan falsos positivos en el verifier.
   const headerSelectors = [
     '.msg-overlay-bubble-header__title',
     '.msg-overlay-conversation-bubble__header h2',
@@ -861,22 +984,24 @@ async function verifyCorrectOverlay(page, lead) {
     // Thread page selectors
     '.msg-entity-lockup__entity-title',
     '.msg-thread-top-bar-contact-info .t-bold',
+    '.msg-thread-top-bar-contact-info h2',
     '.msg-thread-detail__header .t-bold',
+    '.msg-thread-detail__header h2',
     '.msg-thread-participant-list__participant-name',
-    '[class*="thread-detail"] h2',
-    '[class*="thread-detail"] h3',
-    'h2.t-16',
-    // Fallback genérico — solo si hay texto corto (nombre de persona)
-    'h2',
+    '[class*="msg-thread-detail"] h2',
+    '[class*="msg-thread"] h2.t-16',
   ]
+
+  // Phrases that indicate we're looking at a generic UI element, not a thread name.
+  // If header text matches any of these, skip and try the next selector.
+  const NAV_NOISE = /^(mensajer[ií]a|messaging|messages?|inbox|notificaci|m[áa]s buzones|more inboxes|cero notificaciones|0 notificaciones)/i
 
   for (const sel of headerSelectors) {
     const el = page.locator(sel).first()
     if (await el.isVisible({ timeout: 800 }).catch(() => false)) {
       const text = (await el.textContent().catch(() => '')).trim().toLowerCase()
-      if (!text || text.length < 2) continue  // elemento vacío — intentar siguiente
-      // Ignorar "Mensajería", "Messaging", page-level titles
-      if (/^(mensajer[ií]a|messaging|messages?|inbox|notificaci)$/i.test(text)) continue
+      if (!text || text.length < 2) continue  // empty element — try next
+      if (NAV_NOISE.test(text)) continue        // global nav noise — try next
 
       if (!text.includes(expectedFirst)) {
         console.error(`[FOLLOWUP] ❌ Thread/overlay incorrecto! Header="${text}" — esperado "${lead.full_name}" — ABORTANDO envío.`)
@@ -904,24 +1029,26 @@ async function verifyCorrectOverlay(page, lead) {
 
 // ── Type message and click Send ───────────────────────────────────────────────
 async function typeAndSend(page, textarea, lead, message) {
-  // Click textarea to focus it
-  await textarea.click()
-  await page.waitForTimeout(randInt(300, 700))
+  // Apply small variations to the template so 5 sends don't look character-
+  // identical to LinkedIn. Conservative — only synonym swaps, never alters meaning.
+  const variedMessage = varyMessage(message)
 
-  // Type character-by-character with human delays
-  for (const char of message) {
-    await page.keyboard.type(char, { delay: randInt(30, 80) })
-  }
+  // Click textarea with mouse trajectory (not teleport)
+  await humanClick(page, textarea)
+  await page.waitForTimeout(randInt(400, 900))
 
-  await page.waitForTimeout(randInt(500, 1200))
+  // Type with full human profile: punctuation pauses, distractions, etc.
+  await humanType(page, variedMessage)
+
+  await page.waitForTimeout(randInt(700, 1500))
 
   if (!LIVE_SEND) {
     console.log(`[FOLLOWUP] [STAGING] Typed message for "${lead.full_name}" — NOT sending (LIVE_SEND=false).`)
-    console.log(`[FOLLOWUP] Message preview: "${message.slice(0, 80)}..."`)
-    // Clear the typed message
-    await page.keyboard.selectAll()
-    await page.keyboard.press('Backspace')
-    return
+    console.log(`[FOLLOWUP] Message preview: "${variedMessage.slice(0, 80)}..."`)
+    // Clear the typed message — Playwright has no selectAll(); use Ctrl+A
+    await page.keyboard.press('Control+a').catch(() => {})
+    await page.keyboard.press('Backspace').catch(() => {})
+    return 'sent'  // DRY-RUN — pretend it succeeded so the outer flow records it consistently
   }
 
   // Find Send button
@@ -931,7 +1058,7 @@ async function typeAndSend(page, textarea, lead, message) {
 
   const hasSend = await sendBtn.isVisible({ timeout: 5000 }).catch(() => false)
   if (hasSend) {
-    await sendBtn.click()
+    await humanClick(page, sendBtn)  // mouse trajectory + hover + click
   } else {
     // Fallback: Enter key
     await page.keyboard.press('Enter')
@@ -1002,36 +1129,30 @@ async function run() {
   if (proxy?.server) launchArgs.push(`--proxy-server=${proxy.server}`)
 
   const browser = await chromium.launch({ headless: true, args: launchArgs })
-  const context = await browser.newContext(randomContextOptions(proxy ?? undefined))
-  let page = await context.newPage()
 
-  // Inject LinkedIn cookie
-  await context.addCookies([{
-    name:   'li_at',
-    value:  account.li_at_cookie,
-    domain: '.linkedin.com',
-    path:   '/',
-    httpOnly: true,
-    secure:   true,
-  }])
+  // Load fingerprint ONCE per run — every per-lead newContext below reuses it.
+  // Each iteration spawns a fresh context (SPA-state isolation) but the UA +
+  // viewport + locale stay constant for the entire account's lifetime.
+  const fingerprint = await getOrCreateAccountFingerprint(supabase, account.id)
 
   let sentCount    = 0
   let errorCount   = 0
 
   try {
-    // ── Warmup: visit feed first ──────────────────────────────────────────────
-    console.log('[FOLLOWUP] Warming up — visiting LinkedIn feed...')
-    await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'domcontentloaded', timeout: 30000 })
-    await page.waitForTimeout(randInt(3000, 6000))
-    await humanScroll(page, randInt(400, 800))
-    await page.waitForTimeout(randInt(2000, 4000))
-
-    // ── Process each lead ─────────────────────────────────────────────────────
     // Pre-fetch playbook examples once per run (same for all leads in this batch)
     const playbookExamples = isAiMode
       ? await fetchPlaybookExamples({ turnNumber: FOLLOW_UP_STEP - 1 })
       : ''
 
+    // ── Process each lead with a FRESH browser context ────────────────────────
+    // Why: LinkedIn's messaging SPA persists state in localStorage/sessionStorage
+    // AND in JS memory. Re-using a single context across leads → the previous
+    // lead's thread URL gets restored even after page.goto + reload. The only
+    // reliable way to guarantee a clean render per lead is to start a brand-new
+    // context (= effectively a fresh "tab" with no cookies/storage/history).
+    //
+    // Cost: ~3-5s extra per lead for context launch + cookie inject + feed warmup.
+    // Benefit: no SPA stale bug. Verified by isolated tests.
     for (const lead of leads) {
       console.log(`\n[FOLLOWUP] ─── ${lead.full_name} (${sentCount + 1}/${leads.length}) ───`)
 
@@ -1079,16 +1200,29 @@ async function run() {
         continue
       }
 
+      // Fresh context per lead — destroys all LinkedIn SPA state
+      const context = await browser.newContext(contextOptionsFromFingerprint(fingerprint, proxy ?? undefined))
+      await context.addCookies([{
+        name:   'li_at',
+        value:  account.li_at_cookie,
+        domain: '.linkedin.com',
+        path:   '/',
+        httpOnly: true,
+        secure:   true,
+      }])
+      const page = await context.newPage()
+
       try {
-        // If page is in a crashed state, open a fresh one before attempting
-        const pageIsCrashed = await page.evaluate(() => true).catch(() => true) === true
-          ? false : true
-        if (pageIsCrashed || page.isClosed()) {
-          console.log(`[FOLLOWUP] Page crashed/closed — opening fresh page`)
-          page = await context.newPage()
-          await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {})
-          await page.waitForTimeout(2000)
-        }
+        // Warmup: visit feed first to authenticate the session + prime caches.
+        // Fresh context has zero cached resources, so the next navigation (to
+        // the profile or thread) would be slow. Warming up here ensures
+        // subsequent page.goto calls have warm DNS/TLS to linkedin.com.
+        await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'commit', timeout: 60000 }).catch(() => {})
+        await page.waitForLoadState('domcontentloaded', { timeout: 20000 }).catch(() => {})
+        // Wait for the feed shell to render — confirms the session is valid
+        // and warms up React resources before navigating to profile/thread.
+        await page.waitForSelector('main, .scaffold-layout, [data-test-app-aware-link]', { timeout: 12000 }).catch(() => {})
+        await page.waitForTimeout(randInt(2500, 4000))
 
         const outcome = await sendFollowUp(page, lead, messageToSend)
 
@@ -1102,21 +1236,42 @@ async function run() {
         if (outcome === 'sent') {
           if (LIVE_SEND) {
             await recordFollowUp(lead, messageToSend, aiGenerated)
-            await logActivity(account.id, 'message_sent', { lead_id: lead.id, campaign_id: CAMPAIGN_ID, type: 'follow_up' })
+            // logActivity signature: (accountId, leadId, action, result, details, durationMs)
+            await logActivity(account.id, lead.id, 'message_sent', 'success', { campaign_id: CAMPAIGN_ID, type: 'follow_up', step: FOLLOW_UP_STEP })
             await incrementDaily(account.id, 'messages_sent')
+            // Éxito — resetear retry_count
+            await supabase.from('leads').update({ retry_count: 0 }).eq('id', lead.id)
           }
           sentCount++
         } else {
           errorCount++
+          // no_button = perfil no tiene botón Mensaje (posiblemente nos eliminó como contacto).
+          // Incrementar retry_count. Si llega a 3 intentos fallidos → auto-dead.
+          if (outcome === 'no_button') {
+            const newRetry = (lead.retry_count ?? 0) + 1
+            const MAX_NO_BUTTON_RETRIES = 3
+            if (newRetry >= MAX_NO_BUTTON_RETRIES) {
+              await supabase.from('leads').update({
+                status:      'dead',
+                retry_count: newRetry,
+                dead_reason: `no_button_x${newRetry} — botón Mensaje no encontrado en ${newRetry} intentos, posiblemente eliminó la conexión`,
+              }).eq('id', lead.id)
+              console.warn(`[FOLLOWUP] 💀 "${lead.full_name}" → dead (no_button x${newRetry})`)
+            } else {
+              await supabase.from('leads').update({ retry_count: newRetry }).eq('id', lead.id)
+              console.warn(`[FOLLOWUP] ⚠️  "${lead.full_name}" no_button (intento ${newRetry}/${MAX_NO_BUTTON_RETRIES})`)
+            }
+          }
         }
       } catch (err) {
         console.error(`[FOLLOWUP] Error on "${lead.full_name}": ${err.message}`)
-        // Recover crashed page for next lead
-        if (err.message?.includes('crashed') || err.message?.includes('closed') || err.message?.includes('Target closed')) {
-          console.log(`[FOLLOWUP] Recovering crashed page...`)
-          try { page = await context.newPage() } catch { /* browser itself may be gone */ }
-        }
         errorCount++
+      } finally {
+        // ALWAYS close the per-lead context to release memory + guarantee no
+        // state bleed into the next lead. If the browser itself crashed, the
+        // close will throw — ignore it (the next iteration's newContext will fail
+        // and surface the real error).
+        try { await context.close() } catch {}
       }
 
       // Human delay between messages

@@ -16,7 +16,8 @@ import { chromium } from 'playwright-extra'
 import StealthPlugin from 'puppeteer-extra-plugin-stealth'
 import dotenv from 'dotenv'
 import { supabase } from './lib/supabase.js'
-import { randomContextOptions } from './lib/browser.js'
+import { getOrCreateAccountFingerprint, contextOptionsFromFingerprint } from './lib/browser.js'
+import { humanClick, humanType, varyMessage } from './lib/humanize.js'
 
 dotenv.config()
 chromium.use(StealthPlugin())
@@ -124,27 +125,31 @@ async function recordReply(convId, accountId, messageText) {
 
 // ── Type and send message ─────────────────────────────────────────────────────
 async function typeAndSend(page, textarea, leadName) {
-  await textarea.click()
+  // Slight template variation to avoid character-identical messages
+  const varied = varyMessage(REPLY_MESSAGE)
+
+  // Click textarea with mouse trajectory (not teleport)
+  await humanClick(page, textarea)
   await microDelay()
 
-  for (const char of REPLY_MESSAGE) {
-    await page.keyboard.type(char, { delay: randInt(30, 80) })
-  }
-  await sleep(randInt(500, 1200))
+  // Type with full human rhythm: punctuation pauses, distractions, natural variance
+  await humanType(page, varied)
+  await sleep(randInt(700, 1500))
 
   if (!LIVE_SEND || DRY_RUN) {
     console.log(`[REPLY] [STAGING] Typed reply to "${leadName}" — NOT sending (LIVE_SEND=${LIVE_SEND}, DRY_RUN=${DRY_RUN})`)
-    console.log(`[REPLY] Preview: "${REPLY_MESSAGE.slice(0, 100)}"`)
-    await page.keyboard.selectAll()
-    await page.keyboard.press('Backspace')
+    console.log(`[REPLY] Preview: "${varied.slice(0, 100)}"`)
+    // Playwright has no selectAll() — use Ctrl+A
+    await page.keyboard.press('Control+a').catch(() => {})
+    await page.keyboard.press('Backspace').catch(() => {})
     return true
   }
 
-  // Click Send
+  // Click Send with humanized mouse movement
   const sendBtn = page.getByRole('button', { name: /^(send|enviar|submit)$/i }).first()
   const hasSend = await sendBtn.isVisible({ timeout: 5000 }).catch(() => false)
   if (hasSend) {
-    await sendBtn.click()
+    await humanClick(page, sendBtn)
   } else {
     // Fallback: Enter key
     await page.keyboard.press('Enter')
@@ -286,7 +291,8 @@ async function run() {
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled'],
   })
 
-  const context = await browser.newContext(randomContextOptions(proxy ?? undefined))
+  const fingerprint = await getOrCreateAccountFingerprint(supabase, account.id)
+  const context = await browser.newContext(contextOptionsFromFingerprint(fingerprint, proxy ?? undefined))
 
   await context.addCookies([{
     name: 'li_at', value: account.li_at_cookie,

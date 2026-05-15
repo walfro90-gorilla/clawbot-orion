@@ -2,18 +2,14 @@ import { createClient } from "@/lib/supabase/server"
 import { createAdminClient } from "@/lib/supabase/admin"
 import { redirect } from "next/navigation"
 import type { AccountToday } from "@clawbot/db-types"
-import { ProxyChecker } from "@/components/proxy-checker"
+import { ProxyChecker }     from "@/components/proxy-checker"
+import { CookieRefreshBtn } from "@/components/cookie-refresh-btn"
 
 async function updateAccount(formData: FormData) {
   "use server"
   // Admin client: bypass RLS para updates (la cuenta puede tener user_id null si fue creada sin auth)
   const admin = createAdminClient()
   const id = formData.get("id") as string
-
-  // Track when the cookie is updated so scheduler can warn on staleness
-  const newCookie = formData.get("li_at_cookie") as string
-  const { data: existing } = await admin.from("linkedin_accounts").select("li_at_cookie").eq("id", id).single()
-  const cookieChanged = existing?.li_at_cookie !== newCookie
 
   const assignedUserId = formData.get("assigned_user_id") as string | null
 
@@ -27,7 +23,6 @@ async function updateAccount(formData: FormData) {
     daily_connection_limit: parseInt(formData.get("daily_connection_limit") as string) || 20,
     status:                 formData.get("status") as string,
     proxy_url:              formData.get("proxy_url") as string || null,
-    li_at_cookie:           newCookie,
     cal_com_url:            formData.get("cal_com_url") as string || null,
     reply_delay_min:        (formData.get("reply_delay_min") as string) ? parseInt(formData.get("reply_delay_min") as string) : null,
     reply_delay_max:        (formData.get("reply_delay_max") as string) ? parseInt(formData.get("reply_delay_max") as string) : null,
@@ -39,23 +34,11 @@ async function updateAccount(formData: FormData) {
     inbound_qualification_rules:  (formData.get("inbound_qualification_rules") as string) || null,
     user_id:                assignedUserId || null,
     warmup_status:          newWarmupStatus || "cold",
-    ...(cookieChanged ? { li_at_cookie_updated_at: new Date().toISOString() } : {}),
     // Reset warmup_started_at when status changes to track progression
     ...(warmupChanged ? { warmup_started_at: new Date().toISOString() } : {}),
   }).eq("id", id)
 
   if (error) console.error("[accounts] updateAccount error:", error.message)
-
-  // Si la cookie cambió, auto-resolver alertas de cookie_expiry para esta cuenta
-  if (cookieChanged) {
-    await admin.from("account_alerts").update({
-      resolved_at: new Date().toISOString(),
-      resolved_by: "auto — cookie updated via Orion",
-    })
-      .eq("linkedin_account_id", id)
-      .eq("alert_type", "cookie_expiry")
-      .is("resolved_at", null)
-  }
 
   redirect("/dashboard/accounts")
 }
@@ -69,31 +52,53 @@ async function createAccount(formData: FormData) {
   await supabase.from("linkedin_accounts").insert({
     label:                   formData.get("label") as string || null,
     linkedin_profile_url:    formData.get("linkedin_profile_url") as string || null,
-    li_at_cookie:            formData.get("li_at_cookie") as string,
+    proxy_url:               formData.get("proxy_url") as string || null,
+    li_at_cookie:            "",                  // Will be captured via "Renovar Cookie" button
     daily_connection_limit:  parseInt(formData.get("daily_connection_limit") as string) || 20,
-    status:                  "active",
+    status:                  "rate_limited",      // Inactive until cookie is captured
     user_id:                 user!.id,
-    li_at_cookie_updated_at: new Date().toISOString(),
   })
 
   redirect("/dashboard/accounts")
 }
 
 export default async function AccountsPage() {
-  // Admin client for reads: god_admin needs to see ALL accounts regardless of user_id
   const admin = createAdminClient()
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
-  const { data: profile } = await admin.from("profiles").select("role").eq("id", user!.id).single()
-  const isAdmin = profile?.role === "god_admin" || profile?.role === "admin"
+  const { data: profile } = await admin
+    .from("profiles")
+    .select("role, linkedin_account_id")
+    .eq("id", user!.id)
+    .single()
+  const isAdmin     = profile?.role === "god_admin" || profile?.role === "admin"
+  const myAccountId = profile?.linkedin_account_id ?? null
 
-  // Use admin client so admins see all accounts; regular users see their own via RLS
-  const db = isAdmin ? admin : supabase
-  const { data } = await db.from("v_account_today").select("*")
-  const { data: rawAccounts } = await db
-    .from("linkedin_accounts")
-    .select("*")
-    .order("created_at")
+  // ── Visibility model ───────────────────────────────────────────────────────
+  // - admin / god_admin → all accounts
+  // - user / viewer     → only their own (profile.linkedin_account_id)
+  //
+  // We always read with the admin client for fields that v_account_today doesn't
+  // expose (proxy_url, warmup, etc.). The visibility filter is enforced in app
+  // code below — never trusted to RLS alone, since an account can have user_id=null
+  // but still belong to a user via profiles.linkedin_account_id.
+  let accountIdFilter: string[] | null = null
+  if (!isAdmin) {
+    accountIdFilter = myAccountId ? [myAccountId] : []
+  }
+
+  let viewQuery = admin.from("v_account_today").select("*")
+  if (accountIdFilter !== null) viewQuery = viewQuery.in("account_id", accountIdFilter)
+  const { data } = await viewQuery
+
+  const visibleIds = (data ?? []).map((a: any) => a.account_id).filter(Boolean) as string[]
+  const { data: rawAccounts } = visibleIds.length
+    ? await admin
+        .from("linkedin_accounts")
+        .select("*")
+        .in("id", visibleIds)
+        .order("created_at")
+    : { data: [] }
 
   // All profiles for user assignment dropdown (admin only)
   const { data: profiles } = isAdmin
@@ -157,6 +162,10 @@ export default async function AccountsPage() {
                   <span className={`text-xs px-2 py-1 rounded-full border font-medium ${ws.bg} ${ws.color} ${ws.border}`}>
                     {ws.icon} {ws.label}
                   </span>
+                  <CookieRefreshBtn
+                    accountId={a.account_id ?? ""}
+                    accountLabel={a.label ?? "cuenta"}
+                  />
                 </div>
               </div>
 
@@ -229,7 +238,10 @@ export default async function AccountsPage() {
                   <input type="hidden" name="id" value={a.account_id ?? ""} />
                   <Field name="label" label="Etiqueta" defaultValue={raw?.label ?? ""} placeholder="Mi cuenta principal" />
                   <Field name="linkedin_profile_url" label="URL de perfil" defaultValue={raw?.linkedin_profile_url ?? ""} placeholder="https://linkedin.com/in/..." />
-                  <Field name="li_at_cookie" label="li_at Cookie" defaultValue={raw?.li_at_cookie ?? ""} placeholder="Pegar cookie aquí" />
+                  <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 px-3 py-2.5 text-xs text-gray-400">
+                    🔑 La cookie de LinkedIn se renueva con el botón <span className="text-blue-400 font-medium">Renovar Cookie</span> arriba.
+                    El browser corre en el VPS con el proxy correcto, así LinkedIn emite la cookie ligada a esa IP.
+                  </div>
                   <div className="space-y-1">
                     <label className="block text-xs text-gray-400 font-medium">Límite diario de conexiones (sin nota)</label>
                     <input type="number" name="daily_connection_limit" min="1" max="30"
@@ -371,20 +383,32 @@ export default async function AccountsPage() {
         })}
       </div>
 
-      {/* Add new account */}
-      <div className="bg-gray-900 border border-gray-800 border-dashed rounded-xl p-6">
-        <h2 className="text-gray-50 font-semibold mb-4">+ Agregar cuenta LinkedIn</h2>
-        <form action={createAccount} className="space-y-3 max-w-lg">
-          <Field name="label" label="Etiqueta" placeholder="Ej: Cuenta Jorge" />
-          <Field name="linkedin_profile_url" label="URL de perfil LinkedIn" placeholder="https://linkedin.com/in/..." />
-          <Field name="li_at_cookie" label="li_at Cookie *" placeholder="Pegar el valor de la cookie li_at" />
-          <Field name="daily_connection_limit" label="Límite diario de invitaciones" defaultValue="20" type="number" />
-          <Field name="proxy_url" label="Proxy URL (opcional)" placeholder="http://user:pass@host:port" />
-          <button type="submit" className="px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white  text-sm font-semibold rounded-lg transition-colors">
-            Agregar cuenta
-          </button>
-        </form>
-      </div>
+      {/* Add new account — admins only */}
+      {isAdmin && (
+        <div className="bg-gray-900 border border-gray-800 border-dashed rounded-xl p-6">
+          <h2 className="text-gray-50 font-semibold mb-4">+ Agregar cuenta LinkedIn</h2>
+          <form action={createAccount} className="space-y-3 max-w-lg">
+            <Field name="label" label="Etiqueta" placeholder="Ej: Cuenta Jorge" />
+            <Field name="linkedin_profile_url" label="URL de perfil LinkedIn" placeholder="https://linkedin.com/in/..." />
+            <Field name="daily_connection_limit" label="Límite diario de invitaciones" defaultValue="20" type="number" />
+            <Field name="proxy_url" label="Proxy URL (opcional)" placeholder="http://user:pass@host:port" />
+            <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 px-3 py-2.5 text-xs text-gray-400">
+              🔑 Después de crear la cuenta, usa el botón <span className="text-blue-400 font-medium">Renovar Cookie</span> para iniciar sesión en LinkedIn desde el VPS.
+            </div>
+            <button type="submit" className="px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white  text-sm font-semibold rounded-lg transition-colors">
+              Agregar cuenta
+            </button>
+          </form>
+        </div>
+      )}
+
+      {/* No-account hint for users without an assigned LinkedIn account */}
+      {!isAdmin && !myAccountId && (
+        <div className="bg-yellow-500/5 border border-yellow-500/20 rounded-xl p-6 text-center">
+          <p className="text-yellow-400 text-sm font-medium">No tienes una cuenta de LinkedIn asignada.</p>
+          <p className="text-gray-500 text-xs mt-1">Pide a un administrador que te asigne una cuenta.</p>
+        </div>
+      )}
     </div>
   )
 }

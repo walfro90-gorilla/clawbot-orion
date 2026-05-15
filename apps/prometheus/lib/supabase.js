@@ -99,18 +99,37 @@ export async function createAlert(accountId, campaignId, alertType, severity, me
     }
   }
 
-  const { error } = await supabase.from('account_alerts').insert({
-    linkedin_account_id: accountId || null,
-    campaign_id:         campaignId || null,
-    alert_type:          alertType,
-    severity,
-    message,
-    details,
-    auto_paused:         autoPaused,
-  });
+  // Dedup: skip insert if an unresolved alert with same (account_id, alert_type)
+  // already exists. Without this, the scheduler creates a new "cookie expirando"
+  // row every tick, piling up dozens of duplicates in the dashboard banner.
+  let dedupQ = supabase
+    .from('account_alerts')
+    .select('id')
+    .eq('alert_type', alertType)
+    .is('resolved_at', null)
+  if (accountId) dedupQ = dedupQ.eq('linkedin_account_id', accountId)
+  else           dedupQ = dedupQ.is('linkedin_account_id', null)
+  const { data: existing } = await dedupQ.limit(1).maybeSingle();
 
-  if (error) console.warn('[DB] createAlert failed:', error.message);
-  else       console.warn(`[ALERT] [${severity.toUpperCase()}] ${alertType}: ${message}`);
+  if (existing) {
+    // Bump the existing row's message/severity instead of creating a duplicate
+    await supabase.from('account_alerts')
+      .update({ message, severity, details, auto_paused: autoPaused })
+      .eq('id', existing.id);
+    console.warn(`[ALERT] [${severity.toUpperCase()}] ${alertType}: ${message} (dedup-updated)`);
+  } else {
+    const { error } = await supabase.from('account_alerts').insert({
+      linkedin_account_id: accountId || null,
+      campaign_id:         campaignId || null,
+      alert_type:          alertType,
+      severity,
+      message,
+      details,
+      auto_paused:         autoPaused,
+    });
+    if (error) console.warn('[DB] createAlert failed:', error.message);
+    else       console.warn(`[ALERT] [${severity.toUpperCase()}] ${alertType}: ${message}`);
+  }
 
   // Slack: siempre en critical, nunca en info
   if (severity === 'critical' || severity === 'warning') {

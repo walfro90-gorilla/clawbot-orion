@@ -177,7 +177,14 @@ export default async function DashboardPage({
   const stats    = campaigns as CampaignStats[] ?? []
   const accs     = accounts  as AccountToday[]  ?? []
   const rawAccs  = rawAccounts ?? []
-  const activeAlerts = alerts ?? []
+  // Deduplicate by (account_id + alert_type) — keep most recent only
+  const _seenAlertKeys = new Set<string>()
+  const activeAlerts = (alerts ?? []).filter((a: any) => {
+    const key = `${a.linkedin_account_id ?? "global"}::${a.alert_type}`
+    if (_seenAlertKeys.has(key)) return false
+    _seenAlertKeys.add(key)
+    return true
+  })
 
   const totals = stats.reduce(
     (acc, c) => ({

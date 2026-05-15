@@ -24,6 +24,7 @@ import { createClient } from '@supabase/supabase-js';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { createAlert } from './lib/supabase.js';
+import { checkProxyHealth, PROXY_REASON_LABEL } from './lib/proxyHealth.js';
 
 dotenv.config();
 
@@ -193,18 +194,28 @@ async function runInboxJob(account) {
   const durationMs = Date.now() - t0;
   const allOutput  = lines.join('\n');
 
-  // Detectar cookie expirada
-  if (/cookie expired|re-login required/i.test(allOutput)) {
-    console.warn(`[SCHEDULER] ⚠️  Cookie expirada en cuenta "${account.label}" — marcando como rate_limited.`);
+  // Detectar cookie expirada / redirect loop (ERR_TOO_MANY_REDIRECTS = cookie inválida)
+  const isRedirectLoop   = /ERR_TOO_MANY_REDIRECTS/i.test(allOutput);
+  const isCookieExpired  = /cookie expired|re-login required/i.test(allOutput);
+  if (isRedirectLoop || isCookieExpired) {
+    console.warn(`[SCHEDULER] ⚠️  Cookie inválida en cuenta "${account.label}" (${isRedirectLoop ? 'redirect_loop' : 'cookie_expired'}) — marcando como rate_limited.`);
     await supabase.from('linkedin_accounts')
-      .update({ status: 'rate_limited' })
+      .update({ status: 'rate_limited', last_inbox_check_at: new Date().toISOString() })
       .eq('id', account.id);
     await createAlert(
       account.id, null,
       'cookie_expiry', 'critical',
-      `Cookie expirada en cuenta "${account.label}" — requiere re-login manual.`,
-      { account_label: account.label, detected_in: 'inbox' }
+      `Cookie inválida en cuenta "${account.label}" — requiere re-login manual.`,
+      { account_label: account.label, detected_in: 'inbox', reason: isRedirectLoop ? 'ERR_TOO_MANY_REDIRECTS' : 'cookie_expired' }
     );
+    return;
+  }
+
+  // Actualizar last_inbox_check_at desde scheduler si inbox.js falló sin actualizarlo
+  if (code !== 0) {
+    await supabase.from('linkedin_accounts')
+      .update({ last_inbox_check_at: new Date().toISOString() })
+      .eq('id', account.id);
   }
 
   const connectedMatch = allOutput.match(/Connected:\s*(\d+)/i);
@@ -340,11 +351,23 @@ async function tick() {
     }
 
     for (const account of accountsSeen.values()) {
-      if (account.status !== 'active') continue;
-      if (account.inbox_paused) {
+      // Re-fetch status — processCampaign may have marked it rate_limited this tick
+      const { data: freshAccount } = await supabase
+        .from('linkedin_accounts')
+        .select('status, inbox_paused, inbox_gap_min, last_inbox_check_at, li_at_cookie_updated_at')
+        .eq('id', account.id)
+        .single();
+      const effectiveStatus = freshAccount?.status ?? account.status;
+      if (effectiveStatus !== 'active') {
+        console.log(`[SCHEDULER] ⛔ Cuenta "${account.label}" status=${effectiveStatus} — skip inbox.`);
+        continue;
+      }
+      if (freshAccount?.inbox_paused ?? account.inbox_paused) {
         console.log(`[SCHEDULER] ⏸  Inbox pausado para cuenta "${account.label}".`);
         continue;
       }
+      // Merge fresh data into account object for runInboxJob
+      Object.assign(account, freshAccount);
       await sleep(randInt(5000, 15000)); // pausa natural antes del inbox
       await runInboxJob(account);
     }
@@ -410,6 +433,28 @@ async function processCampaign(campaign) {
       console.log(`[SCHEDULER] ⚠️  Sin cuenta LinkedIn — skip.`);
       await logJob({ campaignId: cid, jobType: 'batch', status: 'skipped', skipReason: 'no_account' });
       return;
+    }
+
+    // Guard: proxy health — catch 402/407/timeout BEFORE spawning Playwright.
+    // Without this, browser jobs eat 30-60s timing out against a dead proxy and
+    // we burn into LinkedIn anti-bot budget chasing a non-LinkedIn problem.
+    if (account.proxy_url) {
+      const health = await checkProxyHealth(account.proxy_url);
+      if (!health.ok) {
+        const label = PROXY_REASON_LABEL[health.reason] ?? health.reason;
+        console.error(`[SCHEDULER] 🚫 Proxy de "${account.label}" — ${label}. Detail: ${health.detail}`);
+        await createAlert(
+          account.id, null,
+          'proxy_dead',
+          health.reason === 'bandwidth_limit' ? 'critical' : 'critical',
+          `Proxy de "${account.label}" caído: ${label}`,
+          { account_label: account.label, reason: health.reason, detail: health.detail, latency_ms: health.latencyMs }
+        );
+        // Auto-pause campaign too — every tick burns Playwright launches against a dead proxy
+        await supabase.from('campaigns').update({ batch_paused: true }).eq('id', cid);
+        await logJob({ campaignId: cid, accountId, jobType: 'tick', status: 'skipped', skipReason: `proxy_${health.reason}` });
+        return;
+      }
     }
 
     // Guard: cuenta no activa

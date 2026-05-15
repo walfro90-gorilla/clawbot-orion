@@ -21,7 +21,7 @@ import StealthPlugin from 'puppeteer-extra-plugin-stealth'
 import dotenv from 'dotenv'
 import { supabase } from './lib/supabase.js'
 import { generateReplyDraft, qualifyInboundMessage, generateInboundDeclineReply, fetchPlaybookExamples } from './ai.js'
-import { randomContextOptions } from './lib/browser.js'
+import { getOrCreateAccountFingerprint, contextOptionsFromFingerprint } from './lib/browser.js'
 
 dotenv.config()
 chromium.use(StealthPlugin())
@@ -118,6 +118,7 @@ async function loadActiveLeads() {
       'invite_sent', 'connected', 'replied',
       'follow_up_sent', 'follow_up_sent_2', 'follow_up_sent_3',
       'follow_up_sent_4', 'follow_up_sent_5',
+      'meeting_booked',
     ])
     .eq('campaigns.linkedin_account_id', ACCOUNT_ID)
 
@@ -1043,7 +1044,8 @@ async function run() {
     args: launchArgs,
   })
 
-  const context = await browser.newContext(randomContextOptions(proxy ?? undefined))
+  const fingerprint = await getOrCreateAccountFingerprint(supabase, account.id)
+  const context = await browser.newContext(contextOptionsFromFingerprint(fingerprint, proxy ?? undefined))
 
   // Inyectar li_at cookie
   await context.addCookies([{

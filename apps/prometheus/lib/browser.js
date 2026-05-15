@@ -70,30 +70,90 @@ function randInt(min, max) {
 }
 
 /**
- * Returns randomized browser context options.
- * Pass proxy if available; omit or pass null if not.
+ * Generate a fresh random fingerprint (UA + viewport + locale).
+ * Used at cookie capture time. After capture, the fingerprint is persisted
+ * to `linkedin_accounts.fingerprint_json` and reused for all subsequent
+ * sessions — so LinkedIn sees a STABLE fingerprint per cookie.
+ *
+ * Why stable: if cookie is captured with Mac Chrome 135 and then workers use
+ * Windows Chrome 134, LinkedIn sees "same li_at, different browser" = bot.
  */
-export function randomContextOptions(proxyConfig = null) {
-  const ua      = USER_AGENTS[randInt(0, USER_AGENTS.length - 1)];
-  const vp      = VIEWPORTS[randInt(0, VIEWPORTS.length - 1)];
-  const loc     = LOCALES[randInt(0, LOCALES.length - 1)];
-
-  // Slight viewport jitter — humans resize windows
-  const viewport = {
-    width:  vp.width  + randInt(-20, 20),
-    height: vp.height + randInt(-10, 10),
+export function generateFingerprint() {
+  const ua  = USER_AGENTS[randInt(0, USER_AGENTS.length - 1)];
+  const vp  = VIEWPORTS[randInt(0, VIEWPORTS.length - 1)];
+  const loc = LOCALES[randInt(0, LOCALES.length - 1)];
+  return {
+    userAgent: ua,
+    viewport: {
+      width:  vp.width  + randInt(-20, 20),
+      height: vp.height + randInt(-10, 10),
+    },
+    locale:         loc.locale,
+    acceptLanguage: loc.accept,
+    timezoneId:     'America/Mexico_City',
   };
+}
 
+/**
+ * Build Playwright newContext options from a fingerprint object.
+ * Used by workers that load fingerprint_json from DB.
+ */
+export function contextOptionsFromFingerprint(fp, proxyConfig = null) {
   const opts = {
-    userAgent:  ua,
-    viewport,
-    locale:     loc.locale,
-    timezoneId: 'America/Mexico_City',
+    userAgent:  fp.userAgent,
+    viewport:   fp.viewport,
+    locale:     fp.locale,
+    timezoneId: fp.timezoneId ?? 'America/Mexico_City',
     extraHTTPHeaders: {
-      'Accept-Language': loc.accept,
+      'Accept-Language': fp.acceptLanguage,
     },
   };
-
   if (proxyConfig) opts.proxy = proxyConfig;
   return opts;
+}
+
+/**
+ * Returns randomized browser context options.
+ * LEGACY: prefer contextOptionsFromFingerprint(fp) bound to a stable per-account
+ * fingerprint. Only use this for one-off scripts (search, scratch) that don't
+ * use a logged-in cookie.
+ */
+export function randomContextOptions(proxyConfig = null) {
+  return contextOptionsFromFingerprint(generateFingerprint(), proxyConfig);
+}
+
+/**
+ * Lookup-or-create the fingerprint for an account. Workers that send messages
+ * with a stored cookie MUST use this — never randomContextOptions — so the
+ * fingerprint stays stable across the cookie's lifetime.
+ *
+ * @param {SupabaseClient} supabase
+ * @param {string} accountId
+ * @returns {Promise<object>} fingerprint_json (lazily seeded if missing)
+ */
+export async function getOrCreateAccountFingerprint(supabase, accountId) {
+  const { data, error } = await supabase
+    .from('linkedin_accounts')
+    .select('fingerprint_json, fingerprint_locked_at')
+    .eq('id', accountId)
+    .maybeSingle();
+  if (error) throw new Error(`fingerprint lookup failed: ${error.message}`);
+
+  if (data?.fingerprint_json?.userAgent) return data.fingerprint_json;
+
+  const fp = generateFingerprint();
+  const { error: upErr } = await supabase
+    .from('linkedin_accounts')
+    .update({ fingerprint_json: fp, fingerprint_locked_at: new Date().toISOString() })
+    .eq('id', accountId);
+  if (upErr) console.warn(`[browser] could not persist fingerprint: ${upErr.message}`);
+  return fp;
+}
+
+/**
+ * Convenience: load (or create) fingerprint + build context opts in one call.
+ */
+export async function accountContextOptions(supabase, accountId, proxyConfig = null) {
+  const fp = await getOrCreateAccountFingerprint(supabase, accountId);
+  return contextOptionsFromFingerprint(fp, proxyConfig);
 }

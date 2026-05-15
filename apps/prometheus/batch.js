@@ -70,7 +70,7 @@ async function claimNextLead(campaignId) {
 }
 
 // ── Run worker.js for a single lead ──────────────────────────────────────
-function runWorker(lead, liAt, proxyUrl) {
+function runWorker(lead, liAt, proxyUrl, accountId) {
   return new Promise((resolve) => {
     const env = {
       ...process.env,
@@ -80,6 +80,7 @@ function runWorker(lead, liAt, proxyUrl) {
       DRY_RUN:        String(DRY_RUN),
       LIVE_SEND:      String(LIVE_SEND),
       LI_AT:          liAt ?? '',
+      ...(accountId ? { ACCOUNT_ID: accountId } : {}),
       ...(proxyUrl ? { PROXY_URL: proxyUrl } : {}),
     };
 
@@ -302,7 +303,7 @@ async function run() {
     console.log(`[BATCH] URL: ${lead.linkedin_url}`);
 
     const started = Date.now();
-    const { code, lines } = await runWorker(lead, liAt, proxyUrl);
+    const { code, lines } = await runWorker(lead, liAt, proxyUrl, accountId);
     const durationMs = Date.now() - started;
 
     const outcome = parseOutcome(lines, code);

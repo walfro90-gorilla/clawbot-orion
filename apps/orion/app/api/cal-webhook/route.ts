@@ -99,8 +99,15 @@ export async function POST(req: NextRequest) {
       content:         `Reunión agendada para ${meetingAt ? new Date(meetingAt).toLocaleString("es-MX") : "fecha pendiente"}${meetingUrl ? ` — ${meetingUrl}` : ""}`,
       sent_at:         new Date().toISOString(),
     })
+
+    // Cancelar cualquier auto-reply pendiente — la reunión ya está agendada,
+    // no tiene sentido enviar otro mensaje de seguimiento.
+    await admin.from("conversations").update({
+      ai_reply_scheduled_at: null,
+      ai_reply_draft:        null,
+    }).eq("id", conv.id)
   }
 
-  console.log(`[cal-webhook] Meeting booked for lead=${leadId} at=${meetingAt}`)
+  console.log(`[cal-webhook] Meeting booked for lead=${leadId} at=${meetingAt} — auto-reply cancelado`)
   return NextResponse.json({ ok: true, leadId })
 }

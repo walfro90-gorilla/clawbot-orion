@@ -3,7 +3,8 @@ import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import dotenv from 'dotenv';
 import { generateMessage } from './ai.js';
 import { supabase, logActivity } from './lib/supabase.js';
-import { randomContextOptions } from './lib/browser.js';
+import { randomContextOptions, getOrCreateAccountFingerprint, contextOptionsFromFingerprint } from './lib/browser.js';
+import { humanClick, readingPause } from './lib/humanize.js';
 
 dotenv.config();
 
@@ -229,9 +230,12 @@ async function detectCTA(page, profileName) {
 // Opens the compose area and returns the textarea locator
 async function openComposeArea(page, cta) {
   // Helper: click via locator or via the evaluated clickFn (for span→a CTAs)
+  // We use humanClick (mouse trajectory + hover) for locator-based clicks — kills
+  // the "teleport click" bot signal. clickFn-based clicks (DOM-eval) keep their
+  // path because the function is closure-captured during detection.
   const doClick = async () => {
     if (cta.clickFn) await cta.clickFn();
-    else await cta.locator.click({ force: true });
+    else await humanClick(page, cta.locator);
   };
 
   if (cta.type === 'message') {
@@ -325,7 +329,7 @@ async function openComposeArea(page, cta) {
     const hasSendWithout = await sendWithoutBtn.isVisible({ timeout: 5000 }).catch(() => false);
     if (hasSendWithout) {
       console.log('[CLAWBOT] Modal detectado — haciendo clic en "Enviar sin nota"...');
-      await sendWithoutBtn.click();
+      await humanClick(page, sendWithoutBtn);
       await page.waitForTimeout(randInt(800, 1400));
       console.log('[CLAWBOT] ✓ Invitación enviada sin nota (modal "Enviar sin nota").');
       return 'quick-connect';
@@ -344,7 +348,7 @@ async function openComposeArea(page, cta) {
       const hasSkip = await skipBtn.isVisible({ timeout: 2000 }).catch(() => false);
       if (hasSkip) {
         console.log('[CLAWBOT] Modal con "Añadir nota" — haciendo clic en "Enviar sin nota"...');
-        await skipBtn.click();
+        await humanClick(page, skipBtn);
         await page.waitForTimeout(randInt(800, 1400));
         console.log('[CLAWBOT] ✓ Invitación enviada sin nota (modal "Añadir nota" → skip).');
         return 'quick-connect';
@@ -432,7 +436,17 @@ async function run() {
 
   const browser = await chromium.launch({ headless: true, args: launchArgs });
 
-  const context = await browser.newContext(randomContextOptions(proxy ?? undefined));
+  // Fingerprint stability: use the account's stored UA+viewport so it matches
+  // what cookie-server used when capturing li_at. Falls back to a fresh random
+  // fingerprint only when ACCOUNT_ID isn't propagated (legacy single-account).
+  const ACCOUNT_ID = process.env.ACCOUNT_ID || null;
+  const contextOpts = ACCOUNT_ID
+    ? contextOptionsFromFingerprint(
+        await getOrCreateAccountFingerprint(supabase, ACCOUNT_ID),
+        proxy ?? undefined,
+      )
+    : randomContextOptions(proxy ?? undefined);
+  const context = await browser.newContext(contextOpts);
 
   await context.addCookies([{
     name: 'li_at',
@@ -649,7 +663,11 @@ async function run() {
   console.log('[CLAWBOT] Returning to profile for CTA detection...');
   await page.goto(TARGET_PROFILE, { waitUntil: 'domcontentloaded', timeout: 30000 });
   await page.waitForSelector('h2', { state: 'attached', timeout: 15000 });
-  await page.waitForTimeout(randInt(1500, 2000));
+  // Humanization: pretend to "re-read" the profile before clicking Connect.
+  // Real users don't navigate→click in 2s — they take 4-12s reviewing the profile.
+  await readingPause(page, { minMs: 3500, maxMs: 8000 });
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.waitForTimeout(randInt(400, 800));
 
   const { name, headline, location } = domExtracted;
 
