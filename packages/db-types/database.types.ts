@@ -358,10 +358,12 @@ export type Database = {
           schedule_start_hour: number
           scheduler_notes: string | null
           search_2nd_degree_only: boolean | null
+          search_company_names: string[] | null
           search_count: number | null
           search_gap_hours: number
           search_keywords: string[] | null
           search_location: string | null
+          search_min_employees: number | null
           search_paused: boolean
           target_audience: string | null
           title_blacklist: string[] | null
@@ -414,10 +416,12 @@ export type Database = {
           schedule_start_hour?: number
           scheduler_notes?: string | null
           search_2nd_degree_only?: boolean | null
+          search_company_names?: string[] | null
           search_count?: number | null
           search_gap_hours?: number
           search_keywords?: string[] | null
           search_location?: string | null
+          search_min_employees?: number | null
           search_paused?: boolean
           target_audience?: string | null
           title_blacklist?: string[] | null
@@ -470,10 +474,12 @@ export type Database = {
           schedule_start_hour?: number
           scheduler_notes?: string | null
           search_2nd_degree_only?: boolean | null
+          search_company_names?: string[] | null
           search_count?: number | null
           search_gap_hours?: number
           search_keywords?: string[] | null
           search_location?: string | null
+          search_min_employees?: number | null
           search_paused?: boolean
           target_audience?: string | null
           title_blacklist?: string[] | null

@@ -60,6 +60,21 @@ async function humanScrollSearch(page) {
   await new Promise(r => setTimeout(r, randInt(600, 1000)));
 }
 
+// ── Map min employee count to LinkedIn companySize bucket codes ──────────
+// LinkedIn buckets: A=1-10, B=11-50, C=51-200, D=201-500, E=501-1000,
+//                   F=1001-5000, G=5001-10000, H=10001+
+// Keep any bucket whose UPPER bound >= n (covers companies of >= n employees).
+function mapMinEmployeesToBuckets(n) {
+  if (!n || n <= 1) return null;
+  const buckets = [
+    { code: 'A', hi: 10 }, { code: 'B', hi: 50 }, { code: 'C', hi: 200 },
+    { code: 'D', hi: 500 }, { code: 'E', hi: 1000 }, { code: 'F', hi: 5000 },
+    { code: 'G', hi: 10000 }, { code: 'H', hi: Infinity },
+  ];
+  const kept = buckets.filter(b => b.hi >= n).map(b => b.code);
+  return kept.length ? kept : null;
+}
+
 // ── Build LinkedIn search URL ─────────────────────────────────────────────
 function buildSearchUrl(filters) {
   const base = 'https://www.linkedin.com/search/results/people/';
@@ -76,6 +91,15 @@ function buildSearchUrl(filters) {
   // network=["S"] = 2do grado / ["F"] = 1ro / ["O"] = 3ro+
   if (filters.secondDegreeOnly !== false) {
     params.set('network', '["S"]');
+  }
+
+  // Optional: filter by company size (mapped from min employee count).
+  // Only applies when minEmployees > 1. Otherwise LinkedIn returns all sizes.
+  if (filters.minEmployees && filters.minEmployees > 1) {
+    const buckets = mapMinEmployeesToBuckets(filters.minEmployees);
+    if (buckets && buckets.length) {
+      params.set('companySize', JSON.stringify(buckets));
+    }
   }
 
   return `${base}?${params.toString()}`;
@@ -176,7 +200,7 @@ async function run() {
   // ── Load campaign config from Supabase ────────────────────────────────
   const { data: campaign, error: campErr } = await supabase
     .from('campaigns')
-    .select('search_keywords, search_location, search_count, title_blacklist, title_whitelist, search_2nd_degree_only, linkedin_account_id')
+    .select('search_keywords, search_location, search_count, title_blacklist, title_whitelist, search_2nd_degree_only, search_company_names, search_min_employees, linkedin_account_id')
     .eq('id', CAMPAIGN_ID)
     .single();
 
@@ -192,11 +216,16 @@ async function run() {
   const whitelist        = campaign.title_whitelist || [];
   // Default true — 2do grado tiene ~40% más tasa de aceptación que 3ro
   const secondDegreeOnly = campaign.search_2nd_degree_only !== false;
+  // Optional company filters (empty/null = sin filtro, comportamiento original)
+  const companyNames = (campaign.search_company_names ?? []).filter(Boolean);
+  const minEmployees = campaign.search_min_employees ?? null;
 
   if (!cli.keywords && campaign.search_keywords?.length) {
     console.log(`[SEARCH] Keywords from campaign: ${campaign.search_keywords.join(', ')}`);
   }
   console.log(`[SEARCH] Filtro de red: ${secondDegreeOnly ? '2do grado solamente (network=S)' : 'todos los grados'}`);
+  if (companyNames.length) console.log(`[SEARCH] Filtro empresas (post-filter): ${companyNames.join(', ')}`);
+  if (minEmployees)         console.log(`[SEARCH] Filtro min empleados: ${minEmployees} → buckets ${(mapMinEmployeesToBuckets(minEmployees) ?? []).join(',')}`);
 
   // ── Load or create search_job ──────────────────────────────────────────
   let job;
@@ -207,7 +236,7 @@ async function run() {
     const { data, error } = await supabase.from('search_jobs').insert({
       campaign_id:   CAMPAIGN_ID,
       search_type:   'linkedin_people',
-      filters:       { keywords, location, title: cli.title || null, secondDegreeOnly },
+      filters:       { keywords, location, title: cli.title || null, secondDegreeOnly, companyNames, minEmployees },
       target_count:  targetCount,
       status:        'running',
       started_at:    new Date().toISOString(),
@@ -338,6 +367,19 @@ async function run() {
           const blocked = blacklist.find(b => h.includes(b.toLowerCase()));
           if (blocked) {
             console.log(`[SEARCH] Skipped (blacklist: "${blocked}"): ${p.name} — ${p.headline}`);
+            continue;
+          }
+        }
+
+        // ── Optional company-names post-filter ──────────────────────────────
+        // HARD filter: if user set company_names, keep only leads whose headline
+        // mentions one of them. Loop continues paginating until search_count met
+        // or MAX_PAGES reached.
+        if (companyNames.length > 0) {
+          const h = (p.headline || '').toLowerCase();
+          const matched = companyNames.find(c => h.includes(c.toLowerCase()));
+          if (!matched) {
+            console.log(`[SEARCH] Skip (no company match): ${p.name} — "${(p.headline || '').slice(0, 60)}"`);
             continue;
           }
         }

@@ -465,6 +465,12 @@ async function sendFollowUp(page, lead, message) {
     ? lead.linkedin_url
     : lead.linkedin_url + '/'
 
+  // Si compose-new fue el path final, NO hay header de thread aún (se crea al
+  // enviar el primer mensaje). En ese caso verifyCorrectOverlay no encontrará
+  // header válido y abortará incorrectamente. Este flag salta esa verificación
+  // porque ya validamos el nombre al hacer match con el autocomplete.
+  let viaComposeNew = false
+
   // Close any lingering overlays from the previous lead before navigating
   await closeOpenOverlays(page)
 
@@ -829,6 +835,12 @@ async function sendFollowUp(page, lead, message) {
     const correctThread = headerLower.length > 0 && headerLower.includes(expectedFirst)
 
     if (!correctThread) {
+      // Resetear clickedMessage para que el fallback de compose-new pueda activarse
+      // si /messaging/ search también falla. Sin este reset, el código asume que
+      // el click del botón Mensaje funcionó (técnicamente sí) y nunca entra al
+      // compose-new aunque el thread mostrado sea de OTRO lead (SPA stale).
+      clickedMessage = false
+
       if (headerLower.length > 0) {
         console.warn(`[FOLLOWUP] ⚠️  Thread header "${headerText}" no coincide con "${lead.full_name}" — buscando en /messaging/`)
       } else {
@@ -914,6 +926,7 @@ async function sendFollowUp(page, lead, message) {
                 await humanClick(page, r)
                 await page.waitForTimeout(randInt(1500, 2500))
                 clickedMessage = true
+                viaComposeNew = true   // flag para saltarse verifyCorrectOverlay (no hay header de thread)
                 console.log(`[FOLLOWUP] ✓ Compose-new exitoso para "${lead.full_name}"`)
                 break
               }
@@ -1006,7 +1019,7 @@ async function sendFollowUp(page, lead, message) {
       await page.screenshot({ path: `debug_followup_${lead.id?.slice(0,8)}.png` }).catch(() => {})
       return 'error'
     }
-    if (!await verifyCorrectOverlay(page, lead)) return 'error'
+    if (!viaComposeNew && !await verifyCorrectOverlay(page, lead)) return 'error'
     await typeAndSend(page, retryTextarea, lead, message)
     // Reset messaging state — navegar a feed para que el siguiente lead empiece limpio
     await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {})

@@ -1,6 +1,7 @@
 import { createAdminClient } from "@/lib/supabase/admin"
 import { getSessionUser } from "@/lib/auth/role"
 import { redirect } from "next/navigation"
+import { CampaignTabs } from "@/components/campaign-tabs"
 
 // ── Server Action ──────────────────────────────────────────────────────────────
 
@@ -23,6 +24,10 @@ async function createCampaign(formData: FormData) {
     search_count:          Number(formData.get("search_count") || 25),
     title_whitelist:       parseList("title_whitelist"),
     title_blacklist:       parseList("title_blacklist"),
+    search_company_names:  parseList("search_company_names"),
+    search_min_employees:  formData.get("search_min_employees")
+      ? Number(formData.get("search_min_employees")) || null
+      : null,
     batch_paused:          false,
     search_paused:         false,
     follow_up_paused:      false,
@@ -76,198 +81,236 @@ export default async function NewCampaignPage() {
     : ""
 
   return (
-    <div className="p-8 max-w-4xl mx-auto space-y-6">
+    <div className="p-4 sm:p-8 max-w-5xl mx-auto space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-gray-50">Nueva campaña</h1>
-        <p className="text-gray-400 text-sm mt-0.5">Configura todos los parámetros de la campaña y el template de mensaje IA.</p>
+        <p className="text-gray-400 text-sm mt-0.5">Configura los parámetros básicos. Después de crearla podrás afinar seguimientos FU2-5, FM1-3 y la voz IA desde la edición.</p>
       </div>
 
       <form action={createCampaign} className="space-y-6">
 
-        {/* ── GENERAL ─────────────────────────────────────────────────── */}
-        <Section title="General" icon="⚙️">
-          <Field label="Nombre *">
-            <input name="name" required placeholder="Ej: Directores Finanzas LATAM Q2" className={inp} />
-          </Field>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Field label="Estado">
-              <select name="is_active" defaultValue="true" className={inp}>
-                <option value="true">Activa</option>
-                <option value="false">Inactiva</option>
-              </select>
-            </Field>
-            <Field label="Cuenta LinkedIn *">
-              <select name="linkedin_account_id" defaultValue={defaultAccount} className={inp}>
-                <option value="">Sin cuenta</option>
-                {(accounts ?? []).map(a => (
-                  <option key={a.id} value={a.id}>
-                    {a.label ?? a.linkedin_profile_url?.replace("https://www.linkedin.com/in/", "@") ?? a.id}
-                    {a.status !== "active" ? ` (${a.status})` : ""}
-                  </option>
-                ))}
-              </select>
-            </Field>
-          </div>
-          <Field label="Audiencia objetivo" hint="Descripción breve para Gemini de a quién va dirigida esta campaña.">
-            <textarea name="target_audience" rows={2}
-              placeholder="Ej: Directores de Finanzas de empresas medianas en México" className={inp} />
-          </Field>
-        </Section>
+        <CampaignTabs
+          tabs={[
+            { key: "general",  label: "General",         icon: "🎯" },
+            { key: "search",   label: "Búsqueda",        icon: "🔍" },
+            { key: "invite",   label: "Mensaje inicial", icon: "📨" },
+            { key: "followup", label: "Seguimiento",     icon: "💬" },
+          ]}
+        >
+          {/* ╔═══════════════════════════════════════════════════════════════╗ */}
+          {/* ║ TAB 1 — General + Scheduler                                    ║ */}
+          {/* ╚═══════════════════════════════════════════════════════════════╝ */}
+          <div className="space-y-6">
+            <Section title="General" icon="⚙️">
+              <Field label="Nombre *">
+                <input name="name" required placeholder="Ej: Directores Finanzas LATAM Q2" className={inp} />
+              </Field>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <Field label="Estado">
+                  <select name="is_active" defaultValue="true" className={inp}>
+                    <option value="true">Activa</option>
+                    <option value="false">Inactiva</option>
+                  </select>
+                </Field>
+                <Field label="Cuenta LinkedIn *">
+                  <select name="linkedin_account_id" defaultValue={defaultAccount} className={inp}>
+                    <option value="">Sin cuenta</option>
+                    {(accounts ?? []).map(a => (
+                      <option key={a.id} value={a.id}>
+                        {a.label ?? a.linkedin_profile_url?.replace("https://www.linkedin.com/in/", "@") ?? a.id}
+                        {a.status !== "active" ? ` (${a.status})` : ""}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              </div>
+              <Field label="Audiencia objetivo" hint="Descripción breve para Gemini de a quién va dirigida esta campaña.">
+                <textarea name="target_audience" rows={2}
+                  placeholder="Ej: Directores de Finanzas de empresas medianas en México" className={inp} />
+              </Field>
+            </Section>
 
-        {/* ── SCHEDULER ───────────────────────────────────────────────── */}
-        <Section title="Scheduler" icon="🕐" description="Controla cuándo y con qué cadencia se envían invitaciones y se buscan leads.">
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-            <Field label="Invitaciones / día" hint="Límite diario de invites por campaña.">
-              <input name="daily_invite_target" type="number" min="1" max="20" defaultValue={8} className={inp} />
-            </Field>
-            <Field label="Gap entre batches (min)" hint="Mínimo de minutos entre un batch y el siguiente.">
-              <input name="min_batch_gap_min" type="number" min="30" max="480" defaultValue={120} className={inp} />
-            </Field>
-            <Field label="Umbral mínimo en cola" hint="Si hay menos leads que este umbral, se dispara un nuevo search.">
-              <input name="min_pending_threshold" type="number" min="5" max="100" defaultValue={15} className={inp} />
-            </Field>
-            <Field label="Hora de inicio (24h)" hint="Hora local México a partir de la cual el scheduler se activa.">
-              <input name="schedule_start_hour" type="number" min="0" max="23" defaultValue={9} className={inp} />
-            </Field>
-            <Field label="Hora de fin (24h)" hint="Hora local México a partir de la cual el scheduler se detiene.">
-              <input name="schedule_end_hour" type="number" min="0" max="23" defaultValue={19} className={inp} />
-            </Field>
-            <Field label="Gap entre búsquedas (horas)" hint="Horas mínimas entre un search y el siguiente.">
-              <input name="search_gap_hours" type="number" min="1" max="168" defaultValue={20} className={inp} />
-            </Field>
-          </div>
-        </Section>
-
-        {/* ── FOLLOW-UP ───────────────────────────────────────────────── */}
-        <Section title="Mensaje de seguimiento" icon="💬"
-          description="Mensaje automático que se envía a leads conectados que no han respondido después de N días.">
-          <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-4 text-xs text-amber-300 space-y-1">
-            <p>El follow-up se envía <strong>una sola vez</strong> por lead. Déjalo vacío para desactivarlo.</p>
-          </div>
-          <Field label="Mensaje de seguimiento"
-            hint="Texto exacto que se enviará. Máx. 2000 caracteres.">
-            <textarea name="follow_up_message" rows={4}
-              placeholder="Hola {nombre}, quería retomar el contacto. ¿Tienes unos minutos esta semana para una llamada rápida?"
-              className={inp} />
-          </Field>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Field label="Días de espera" hint="Días después de la invitación para enviar el follow-up.">
-              <input name="follow_up_delay_days" type="number" min="1" max="30" defaultValue={3} className={inp} />
-            </Field>
-          </div>
-        </Section>
-
-        {/* ── BÚSQUEDA ────────────────────────────────────────────────── */}
-        <Section title="Búsqueda en LinkedIn" icon="🔍" description="Parámetros para el scraper de perfiles.">
-          <Field label="Keywords de búsqueda" hint="Separadas por coma. La primera se usa como query principal en LinkedIn.">
-            <input name="search_keywords" placeholder="Director Finanzas, CFO, VP Finance" className={inp} />
-          </Field>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Field label="Ubicación" hint="Ej: Mexico City, Mexico">
-              <input name="search_location" placeholder="Mexico" className={inp} />
-            </Field>
-            <Field label="Máx. leads por búsqueda">
-              <input name="search_count" type="number" min="5" max="200" defaultValue={25} className={inp} />
-            </Field>
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Field label="✅ Whitelist — Cargos que SÍ queremos"
-              hint="Vacío = no filtrar. Busca substring en el headline.">
-              <input name="title_whitelist"
-                placeholder="Director, CEO, CFO, VP, Gerente General" className={inp} />
-            </Field>
-            <Field label="🚫 Blacklist — Cargos que NO queremos"
-              hint="Se descartan si el headline contiene alguno.">
-              <input name="title_blacklist"
-                placeholder="Estudiante, Intern, Pasante, Junior" className={inp} />
-            </Field>
-          </div>
-        </Section>
-
-        {/* ── TEMPLATE DE MENSAJE IA ──────────────────────────────────── */}
-        <Section title="Template de mensaje IA" icon="🤖"
-          description="Instrucciones que recibe Gemini para calificar leads y generar el mensaje de conexión personalizado.">
-
-          <div className="bg-blue-500/5 border border-blue-500/20 rounded-xl p-4 text-xs text-blue-300 space-y-1.5">
-            <p>Gemini recibe el perfil del lead (<code className="bg-blue-500/10 px-1 rounded">nombre, headline, about, headlineCompany</code>) junto con estas reglas para generar el mensaje.</p>
-            <p><code className="bg-blue-500/10 px-1 rounded">headlineCompany</code> = empresa extraída del headline por regex. Úsala para personalizar — nunca uses el cargo como nombre de empresa.</p>
+            <Section title="Scheduler" icon="🕐" description="Controla cuándo y con qué cadencia se envían invitaciones y se buscan leads.">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+                <Field label="Invitaciones / día" hint="Límite diario de invites por campaña.">
+                  <input name="daily_invite_target" type="number" min="1" max="20" defaultValue={8} className={inp} />
+                </Field>
+                <Field label="Gap entre batches (min)" hint="Mínimo de minutos entre un batch y el siguiente.">
+                  <input name="min_batch_gap_min" type="number" min="30" max="480" defaultValue={120} className={inp} />
+                </Field>
+                <Field label="Umbral mínimo en cola" hint="Si hay menos leads que este umbral, se dispara un nuevo search.">
+                  <input name="min_pending_threshold" type="number" min="5" max="100" defaultValue={15} className={inp} />
+                </Field>
+                <Field label="Hora de inicio (24h)" hint="Hora local México a partir de la cual el scheduler se activa.">
+                  <input name="schedule_start_hour" type="number" min="0" max="23" defaultValue={9} className={inp} />
+                </Field>
+                <Field label="Hora de fin (24h)" hint="Hora local México a partir de la cual el scheduler se detiene.">
+                  <input name="schedule_end_hour" type="number" min="0" max="23" defaultValue={19} className={inp} />
+                </Field>
+                <Field label="Gap entre búsquedas (horas)" hint="Horas mínimas entre un search y el siguiente.">
+                  <input name="search_gap_hours" type="number" min="1" max="168" defaultValue={20} className={inp} />
+                </Field>
+              </div>
+            </Section>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <Field label="Nombre del template">
-              <input name="template_name" defaultValue="Template principal" className={inp} />
-            </Field>
-            <Field label="Tono">
-              <select name="tone" defaultValue="casual" className={inp}>
-                <option value="casual">Casual</option>
-                <option value="formal">Formal</option>
-                <option value="friendly">Amigable</option>
-                <option value="direct">Directo</option>
-              </select>
-            </Field>
-            <Field label="Idioma">
-              <select name="language" defaultValue="es" className={inp}>
-                <option value="es">Español</option>
-                <option value="en">Inglés</option>
-                <option value="pt">Portugués</option>
-              </select>
-            </Field>
+          {/* ╔═══════════════════════════════════════════════════════════════╗ */}
+          {/* ║ TAB 2 — Búsqueda en LinkedIn                                   ║ */}
+          {/* ╚═══════════════════════════════════════════════════════════════╝ */}
+          <div className="space-y-6">
+            <Section title="Búsqueda en LinkedIn" icon="🔍" description="Parámetros para el scraper de perfiles.">
+              <Field label="Keywords de búsqueda" hint="Separadas por coma. La primera se usa como query principal en LinkedIn.">
+                <input name="search_keywords" placeholder="Director Finanzas, CFO, VP Finance" className={inp} />
+              </Field>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <Field label="Ubicación" hint="Ej: Mexico City, Mexico">
+                  <input name="search_location" placeholder="Mexico" className={inp} />
+                </Field>
+                <Field label="Máx. leads por búsqueda">
+                  <input name="search_count" type="number" min="5" max="200" defaultValue={25} className={inp} />
+                </Field>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <Field label="✅ Whitelist — Cargos que SÍ queremos"
+                  hint="Vacío = no filtrar. Busca substring en el headline.">
+                  <input name="title_whitelist"
+                    placeholder="Director, CEO, CFO, VP, Gerente General" className={inp} />
+                </Field>
+                <Field label="🚫 Blacklist — Cargos que NO queremos"
+                  hint="Se descartan si el headline contiene alguno.">
+                  <input name="title_blacklist"
+                    placeholder="Estudiante, Intern, Pasante, Junior" className={inp} />
+                </Field>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <Field label="🏢 Empresas específicas (opcional)"
+                  hint="Lista separada por comas. Si se llena, solo se conservan leads cuyo headline contenga alguna. Vacío = no filtrar.">
+                  <input name="search_company_names"
+                    placeholder="Coca-Cola, Microsoft, IBM" className={inp} />
+                </Field>
+                <Field label="👥 Mínimo de empleados (opcional)"
+                  hint="Filtra en LinkedIn por tamaño de empresa. Ej: 200 → empresas de ≥200 empleados. Vacío = no filtrar.">
+                  <input name="search_min_employees" type="number"
+                    min="0" max="20000" step="1"
+                    placeholder="Ej: 200" className={inp} />
+                </Field>
+              </div>
+            </Section>
           </div>
 
-          <Field label="Límite de caracteres" hint="LinkedIn permite máx. 300 caracteres en notas de invitación. Recomendado: 150.">
-            <input name="max_chars" type="number" min="50" max="300" defaultValue={150} className={inp} />
-          </Field>
+          {/* ╔═══════════════════════════════════════════════════════════════╗ */}
+          {/* ║ TAB 3 — Template de mensaje IA                                 ║ */}
+          {/* ╚═══════════════════════════════════════════════════════════════╝ */}
+          <div className="space-y-6">
+            <Section title="Template de mensaje IA" icon="🤖"
+              description="Instrucciones que recibe Gemini para calificar leads y generar el mensaje de conexión personalizado.">
 
-          <Field label="Reglas de calificación"
-            hint="Cuándo descalificar un lead. Gemini devuelve qualified: false si se cumple alguna condición.">
-            <textarea name="qualification_rules" rows={3}
-              placeholder="Descalifica SOLO si: perfil memorial, persona fallecida, cuenta bot/empresa disfrazada, o los tres campos headline+about+currentPosition son null simultáneamente."
-              className={inp} />
-          </Field>
+              <div className="bg-blue-500/5 border border-blue-500/20 rounded-xl p-4 text-xs text-blue-300 space-y-1.5">
+                <p>Gemini recibe el perfil del lead (<code className="bg-blue-500/10 px-1 rounded">nombre, headline, about, headlineCompany</code>) junto con estas reglas para generar el mensaje.</p>
+                <p><code className="bg-blue-500/10 px-1 rounded">headlineCompany</code> = empresa extraída del headline por regex. Úsala para personalizar — nunca uses el cargo como nombre de empresa.</p>
+              </div>
 
-          <Field label="Reglas de mensaje"
-            hint="Instrucciones de personalización. Usa headlineCompany para mencionar la empresa del lead.">
-            <textarea name="message_rules" rows={5}
-              placeholder={`Redacta UN mensaje de conexión en español. Prioridad:
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <Field label="Nombre del template">
+                  <input name="template_name" defaultValue="Template principal" className={inp} />
+                </Field>
+                <Field label="Tono">
+                  <select name="tone" defaultValue="casual" className={inp}>
+                    <option value="casual">Casual</option>
+                    <option value="formal">Formal</option>
+                    <option value="friendly">Amigable</option>
+                    <option value="direct">Directo</option>
+                  </select>
+                </Field>
+                <Field label="Idioma">
+                  <select name="language" defaultValue="es" className={inp}>
+                    <option value="es">Español</option>
+                    <option value="en">Inglés</option>
+                    <option value="pt">Portugués</option>
+                  </select>
+                </Field>
+              </div>
+
+              <Field label="Límite de caracteres" hint="LinkedIn permite máx. 300 caracteres en notas de invitación. Recomendado: 150.">
+                <input name="max_chars" type="number" min="50" max="300" defaultValue={150} className={inp} />
+              </Field>
+
+              <Field label="Reglas de calificación"
+                hint="Cuándo descalificar un lead. Gemini devuelve qualified: false si se cumple alguna condición.">
+                <textarea name="qualification_rules" rows={3}
+                  placeholder="Descalifica SOLO si: perfil memorial, persona fallecida, cuenta bot/empresa disfrazada, o los tres campos headline+about+currentPosition son null simultáneamente."
+                  className={inp} />
+              </Field>
+
+              <Field label="Reglas de mensaje"
+                hint="Instrucciones de personalización. Usa headlineCompany para mencionar la empresa del lead.">
+                <textarea name="message_rules" rows={5}
+                  placeholder={`Redacta UN mensaje de conexión en español. Prioridad:
 1. Si hay headlineCompany: menciona algo específico de la empresa.
 2. Tono casual, sin lenguaje corporativo.
 3. Termina con una pregunta corta y abierta.
 LÍMITE ABSOLUTO: 150 caracteres — cuenta uno por uno, recorta si supera.
 NUNCA uses el cargo/título como si fuera el nombre de una empresa.`}
-              className={inp} />
-          </Field>
+                  className={inp} />
+              </Field>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Field label="Hint de apertura"
-              hint="Cómo debe empezar el mensaje.">
-              <textarea name="opening_hint" rows={2}
-                placeholder="Empieza con su nombre de pila. Menciona su empresa o rol en la primera oración."
-                className={inp} />
-            </Field>
-            <Field label="System prompt adicional"
-              hint="Contexto del emisor del mensaje.">
-              <textarea name="gemini_system_prompt" rows={2}
-                placeholder="Eres un consultor de negocios B2B especializado en..."
-                className={inp} />
-            </Field>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <Field label="Hint de apertura"
+                  hint="Cómo debe empezar el mensaje.">
+                  <textarea name="opening_hint" rows={2}
+                    placeholder="Empieza con su nombre de pila. Menciona su empresa o rol en la primera oración."
+                    className={inp} />
+                </Field>
+                <Field label="System prompt adicional"
+                  hint="Contexto del emisor del mensaje.">
+                  <textarea name="gemini_system_prompt" rows={2}
+                    placeholder="Eres un consultor de negocios B2B especializado en..."
+                    className={inp} />
+                </Field>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <Field label="✅ Ejemplo BUENO" hint="Gemini lo usa como referencia del tono ideal.">
+                  <textarea name="example_good" rows={3}
+                    placeholder="Hola Santiago, veo tu trabajo en Villacero. ¿Qué es lo más desafiante en finanzas ahora?"
+                    className={inp} />
+                </Field>
+                <Field label="🚫 Ejemplo MALO" hint="Qué debe evitar Gemini.">
+                  <textarea name="example_bad" rows={3}
+                    placeholder="Espero que estés bien. Me gustaría conectar contigo para explorar sinergias profesionales."
+                    className={inp} />
+                </Field>
+              </div>
+            </Section>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Field label="✅ Ejemplo BUENO" hint="Gemini lo usa como referencia del tono ideal.">
-              <textarea name="example_good" rows={3}
-                placeholder="Hola Santiago, veo tu trabajo en Villacero. ¿Qué es lo más desafiante en finanzas ahora?"
-                className={inp} />
-            </Field>
-            <Field label="🚫 Ejemplo MALO" hint="Qué debe evitar Gemini.">
-              <textarea name="example_bad" rows={3}
-                placeholder="Espero que estés bien. Me gustaría conectar contigo para explorar sinergias profesionales."
-                className={inp} />
-            </Field>
+          {/* ╔═══════════════════════════════════════════════════════════════╗ */}
+          {/* ║ TAB 4 — Seguimiento básico (FU2-5/FM se editan después)        ║ */}
+          {/* ╚═══════════════════════════════════════════════════════════════╝ */}
+          <div className="space-y-6">
+            <Section title="Mensaje de seguimiento" icon="💬"
+              description="Mensaje automático que se envía a leads conectados que no han respondido después de N días.">
+              <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-4 text-xs text-amber-300 space-y-1">
+                <p>Este es el FU1 básico. Una vez creada la campaña, podrás configurar FU2-5, los flujos FM1-3 y la voz IA desde la edición.</p>
+              </div>
+              <Field label="Mensaje de seguimiento"
+                hint="Texto exacto que se enviará. Máx. 2000 caracteres.">
+                <textarea name="follow_up_message" rows={4}
+                  placeholder="Hola {nombre}, quería retomar el contacto. ¿Tienes unos minutos esta semana para una llamada rápida?"
+                  className={inp} />
+              </Field>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <Field label="Días de espera" hint="Días después de la invitación para enviar el follow-up.">
+                  <input name="follow_up_delay_days" type="number" min="1" max="30" defaultValue={3} className={inp} />
+                </Field>
+              </div>
+            </Section>
           </div>
-        </Section>
+        </CampaignTabs>
 
-        {/* ── ACTIONS ─────────────────────────────────────────────────── */}
-        <div className="flex gap-3 pt-2">
+        {/* ── ACTIONS — siempre visibles fuera de las tabs ───────────────── */}
+        <div className="flex gap-3 pt-2 sticky bottom-0 -mx-4 sm:-mx-8 px-4 sm:px-8 py-4 bg-gray-950/95 backdrop-blur border-t border-gray-800 z-10">
           <button type="submit"
             className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 text-white  font-semibold text-sm rounded-lg transition-colors">
             Crear campaña

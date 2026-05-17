@@ -203,6 +203,98 @@ export default async function DashboardPage({
     }
   }
 
+  // ── Resumen del DÍA (hoy en hora CDMX) ─────────────────────────────────────
+  // Métricas en vivo: lo que ha pasado en las últimas horas. Útil para ver el
+  // ritmo del día sin tener que abrir el monitor o consultar la DB.
+  // RLS aplica via admin client; god_admin/admin ve global, user ve solo su cuenta.
+  const todayCDMX = (() => {
+    const d = new Date()
+    // YYYY-MM-DD en CDMX (UTC-6)
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/Mexico_City",
+      year: "numeric", month: "2-digit", day: "2-digit",
+    }).format(d)  // "2026-05-17"
+  })()
+  // Convertir CDMX date → rango UTC [00:00 CDMX, 24:00 CDMX] como ISO
+  const todayStartUtc = `${todayCDMX}T06:00:00.000Z`  // CDMX = UTC-6
+  const todayEndUtc   = `${todayCDMX}T30:00:00.000Z`  // = next day 06:00 UTC
+
+  const acctFilter = (q: any) => (isRestricted && linkedAccountId)
+    ? q.eq("linkedin_account_id", linkedAccountId)
+    : q
+
+  const baseConvQ = admin.from("conversations").select("id").then(r => r.data?.map((c: any) => c.id) ?? [])
+  const accountConvIds = await (async () => {
+    const q = admin.from("conversations").select("id, linkedin_account_id")
+    const { data } = isRestricted && linkedAccountId
+      ? await q.eq("linkedin_account_id", linkedAccountId)
+      : await q
+    return (data ?? []).map((c: any) => c.id)
+  })()
+
+  const [
+    invitesToday,
+    fusToday,
+    autoRepliesToday,
+    manualRepliesToday,
+    repliesReceivedToday,
+    activeConvosCount,
+    pendingInvitesCount,
+  ] = await Promise.all([
+    admin.from("conversation_events")
+      .select("id", { count: "exact", head: true })
+      .eq("event_type", "invite_sent")
+      .gte("sent_at", todayStartUtc).lt("sent_at", todayEndUtc)
+      .in("conversation_id", accountConvIds.length ? accountConvIds : ["00000000-0000-0000-0000-000000000000"]),
+    admin.from("conversation_events")
+      .select("id", { count: "exact", head: true })
+      .like("event_type", "follow_up_sent%")
+      .gte("sent_at", todayStartUtc).lt("sent_at", todayEndUtc)
+      .in("conversation_id", accountConvIds.length ? accountConvIds : ["00000000-0000-0000-0000-000000000000"]),
+    admin.from("conversation_events")
+      .select("id", { count: "exact", head: true })
+      .eq("event_type", "reply_sent").eq("sent_via", "orion_auto")
+      .gte("sent_at", todayStartUtc).lt("sent_at", todayEndUtc)
+      .in("conversation_id", accountConvIds.length ? accountConvIds : ["00000000-0000-0000-0000-000000000000"]),
+    admin.from("conversation_events")
+      .select("id", { count: "exact", head: true })
+      .eq("event_type", "reply_sent").eq("sent_via", "orion_manual")
+      .gte("sent_at", todayStartUtc).lt("sent_at", todayEndUtc)
+      .in("conversation_id", accountConvIds.length ? accountConvIds : ["00000000-0000-0000-0000-000000000000"]),
+    admin.from("conversation_events")
+      .select("id", { count: "exact", head: true })
+      .eq("event_type", "reply_received")
+      .gte("sent_at", todayStartUtc).lt("sent_at", todayEndUtc)
+      .in("conversation_id", accountConvIds.length ? accountConvIds : ["00000000-0000-0000-0000-000000000000"]),
+    acctFilter(admin.from("conversations").select("id", { count: "exact", head: true }))
+      .gt("conversation_turn", 0),
+    (async () => {
+      const acctCamps = await (async () => {
+        const cq = admin.from("campaigns").select("id, linkedin_account_id")
+        const { data } = isRestricted && linkedAccountId
+          ? await cq.eq("linkedin_account_id", linkedAccountId)
+          : await cq
+        return (data ?? []).map((c: any) => c.id)
+      })()
+      if (!acctCamps.length) return { count: 0 }
+      return admin.from("leads")
+        .select("id", { count: "exact", head: true })
+        .in("campaign_id", acctCamps)
+        .eq("status", "pending")
+        .is("sent_at", null)
+    })(),
+  ])
+
+  const todaySummary = {
+    invites:        invitesToday.count ?? 0,
+    fus:            fusToday.count ?? 0,
+    autoReplies:    autoRepliesToday.count ?? 0,
+    manualReplies:  manualRepliesToday.count ?? 0,
+    repliesIn:      repliesReceivedToday.count ?? 0,
+    activeConvos:   activeConvosCount.count ?? 0,
+    pendingQueue:   pendingInvitesCount.count ?? 0,
+  }
+
   const stats    = campaigns as CampaignStats[] ?? []
   const accs     = accounts  as AccountToday[]  ?? []
   const rawAccs  = rawAccounts ?? []
@@ -275,10 +367,13 @@ export default async function DashboardPage({
 
   const { data: fmLeads } = await fmQuery
 
-  // Group by FM stage
+  // Group by FM stage. Supabase devuelve `conversations` como OBJETO cuando la
+  // relación es uno-a-uno (FK + UNIQUE), no como array. El [0] anterior daba
+  // undefined → todos los leads caían a FM1 con turn=0. Soportamos ambos.
   const fm1: any[] = [], fm2: any[] = [], fm3: any[] = []
   for (const l of fmLeads ?? []) {
-    const turn = (l.conversations as any)?.[0]?.conversation_turn ?? 0
+    const conv = Array.isArray(l.conversations) ? l.conversations[0] : l.conversations
+    const turn = conv?.conversation_turn ?? 0
     if (turn === 0)       fm1.push(l)
     else if (turn <= 2)   fm2.push(l)
     else                  fm3.push(l)
@@ -364,6 +459,48 @@ export default async function DashboardPage({
           </div>
         </section>
       )}
+
+      {/* ── Resumen del día (hoy CDMX) ─────────────────────────────────────────── */}
+      <section className="space-y-2">
+        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider flex items-center gap-2">
+          📊 Resumen del día
+          <span className="text-xs font-normal normal-case text-gray-500">
+            {new Date().toLocaleDateString("es-MX", { timeZone: "America/Mexico_City", weekday: "long", day: "numeric", month: "long" })}
+          </span>
+        </h2>
+        <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
+          <div className="bg-gradient-to-br from-blue-950/60 to-blue-900/30 border border-blue-500/30 rounded-xl p-3">
+            <div className="text-blue-300 text-[10px] uppercase tracking-wider font-bold">Invites</div>
+            <div className="text-blue-100 text-3xl font-bold leading-tight mt-1">{todaySummary.invites}</div>
+            <div className="text-blue-300/60 text-[10px] mt-0.5">enviadas hoy</div>
+          </div>
+          <div className="bg-gradient-to-br from-indigo-950/60 to-indigo-900/30 border border-indigo-500/30 rounded-xl p-3">
+            <div className="text-indigo-300 text-[10px] uppercase tracking-wider font-bold">Follow-ups</div>
+            <div className="text-indigo-100 text-3xl font-bold leading-tight mt-1">{todaySummary.fus}</div>
+            <div className="text-indigo-300/60 text-[10px] mt-0.5">FU1-FU5 hoy</div>
+          </div>
+          <div className="bg-gradient-to-br from-purple-950/60 to-purple-900/30 border border-purple-500/30 rounded-xl p-3">
+            <div className="text-purple-300 text-[10px] uppercase tracking-wider font-bold">Replies in</div>
+            <div className="text-purple-100 text-3xl font-bold leading-tight mt-1">{todaySummary.repliesIn}</div>
+            <div className="text-purple-300/60 text-[10px] mt-0.5">leads que respondieron</div>
+          </div>
+          <div className="bg-gradient-to-br from-green-950/60 to-green-900/30 border border-green-500/30 rounded-xl p-3">
+            <div className="text-green-300 text-[10px] uppercase tracking-wider font-bold">🤖 Auto-reply</div>
+            <div className="text-green-100 text-3xl font-bold leading-tight mt-1">{todaySummary.autoReplies}</div>
+            <div className="text-green-300/60 text-[10px] mt-0.5">{todaySummary.manualReplies > 0 ? `+ ${todaySummary.manualReplies} manuales` : "respuestas Gemini"}</div>
+          </div>
+          <div className="bg-gradient-to-br from-cyan-950/60 to-cyan-900/30 border border-cyan-500/30 rounded-xl p-3">
+            <div className="text-cyan-300 text-[10px] uppercase tracking-wider font-bold">💬 Activas</div>
+            <div className="text-cyan-100 text-3xl font-bold leading-tight mt-1">{todaySummary.activeConvos}</div>
+            <div className="text-cyan-300/60 text-[10px] mt-0.5">conversaciones turn&gt;0</div>
+          </div>
+          <div className="bg-gradient-to-br from-yellow-950/60 to-yellow-900/30 border border-yellow-500/30 rounded-xl p-3">
+            <div className="text-yellow-300 text-[10px] uppercase tracking-wider font-bold">⏳ En cola</div>
+            <div className="text-yellow-100 text-3xl font-bold leading-tight mt-1">{todaySummary.pendingQueue}</div>
+            <div className="text-yellow-300/60 text-[10px] mt-0.5">invites pending</div>
+          </div>
+        </div>
+      </section>
 
       {/* ── KPI cards ─────────────────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -820,7 +957,7 @@ function FmPipeline({ fm1, fm2, fm3 }: { fm1: any[]; fm2: any[]; fm3: any[] }) {
                   <p className="text-gray-600 text-xs text-center py-3">Sin prospectos en esta etapa</p>
                 ) : (
                   leads.slice(0, 8).map((lead: any) => {
-                    const conv = lead.conversations?.[0]
+                    const conv = Array.isArray(lead.conversations) ? lead.conversations[0] : lead.conversations
                     const turn = conv?.conversation_turn ?? 0
                     const lastMsg = conv?.last_message_text
                     const hasDraft = !!(conv?.ai_reply_draft || conv?.ai_reply_scheduled_at)
