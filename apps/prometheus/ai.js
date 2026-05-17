@@ -525,6 +525,7 @@ export async function generateFollowUpMessage({
   companyContext = null,
   exampleMessages = null,
   playbookExamples = '',
+  templateGuide = null,      // template configured in admin — Gemini lo usa como GUÍA, no lo copia literal
 } = {}) {
   const apiKey = process.env.GEMINI_API_KEY
   if (!apiKey) throw new Error('GEMINI_API_KEY not set')
@@ -548,9 +549,19 @@ export async function generateFollowUpMessage({
     ? `SEGUIMIENTOS ANTERIORES YA ENVIADOS:\n${previousFollowUps.map((m, i) => `FU${i + 1}: "${m.slice(0, 300)}"`).join('\n')}`
     : ''
 
-  // Strategy per step
+  // Strategy per step. Si hay templateGuide, la estrategia se reemplaza por
+  // "respeta el template" — el equipo ya decidió qué se dice; Gemini solo
+  // personaliza la apertura con datos del lead.
   let stepStrategy
-  if (followUpStep === 1) {
+  if (templateGuide?.trim()) {
+    stepStrategy = `ESTRATEGIA — EL TEMPLATE MANDA:
+El equipo configuró el mensaje base abajo. Tu trabajo NO es decidir qué decir, es PERSONALIZARLO:
+- CONSERVA la propuesta de valor del template (números concretos, oferta, pregunta principal).
+- PERSONALIZA la apertura (primeras 1-2 líneas) usando datos REALES del perfil del lead.
+- AJUSTA naturalmente el contexto donde haga sentido — sin cambiar el mensaje central.
+- MANTÉN una longitud similar al template base (±15%).
+- Si el template menciona ORION, sistema, propuesta de valor, "20 min", Cal.com — CONSÉRVALO.`
+  } else if (followUpStep === 1) {
     stepStrategy = `ESTRATEGIA FU1 — PRIMER SEGUIMIENTO (conectó pero no respondió):
 - Tono cálido y casual. No presionar. No repetir la invitación.
 - Retoma el hilo de forma natural. Menciona UN detalle fresco de su perfil o empresa.
@@ -589,6 +600,37 @@ export async function generateFollowUpMessage({
     ? `\nEJEMPLOS DE TU ESTILO (replica este tono y longitud):\n${exampleMessages.trim()}\n`
     : ''
 
+  // Template configurado en /campaigns/edit. Si existe, lo usamos como GUÍA del
+  // mensaje base (estructura, propuesta de valor, longitud aproximada), pero
+  // Gemini personaliza usando el perfil del lead. Esto evita que dos leads
+  // reciban el mismo mensaje palabra-por-palabra (señal de bot de LinkedIn).
+  const templateGuideBlock = templateGuide?.trim()
+    ? `\nMENSAJE BASE (configurado por el equipo — es lo que debe recibir el lead, pero PERSONALIZADO):
+"""
+${templateGuide.trim()}
+"""
+CÓMO PERSONALIZAR ESTE MENSAJE PARA ${leadName ?? 'este lead'}:
+
+✅ CONSERVA siempre:
+- Toda la propuesta de valor concreta (números, ofertas, "20 min", links).
+- La pregunta o llamado a la acción final.
+- La estructura general (saludo → contexto → propuesta → pregunta).
+- Tono y longitud aproximada (±15%).
+
+✏️ MODIFICA solo lo necesario para que se sienta natural:
+- Las primeras 1-2 líneas (saludo + contexto): adáptalas usando un dato del perfil del lead (su rol, empresa, trayectoria) si hace sentido. Si no, simplemente saluda por su nombre.
+- Pequeñas variaciones de redacción para evitar que dos leads reciban texto idéntico (anti-bot signal).
+
+🚫 NO HAGAS:
+- No agregues introducciones largas antes del mensaje.
+- No elimines ni acortes la propuesta concreta (números, oferta, link).
+- No cambies el sentido de la pregunta final.
+- No inventes datos del lead que no estén en el perfil.
+
+PIENSA: "Recibo este mensaje y siento que está escrito a mí, no a una lista."
+\n`
+    : ''
+
   const prompt = `${activeCompanyContext}
 
 ---
@@ -596,7 +638,7 @@ export async function generateFollowUpMessage({
 ${personaBlock}
 
 TONO DE COMUNICACIÓN: ${toneInstruction}
-${examplesBlock}${playbookExamples}
+${examplesBlock}${templateGuideBlock}${playbookExamples}
 ---
 
 PERFIL DEL LEAD — ${leadName ?? 'Lead'}:

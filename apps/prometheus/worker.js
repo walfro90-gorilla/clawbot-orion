@@ -287,9 +287,58 @@ async function openComposeArea(page, cta) {
       return textarea;
     }
 
-    // Premium gate closed the path — fall back to Connect flow if button is present
-    console.log('[CLAWBOT] Message path blocked by Premium gate. Checking for Connect button...');
-    return null;
+    // Premium gate closed the path — el perfil requiere InMail/Premium para mensajes.
+    // Fallback automático: buscar botón "Conectar" del perfil y mutar cta para que
+    // el flujo Connect (más abajo) se ejecute. Josh es cuenta gratuita, Premium
+    // gate ocurre cuando el lead configuró "solo conexiones pueden mensajearme".
+    // El path correcto es Connect first, FU después de aceptar.
+    console.log('[CLAWBOT] Message path blocked by Premium gate. Fallback automático a Conectar...');
+
+    // Cerrar cualquier modal Premium upsell antes de buscar Connect
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(randInt(400, 800));
+
+    // Buscar botón Connect en intro card / Más-dropdown
+    const connectByText = page.getByRole('button', {
+      name: /^(conectar|connect|invite)$/i,
+    }).first();
+    let connectLoc = (await connectByText.isVisible({ timeout: 2000 }).catch(() => false))
+      ? connectByText
+      : null;
+
+    if (!connectLoc) {
+      const connectByAria = page.locator(
+        'button[aria-label*="Conectar" i], button[aria-label*="Invite" i], button[aria-label*="Connect" i]'
+      ).first();
+      if (await connectByAria.isVisible({ timeout: 2000 }).catch(() => false)) {
+        connectLoc = connectByAria;
+      }
+    }
+
+    if (!connectLoc) {
+      // Intentar abrir dropdown "Más" — Connect a veces queda oculto ahí
+      const moreBtn = page.getByRole('button', { name: /^(más|more)$/i }).first();
+      if (await moreBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
+        await humanClick(page, moreBtn);
+        await page.waitForTimeout(randInt(600, 1200));
+        const connectInMenu = page.getByRole('menuitem', { name: /conectar|connect/i }).first();
+        if (await connectInMenu.isVisible({ timeout: 1500 }).catch(() => false)) {
+          connectLoc = connectInMenu;
+        }
+      }
+    }
+
+    if (!connectLoc) {
+      console.log('[CLAWBOT] No se encontró botón Conectar tampoco — lead no contactable, retornando null');
+      return null;
+    }
+
+    console.log('[CLAWBOT] ✓ Botón Conectar encontrado — cambiando flow a Connect');
+    // Mutar cta y re-ejecutar el path connect (cae al if (cta.type === 'connect') abajo)
+    cta.type = 'connect';
+    cta.locator = connectLoc;
+    cta.clickFn = null;
+    // Continúa al bloque if (cta.type === 'connect') abajo
   }
 
   if (cta.type === 'connect') {

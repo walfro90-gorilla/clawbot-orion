@@ -93,7 +93,13 @@ function normalizeLinkedInUrl(href) {
 async function loadAccount() {
   const { data, error } = await supabase
     .from('linkedin_accounts')
-    .select('id, label, li_at_cookie, proxy_url, status')
+    .select(`
+      id, label, li_at_cookie, proxy_url, status,
+      last_inbox_check_at,
+      inbound_enabled, inbound_reply_mode,
+      inbound_decline_template, inbound_qualification_rules,
+      reply_delay_min, reply_delay_max
+    `)
     .eq('id', ACCOUNT_ID)
     .single()
 
@@ -166,7 +172,7 @@ function notifySlack(lead, messageText) {
   }).catch(() => {})
 }
 
-async function markReplied(lead, messageText, threadId) {
+async function markReplied(lead, messageText, threadId, opts = {}) {
   if (DRY_RUN) {
     console.log(`[INBOX][DRY] Replied: ${lead.full_name} — "${messageText?.slice(0, 60)}..."`)
     return
@@ -192,15 +198,21 @@ async function markReplied(lead, messageText, threadId) {
     return
   }
 
-  // Siempre insertar el mensaje en conversation_events (historial completo)
+  // Siempre insertar el mensaje en conversation_events (historial completo).
+  // metadata.linkedin_msg_urn permite dedupe en runs futuros (anti-dup).
   if (conv?.id && messageText) {
-    await supabase.from('conversation_events').insert({
+    const eventInsert = {
       conversation_id: conv.id,
       event_type:      'reply_received',
       direction:       'inbound',
       content:         messageText.slice(0, 4000),
-      sent_at:         new Date().toISOString(),
-    })
+      sent_at:         opts.sentAt ?? new Date().toISOString(),
+      sent_via:        'linkedin_inbound',
+    }
+    if (opts.linkedinMsgUrn) {
+      eventInsert.metadata = { linkedin_msg_urn: opts.linkedinMsgUrn }
+    }
+    await supabase.from('conversation_events').insert(eventInsert)
   }
 
   // Solo actualizar lead.status si aún no está marcado como replied
@@ -490,13 +502,159 @@ function getOtherParticipant(convo) {
   return parts.find(p => p.participantType?.member?.distance !== 'SELF') ?? null
 }
 
+// Extrae el URN del participante SELF del listing de la conversation.
+function getSelfUrn(convo) {
+  const parts = convo?.conversationParticipants ?? []
+  const self = parts.find(p => p?.participantType?.member?.distance === 'SELF')
+  // Posibles ubicaciones del URN del SELF
+  return self?.hostIdentityUrn
+      ?? self?.entityUrn
+      ?? null
+}
+
+// Extrae el ÚLTIMO mensaje inbound pendiente del listing — sin navegar al thread.
+// LinkedIn devuelve `convo.messages.elements` (el último mensaje, a veces más)
+// en la respuesta de messengerConversations. Si el último no es nuestro y no hay
+// outbound posterior, es un reply pendiente.
+//
+// Retorna { text, deliveredAt, urn } o null si no hay pending inbound.
+function extractPendingInboundFromListing(convo) {
+  const selfUrn = getSelfUrn(convo)
+  const msgs = convo?.messages?.elements ?? convo?.messages ?? []
+  if (!Array.isArray(msgs) || msgs.length === 0) return null
+
+  // Ordenar por deliveredAt desc para tomar el más reciente
+  const sorted = [...msgs].sort((a, b) => (b?.deliveredAt ?? 0) - (a?.deliveredAt ?? 0))
+  const last = sorted[0]
+  if (!last) return null
+
+  const senderUrn = last?.sender?.hostIdentityUrn ?? last?.sender?.entityUrn ?? ''
+  const isSelf = selfUrn && senderUrn && (senderUrn === selfUrn || senderUrn.includes(selfUrn))
+  if (isSelf) return null   // último mensaje fue nuestro → no hay pending
+
+  const text = (last?.body?.text ?? '').trim()
+  if (!text) return null
+
+  return {
+    text,
+    deliveredAt: last.deliveredAt ?? null,
+    urn:         last.entityUrn ?? last.backendUrn ?? null,
+  }
+}
+
+// Detecta si la conversación es un Sponsored InMail / Message Ad: LinkedIn
+// marca esos threads con disabledFeatures que prohiben responder.
+// Si REPLY o REPLY_TO_MESSAGE están disabled → no se puede responder vía API
+// ni vía UI. Crear lead/draft para esos casos solo causa fallos en reply.js.
+function isSponsoredOrUnreplyable(convo) {
+  const disabled = convo?.disabledFeatures ?? []
+  if (!Array.isArray(disabled) || disabled.length === 0) return false
+  for (const d of disabled) {
+    const f = d?.disabledFeature ?? d
+    if (typeof f === 'string' && /^(REPLY|REPLY_TO_MESSAGE|SEND_MESSAGE|COMPOSE_REPLY)$/.test(f)) {
+      return true
+    }
+  }
+  return false
+}
+
+// Valida que la response JSON de messengerMessages corresponde al threadId esperado.
+// LinkedIn devuelve elements con `conversation.entityUrn` que contiene el threadId.
+// Si el response es de OTRO thread (race condition / response retrasado), retorna false.
+function responseMatchesThread(messagesData, threadId) {
+  if (!messagesData || !threadId) return false
+  const els = messagesData?.data?.messengerMessagesBySyncToken?.elements
+           ?? messagesData?.data?.messengerMessagesByAnchorTimestamp?.elements
+           ?? messagesData?.data?.messengerMessages?.elements ?? []
+  if (!els.length) return false   // sin elementos no podemos validar
+
+  // Buscar el threadId en los URNs de los primeros elementos
+  for (const el of els.slice(0, 3)) {
+    const conv  = el?.conversation?.entityUrn ?? el?.conversation?.backendUrn ?? ''
+    const msg   = el?.entityUrn ?? el?.backendUrn ?? ''
+    if (typeof conv === 'string' && conv.includes(threadId)) return true
+    if (typeof msg  === 'string' && msg.includes(threadId))  return true
+  }
+  return false
+}
+
+// ── Detectar y registrar mensajes outbound enviados FUERA de Orion ────────────
+// LinkedIn devuelve TODOS los mensajes del thread, incluyendo los que Josh
+// envió manualmente directo desde LinkedIn. Si esos no están en
+// conversation_events, los registramos con sent_via='linkedin_manual' para que
+// /dashboard/conversations muestre el contexto completo y detectemos drift.
+async function recordManualOutbounds(conversationId, msgElements, isSelfFn) {
+  if (!conversationId || !msgElements?.length) return { recorded: 0 }
+
+  // Filter outbound msgs that have a URN we can dedupe by + text
+  const outbounds = msgElements
+    .filter(m => isSelfFn(m))
+    .map(m => {
+      const urn = m.entityUrn ?? m.backendUrn ?? null
+      const text = (m.body?.text ?? m.body ?? '').trim()
+      const deliveredAt = m.deliveredAt ?? m.createdAt ?? null
+      return urn && text ? { urn, text, deliveredAt } : null
+    })
+    .filter(Boolean)
+
+  if (!outbounds.length) return { recorded: 0 }
+
+  // Bulk: get all existing event URNs for this conversation in one query
+  const { data: existingEvents } = await supabase
+    .from('conversation_events')
+    .select('metadata')
+    .eq('conversation_id', conversationId)
+    .eq('direction', 'outbound')
+
+  const existingUrns = new Set(
+    (existingEvents ?? [])
+      .map(e => e?.metadata?.linkedin_msg_urn)
+      .filter(Boolean)
+  )
+
+  const toInsert = []
+  for (const out of outbounds) {
+    if (existingUrns.has(out.urn)) continue   // ya registrado
+    toInsert.push({
+      conversation_id: conversationId,
+      event_type:      'message_sent',
+      direction:       'outbound',
+      sent_via:        'linkedin_manual',
+      content:         out.text.slice(0, 4000),
+      sent_at:         out.deliveredAt ? new Date(out.deliveredAt).toISOString() : new Date().toISOString(),
+      metadata:        { linkedin_msg_urn: out.urn },
+    })
+  }
+
+  if (toInsert.length === 0) return { recorded: 0 }
+
+  const { error } = await supabase.from('conversation_events').insert(toInsert)
+  if (error) {
+    console.warn(`[INBOX]   recordManualOutbounds error:`, error.message)
+    return { recorded: 0, error: error.message }
+  }
+  console.log(`[INBOX]   📝 Registrados ${toInsert.length} mensaje(s) manual(es) desde LinkedIn`)
+  return { recorded: toInsert.length }
+}
+
 // ── Procesar mensaje inbound de persona desconocida (no en leadMap) ───────────
 // Califica con IA si es un lead potencial. Si sí, crea lead + genera draft.
 async function processInboundUnknown(member, messageText, threadId, account) {
   const senderName    = `${member.firstName?.text ?? ''} ${member.lastName?.text ?? ''}`.trim()
   const senderHeadline = member.headline?.text ?? null
   const publicId      = member.publicIdentifier ?? null
-  const profileUrl    = publicId ? `https://www.linkedin.com/in/${publicId}/` : null
+  // LinkedIn no siempre expone publicIdentifier para 2do/3er grado o perfiles
+  // restringidos. Como leads.linkedin_url es NOT NULL, generamos un placeholder
+  // único usando el backendUrn del miembro. La URL puede reemplazarse después
+  // si conseguimos el perfil real.
+  const memberUrn = member.entityUrn ?? member.dashEntityUrn ?? null
+  const memberId  = memberUrn?.match(/fsd_profile:([A-Za-z0-9_-]+)/)?.[1]
+                 ?? memberUrn?.match(/member:([A-Za-z0-9_-]+)/)?.[1]
+                 ?? threadId?.slice(0, 20)
+                 ?? `inbox-${Date.now()}`
+  const profileUrl = publicId
+    ? `https://www.linkedin.com/in/${publicId}/`
+    : `https://www.linkedin.com/in/_unknown_${memberId}/`
 
   // Respetar flag de inbound por cuenta
   if (account.inbound_enabled === false) {
@@ -760,6 +918,14 @@ async function checkMessaging(page, leadMap, leads, stats, globalApiResponses, a
 
   let processed = 0
 
+  // Baseline para detectar actividad nueva en threads ya "leídos". LinkedIn
+  // marca threads como leídos por mil razones (sesión paralela, Playwright
+  // pasando por encima, hovers). Confiar solo en unreadCount perdería mensajes.
+  const lastCheckMs = account.last_inbox_check_at
+    ? new Date(account.last_inbox_check_at).getTime()
+    : 0
+  console.log(`[INBOX] Procesando ${sorted.length} conversations (last_check=${account.last_inbox_check_at ?? 'never'})`)
+
   for (const convo of sorted) {
     if (processed >= MAX_CONVOS_PER_RUN) break
 
@@ -774,12 +940,42 @@ async function checkMessaging(page, leadMap, leads, stats, globalApiResponses, a
     const lastName  = member.lastName?.text  ?? ''
     const fullName  = `${firstName} ${lastName}`.trim()
 
+    // ── Skip Sponsored InMails / Message Ads ────────────────────────────────────
+    // LinkedIn marca esos threads con disabledFeatures incluyendo REPLY/SEND_MESSAGE.
+    // Intentar responder genera fallos en reply.js (no hay textarea). No es un
+    // lead real, es publicidad. Skip y continuar.
+    if (isSponsoredOrUnreplyable(convo)) {
+      console.log(`[INBOX] 📢 Sponsored/no-replyable thread de "${fullName}" — skip (no responderemos)`)
+      continue
+    }
+
     // Intentar match por nombre — exacto primero, luego fuzzy (sin acentos, parcial)
     const matchedLead = fuzzyMatchLead(fullName, leadNameMap, leads)
 
+    // ── FAST-PATH: detectar reply pendiente del listing (sin navegar) ─────────
+    // LinkedIn devuelve los mensajes recientes del thread en convo.messages.
+    // Si el último mensaje NO es nuestro Y existe un matched lead, podemos
+    // crear el reply_received SIN navegar al thread (ahorra Playwright trips
+    // y rompe el cap de 20 conversations/run para leads de baja prioridad).
+    const pending = extractPendingInboundFromListing(convo)
+    const alreadyRegistered = pending?.urn
+      ? (() => {
+          // chequear en memoria via leads + matchedLead; query directa
+          return false   // se revisa más abajo si entramos al path
+        })()
+      : false
+
     if (!matchedLead) {
-      // Persona desconocida — si tiene mensajes sin leer, calificar como inbound potencial
-      if ((convo.unreadCount ?? 0) > 0) {
+      // Persona desconocida — procesar si:
+      //   (a) tiene unreadCount > 0, O
+      //   (b) tuvo actividad después del último inbox check, O
+      //   (c) el listing muestra un mensaje pendiente del lead (fast-path)
+      const unread          = convo.unreadCount ?? 0
+      const lastActivityMs  = convo.lastActivityAt ?? 0
+      const hasNewActivity  = lastActivityMs > lastCheckMs
+
+      if (unread > 0 || hasNewActivity || pending) {
+        console.log(`[INBOX] 📥 Inbound desconocido detectado: "${fullName}" (unread=${unread}, newActivity=${hasNewActivity}, lastActivity=${new Date(lastActivityMs).toISOString()})`)
         const threadId = extractThreadId(convo)
         // Necesitamos el texto del mensaje — navegar al hilo para obtenerlo
         // (usamos la misma lógica que para leads conocidos, pero de forma simplificada)
@@ -795,6 +991,11 @@ async function checkMessaging(page, leadMap, leads, stats, globalApiResponses, a
             await page.waitForTimeout(2500)
             for (const [url, json] of globalApiResponses.entries()) {
               if (url.toLowerCase().includes('messengermessages')) {
+                // Validar que el response coincide con el thread actual (anti-race)
+                if (!responseMatchesThread(json, threadId)) {
+                  console.warn(`[INBOX] ⚠️  (unknown) Response no coincide con thread ${threadId.slice(0,20)} — ignorando`)
+                  continue
+                }
                 const els = json?.data?.messengerMessagesBySyncToken?.elements
                   ?? json?.data?.messengerMessagesByAnchorTimestamp?.elements
                   ?? json?.data?.messengerMessages?.elements ?? []
@@ -820,10 +1021,38 @@ async function checkMessaging(page, leadMap, leads, stats, globalApiResponses, a
 
     const unreadCount = convo.unreadCount ?? 0
     const threadId    = extractThreadId(convo)
-    console.log(`[INBOX] Matched lead: ${matchedLead.full_name} — unread=${unreadCount} thread=${threadId?.slice(0, 20)}`)
+    console.log(`[INBOX] Matched lead: ${matchedLead.full_name} — unread=${unreadCount} thread=${threadId?.slice(0, 20)} pending=${pending ? 'YES' : 'NO'}`)
 
-    // Solo procesar si hay mensajes no leídos O si el lead no está marcado como replied todavía
-    const needsProcessing = unreadCount > 0 || matchedLead.status !== 'replied'
+    // ── Backfill linkedin_thread_id si NULL ─────────────────────────────────
+    // Sin esto, followup.js no puede usar fast-path y cae al bug SPA stale
+    // (LinkedIn cachea el último thread activo en el overlay). Con thread_id,
+    // followup.js navega directo a /messaging/thread/<id>/ y evita el cache.
+    if (threadId && !DRY_RUN) {
+      const { data: existingConv } = await supabase.from('conversations')
+        .select('id, linkedin_thread_id')
+        .eq('lead_id', matchedLead.id)
+        .maybeSingle()
+      if (existingConv?.id && !existingConv.linkedin_thread_id) {
+        await supabase.from('conversations')
+          .update({ linkedin_thread_id: threadId })
+          .eq('id', existingConv.id)
+        console.log(`[INBOX]   📌 thread_id backfilled para "${matchedLead.full_name}"`)
+      } else if (!existingConv?.id) {
+        // No existe conv todavía — crear una mínima para guardar thread_id
+        await supabase.from('conversations').insert({
+          lead_id:             matchedLead.id,
+          linkedin_account_id: ACCOUNT_ID,
+          linkedin_thread_id:  threadId,
+          status:              'active',
+          last_message_at:     convo?.lastActivityAt ? new Date(convo.lastActivityAt).toISOString() : new Date().toISOString(),
+        }).select('id').single().then(({ data }) => {
+          if (data?.id) console.log(`[INBOX]   📌 conversation+thread_id creados para "${matchedLead.full_name}"`)
+        })
+      }
+    }
+
+    // Solo procesar si hay mensajes no leídos, hay pending del listing, o el lead no está marcado como replied
+    const needsProcessing = unreadCount > 0 || matchedLead.status !== 'replied' || !!pending
     if (!needsProcessing) {
       console.log(`[INBOX]   Already replied and no new messages — skip`)
       continue
@@ -831,14 +1060,36 @@ async function checkMessaging(page, leadMap, leads, stats, globalApiResponses, a
 
     processed++
 
-    // ── Obtener texto del mensaje navegando al hilo ──────────────────────────
-    // LinkedIn hace un llamado GraphQL messengerMessages cuando carga el thread.
-    // Usamos globalApiResponses (ya parseado por el interceptor global) en vez de
-    // waitForResponse, porque ambos llaman a response.json() en el mismo objeto
-    // y el primero consume el body dejando al segundo sin datos.
+    // ── FAST-PATH: si el listing ya nos dio el texto del reply pendiente, ────
+    // úsalo y SALTA la navegación al thread. Esto rompe el cap de 20 convos/run
+    // efectivamente — los leads que respondieron pero quedaron atrás del cap
+    // ahora se procesan sin tráfico extra a LinkedIn.
     let messageText = null
+    if (pending && pending.text) {
+      // Verificar que NO esté ya registrado en DB (anti-dup por URN)
+      const { data: convRow } = await supabase.from('conversations')
+        .select('id').eq('lead_id', matchedLead.id).maybeSingle()
+      let alreadyRegistered = false
+      if (convRow?.id && pending.urn) {
+        const { data: existingEv } = await supabase.from('conversation_events')
+          .select('id')
+          .eq('conversation_id', convRow.id)
+          .eq('event_type', 'reply_received')
+          .filter('metadata->>linkedin_msg_urn', 'eq', pending.urn)
+          .maybeSingle()
+        alreadyRegistered = !!existingEv?.id
+      }
+      if (!alreadyRegistered) {
+        messageText = pending.text
+        console.log(`[INBOX]   ⚡ Fast-path: reply detectado del listing (${messageText.length} chars) — sin navegar`)
+      } else {
+        console.log(`[INBOX]   Listing tiene pending pero ya registrado por URN — skip`)
+        continue
+      }
+    }
 
-    if (threadId) {
+    // Solo navegar al thread si NO obtuvimos el texto del fast-path
+    if (!messageText && threadId) {
       await sectionDelay()
 
       // Limpiar entradas previas de messengerMessages del mapa para detectar solo
@@ -864,13 +1115,20 @@ async function checkMessaging(page, leadMap, leads, stats, globalApiResponses, a
           await gotoThread()  // retry once
         })
 
-        // Buscar la respuesta de mensajes en el interceptor global
+        // Buscar la respuesta de mensajes en el interceptor global.
+        // VALIDAR que el response corresponda al threadId actual — sin esa
+        // validación, race conditions cruzan mensajes entre threads (bug detectado
+        // 2026-05-15: mensaje de Natalia apareció en thread de Jose Luis Moreno).
         let messagesData = null
         for (const [url, json] of globalApiResponses) {
           if (url.toLowerCase().includes('messengermessages')) {
-            messagesData = json
-            console.log(`[INBOX] Found messengerMessages: ${url.replace('https://www.linkedin.com', '').slice(0, 100)}`)
-            break
+            if (responseMatchesThread(json, threadId)) {
+              messagesData = json
+              console.log(`[INBOX] Found messengerMessages: ${url.replace('https://www.linkedin.com', '').slice(0, 100)}`)
+              break
+            } else {
+              console.warn(`[INBOX] ⚠️  Response no coincide con thread ${threadId.slice(0,20)} — ignorando (race condition evitado)`)
+            }
           }
         }
 
@@ -879,9 +1137,11 @@ async function checkMessaging(page, leadMap, leads, stats, globalApiResponses, a
           await page.waitForTimeout(3000)
           for (const [url, json] of globalApiResponses) {
             if (url.toLowerCase().includes('messengermessages')) {
-              messagesData = json
-              console.log(`[INBOX] Found messengerMessages (delayed): ${url.slice(0, 80)}`)
-              break
+              if (responseMatchesThread(json, threadId)) {
+                messagesData = json
+                console.log(`[INBOX] Found messengerMessages (delayed): ${url.slice(0, 80)}`)
+                break
+              }
             }
           }
         }
@@ -922,6 +1182,22 @@ async function checkMessaging(page, leadMap, leads, stats, globalApiResponses, a
             console.log(`[INBOX]   Inbound messages (${parts.length}): "${messageText.slice(0, 120)}"`)
           } else if (pendingInbound.length === 0 && msgElements.every(isSelf)) {
             console.log(`[INBOX]   No inbound messages in thread (${msgElements.length} total, all outbound)`)
+          }
+
+          // Registrar outbounds manuales (enviados directo desde LinkedIn UI, no por Orion).
+          // Verificación adicional: solo registrar si los URN de los mensajes
+          // contienen el threadId esperado (defensa en profundidad contra el race
+          // condition que cruzó mensajes el 15-may).
+          const { data: matchedConv } = await supabase.from('conversations')
+            .select('id').eq('lead_id', matchedLead.id).maybeSingle()
+          if (matchedConv?.id && msgElements.length > 0) {
+            const sample = msgElements[0]
+            const urn = sample?.entityUrn ?? sample?.conversation?.entityUrn ?? ''
+            if (typeof urn === 'string' && urn.includes(threadId)) {
+              await recordManualOutbounds(matchedConv.id, msgElements, isSelf)
+            } else {
+              console.warn(`[INBOX] ⚠️  Skipping recordManualOutbounds — URN doesn't match thread`)
+            }
           }
         } else {
           console.log('[INBOX] No messengerMessages captured for this thread — using placeholder')
@@ -982,7 +1258,10 @@ async function checkMessaging(page, leadMap, leads, stats, globalApiResponses, a
       stats.connected++
     }
 
-    await markReplied(matchedLead, messageText, threadId)
+    await markReplied(matchedLead, messageText, threadId, {
+      linkedinMsgUrn: pending?.urn ?? null,
+      sentAt:         pending?.deliveredAt ? new Date(pending.deliveredAt).toISOString() : new Date().toISOString(),
+    })
     stats.replied++
     // Fire-and-forget: generate AI reply draft
     generateDraftAsync(matchedLead, messageText).catch(e => console.error(`[INBOX] generateDraftAsync error para ${matchedLead.full_name}:`, e.message))

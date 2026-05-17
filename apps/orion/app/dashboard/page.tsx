@@ -120,17 +120,46 @@ export default async function DashboardPage({
         .order("created_at", { ascending: false })
         .limit(10)
 
+  // Drift detection: manual replies en LinkedIn (fuera de Orion) últimos 7d
+  const sevenDaysAgo = new Date(Date.now() - 7 * 86400_000).toISOString()
+  const manualDriftBaseQ = admin
+    .from("conversation_events")
+    .select("conversation_id, sent_at, conversations(linkedin_account_id, linkedin_accounts(label))")
+    .eq("sent_via", "linkedin_manual")
+    .gte("sent_at", sevenDaysAgo)
+    .order("sent_at", { ascending: false })
+    .limit(50)
+  const manualDriftQuery = (isRestricted && linkedAccountId)
+    ? manualDriftBaseQ   // RLS-filtered downstream; we'll filter in memory
+    : manualDriftBaseQ
+
   const [
     { data: campaigns },
     { data: accounts },
     { data: rawAccounts },
     { data: alerts },
+    { data: manualDriftEvents },
   ] = await Promise.all([
     campaignsQuery,
     accountsQuery,
     rawAccountsQuery,
     alertsQuery,
+    manualDriftQuery,
   ])
+
+  // Agrupa manual drift por cuenta
+  const driftByAccount: Record<string, { label: string; count: number; lastAt: string }> = {}
+  for (const ev of (manualDriftEvents ?? []) as any[]) {
+    const acctId = ev?.conversations?.linkedin_account_id as string | undefined
+    const label  = ev?.conversations?.linkedin_accounts?.label as string | undefined
+    if (!acctId || !label) continue
+    if (isRestricted && linkedAccountId && acctId !== linkedAccountId) continue
+    if (!driftByAccount[acctId]) {
+      driftByAccount[acctId] = { label, count: 0, lastAt: ev.sent_at as string }
+    }
+    driftByAccount[acctId].count++
+  }
+  const driftAccounts = Object.values(driftByAccount).filter(d => d.count > 0)
 
   // ── Date-filtered KPI queries ─────────────────────────────────────────────
   let filteredTotals: { leads: number; invited: number; replied: number; meetings: number } | null = null
@@ -295,6 +324,43 @@ export default async function DashboardPage({
                 <Link href="/dashboard/monitor" className="text-blue-400 hover:text-blue-300">Monitor</Link>
               </p>
             )}
+          </div>
+        </section>
+      )}
+
+      {/* ── Drift detection: respuestas manuales fuera de Orion ────────────────── */}
+      {driftAccounts.length > 0 && (
+        <section className="space-y-2">
+          <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider flex items-center gap-2">
+            📱 Actividad manual fuera de Orion
+            <span className="text-xs font-normal normal-case text-gray-500">
+              (últimos 7 días)
+            </span>
+          </h2>
+          <div className="bg-orange-950/30 border border-orange-500/30 rounded-xl p-4">
+            <p className="text-orange-300 text-sm mb-3">
+              Detectamos mensajes que se enviaron desde LinkedIn directamente, sin pasar por Orion.
+              Esto es normal si respondiste manualmente, pero puede indicar drift entre tu operación y el sistema.
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+              {driftAccounts.map(d => (
+                <div key={d.label} className="bg-gray-900 border border-orange-500/20 rounded-lg p-3 flex items-center justify-between">
+                  <div>
+                    <div className="text-gray-50 text-sm font-semibold">{d.label}</div>
+                    <div className="text-gray-500 text-xs mt-0.5">
+                      Última: {new Date(d.lastAt).toLocaleString("es-MX", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-orange-400 text-2xl font-bold leading-none">{d.count}</div>
+                    <div className="text-orange-300 text-[10px] uppercase tracking-wider">mensaje{d.count !== 1 ? "s" : ""}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <Link href="/dashboard/conversations?tab=linkedin_manual" className="inline-block mt-3 text-xs text-orange-400 hover:text-orange-300">
+              Ver conversaciones afectadas →
+            </Link>
           </div>
         </section>
       )}

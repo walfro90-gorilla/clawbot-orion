@@ -282,6 +282,7 @@ async function recordFollowUp(lead, message, aiGenerated = false) {
     content:         message.slice(0, 4000),
     sent_at:         now,
     ai_generated:    aiGenerated,
+    sent_via:        aiGenerated ? 'orion_auto' : 'orion_manual',
   })
   // Don't silent-fail: this is what hid the CHECK constraint bug on follow_up_sent_3+.
   // Without this log, conversation_events would silently never get FU3+ entries
@@ -868,8 +869,61 @@ async function sendFollowUp(page, lead, message) {
           }
         }
       }
+      // ── Fallback final: compose-new message ────────────────────────────────
+      // Si el lead no aparece en /messaging/ search (porque nunca respondió y
+      // no hay thread existente), usar compose-new como último recurso.
+      // Esto escapa del bug de "thread cached" donde LinkedIn muestra la última
+      // conversación activa (ej. Jorge Sanchez) en el overlay aunque navegamos
+      // a otro perfil.
       if (!clickedMessage) {
-        console.warn(`[FOLLOWUP] ⚠️  Could not find "${lead.full_name}" conversation in /messaging/`)
+        console.log(`[FOLLOWUP] 🆕 Sin thread existente — intentando compose-new para "${lead.full_name}"`)
+        const composeSelectors = [
+          'button[aria-label*="Compose" i]',
+          'button[aria-label*="Redact" i]',
+          'button[aria-label*="Nuevo mensaje" i]',
+          'button[aria-label*="New message" i]',
+          'button:has-text("Nuevo mensaje")',
+          'button:has-text("New message")',
+        ]
+        const composeBtn = page.locator(composeSelectors.join(', ')).first()
+        if (await composeBtn.isVisible({ timeout: 4000 }).catch(() => false)) {
+          await humanClick(page, composeBtn)
+          await page.waitForTimeout(randInt(1500, 2500))
+
+          const recipientInput = page.locator(
+            'input[placeholder*="Search" i], input[placeholder*="Buscar" i], ' +
+            'input[aria-label*="recipient" i], input[aria-label*="destinatario" i], ' +
+            'input[aria-label*="Type a name" i]'
+          ).first()
+          if (await recipientInput.isVisible({ timeout: 4000 }).catch(() => false)) {
+            await humanFill(page, recipientInput, lead.full_name)
+            await page.waitForTimeout(randInt(2000, 3000))
+
+            // Buscar el resultado del autocomplete que matchee el nombre completo
+            const results = page.locator(
+              '[class*="type-ahead"] li, [role="option"], [class*="autocomplete"] li, [class*="typeahead"] li'
+            )
+            const rCnt = await results.count().catch(() => 0)
+            for (let i = 0; i < Math.min(rCnt, 6); i++) {
+              const r = results.nth(i)
+              if (!await r.isVisible({ timeout: 1000 }).catch(() => false)) continue
+              const rTxt = (await r.textContent().catch(() => '')).toLowerCase()
+              // Verificar que el resultado matchee al lead (primer nombre + apellido)
+              const firstName = lead.full_name.split(' ')[0].toLowerCase()
+              if (rTxt.includes(firstName)) {
+                await humanClick(page, r)
+                await page.waitForTimeout(randInt(1500, 2500))
+                clickedMessage = true
+                console.log(`[FOLLOWUP] ✓ Compose-new exitoso para "${lead.full_name}"`)
+                break
+              }
+            }
+          }
+        }
+      }
+
+      if (!clickedMessage) {
+        console.warn(`[FOLLOWUP] ⚠️  Could not find "${lead.full_name}" via /messaging/ ni compose-new`)
       }
     } else {
       if (threadId) {
@@ -1156,38 +1210,71 @@ async function run() {
     for (const lead of leads) {
       console.log(`\n[FOLLOWUP] ─── ${lead.full_name} (${sentCount + 1}/${leads.length}) ───`)
 
-      // Resolve message: AI-generated or static template
+      // Resolve message: hybrid (FU1 personalized by AI), literal (FU2-5), or AI-only fallback.
       let messageToSend = staticFollowUpMessage
       let aiGenerated = false
+      const firstName = lead.full_name?.split(' ')[0] ?? 'estimado/a'
 
-      // If static template exists, use it (templates take priority over AI for FU sequence)
-      if (staticFollowUpMessage) {
-        const firstName = lead.full_name?.split(' ')[0] ?? 'estimado/a'
+      // ── FU1 HYBRID: Gemini personaliza usando el template como guía ──────────
+      // Por qué: el FU1 es el primer mensaje real post-conexión. Dos leads no
+      // deberían recibir el mismo texto palabra-por-palabra (señal de bot).
+      // Gemini incorpora 1-2 detalles del perfil real manteniendo la estructura
+      // del template configurado en /campaigns/edit.
+      if (FOLLOW_UP_STEP === 1 && staticFollowUpMessage && isAiMode) {
+        try {
+          const { inviteMessage, previousFollowUps } = await fetchConversationContext(lead.id)
+          messageToSend = await generateFollowUpMessage({
+            leadName:        lead.full_name,
+            leadProfileData: lead.profile_data ?? {},
+            inviteMessage,
+            previousFollowUps,
+            followUpStep:    1,
+            calUrl,
+            aiTone:          campaign.ai_tone ?? 'casual',
+            senderPersona:   campaign.ai_sender_persona ?? null,
+            companyContext:  campaign.ai_company_context ?? null,
+            exampleMessages: campaign.ai_example_messages ?? null,
+            playbookExamples,
+            templateGuide:   staticFollowUpMessage,  // ← template como GUÍA, no literal
+          })
+          aiGenerated = true
+          console.log(`[FOLLOWUP] 🤖 AI FU1 híbrido (template como guía, ${messageToSend.length} chars)`)
+        } catch (aiErr) {
+          // Fallback a template literal si Gemini falla — no perdemos el FU
+          messageToSend = staticFollowUpMessage
+            .replace(/\[Nombre\]/gi, firstName)
+            .replace(/\[LINK_AGENDA\]/gi, calUrl ?? 'https://cal.com')
+            .replace(/\[LINK CALENDLY O GHL\]/gi, calUrl ?? 'https://cal.com')
+          aiGenerated = false
+          console.warn(`[FOLLOWUP] ⚠️  AI FU1 falló (${aiErr.message}) — usando template literal`)
+        }
+      } else if (staticFollowUpMessage) {
+        // ── FU2-5: template literal (la historia ya tiene contexto) ────────────
         messageToSend = staticFollowUpMessage
           .replace(/\[Nombre\]/gi, firstName)
           .replace(/\[LINK_AGENDA\]/gi, calUrl ?? 'https://cal.com')
           .replace(/\[LINK CALENDLY O GHL\]/gi, calUrl ?? 'https://cal.com')
         aiGenerated = false
-        console.log(`[FOLLOWUP] 📝 Template FU${FOLLOW_UP_STEP} personalizado para "${lead.full_name}" (${messageToSend.length} chars)`)
+        console.log(`[FOLLOWUP] 📝 Template FU${FOLLOW_UP_STEP} literal para "${lead.full_name}" (${messageToSend.length} chars)`)
       } else if (isAiMode) {
-        // No template → fall back to Gemini
+        // ── Sin template → Gemini puro (fallback original) ─────────────────────
         try {
           const { inviteMessage, previousFollowUps } = await fetchConversationContext(lead.id)
           messageToSend = await generateFollowUpMessage({
-            leadName:          lead.full_name,
-            leadProfileData:   lead.profile_data ?? {},
+            leadName:        lead.full_name,
+            leadProfileData: lead.profile_data ?? {},
             inviteMessage,
             previousFollowUps,
-            followUpStep:      FOLLOW_UP_STEP,
+            followUpStep:    FOLLOW_UP_STEP,
             calUrl,
-            aiTone:            campaign.ai_tone ?? 'casual',
-            senderPersona:     campaign.ai_sender_persona ?? null,
-            companyContext:    campaign.ai_company_context ?? null,
-            exampleMessages:   campaign.ai_example_messages ?? null,
+            aiTone:          campaign.ai_tone ?? 'casual',
+            senderPersona:   campaign.ai_sender_persona ?? null,
+            companyContext:  campaign.ai_company_context ?? null,
+            exampleMessages: campaign.ai_example_messages ?? null,
             playbookExamples,
           })
           aiGenerated = true
-          console.log(`[FOLLOWUP] 🤖 AI FU${FOLLOW_UP_STEP} generado (${messageToSend.length} chars)`)
+          console.log(`[FOLLOWUP] 🤖 AI FU${FOLLOW_UP_STEP} generado (sin template, ${messageToSend.length} chars)`)
         } catch (aiErr) {
           console.error(`[FOLLOWUP] ⚠️  AI generation failed for "${lead.full_name}": ${aiErr.message}`)
           console.error('[FOLLOWUP] No template and AI failed — skipping lead.')

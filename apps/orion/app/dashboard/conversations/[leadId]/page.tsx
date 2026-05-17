@@ -225,8 +225,26 @@ export default async function ConversationThreadPage({
                   )}
                   <div className={`flex ${isOutbound ? "justify-end" : "justify-start"} mb-1`}>
                     <div className={`max-w-[72%] ${isOutbound ? "items-end" : "items-start"} flex flex-col`}>
+                      {/* Source badge: distingue manual de LinkedIn vs Orion auto/manual */}
+                      {(() => {
+                        const sv = ev.sent_via as string | null
+                        if (!sv) return null
+                        const meta: Record<string, { icon: string; label: string; cls: string }> = {
+                          orion_auto:       { icon: "🤖", label: "Orion · IA",       cls: "text-blue-400 bg-blue-500/10 border-blue-500/20" },
+                          orion_manual:     { icon: "✋", label: "Orion · manual",   cls: "text-cyan-400 bg-cyan-500/10 border-cyan-500/20" },
+                          linkedin_manual:  { icon: "📱", label: "LinkedIn directo", cls: "text-orange-400 bg-orange-500/10 border-orange-500/20" },
+                          linkedin_inbound: { icon: "📥", label: "Entrante",          cls: "text-purple-400 bg-purple-500/10 border-purple-500/20" },
+                        }
+                        const m = meta[sv]
+                        if (!m) return null
+                        return (
+                          <span className={`text-[10px] mb-0.5 px-1.5 py-0.5 rounded border font-medium ${m.cls} ${isOutbound ? "self-end" : "self-start"}`}>
+                            {m.icon} {m.label}
+                          </span>
+                        )
+                      })()}
                       {/* Type label only for non-standard events */}
-                      {ev.event_type !== "reply_received" && ev.event_type !== "reply_sent" && (
+                      {ev.event_type !== "reply_received" && ev.event_type !== "reply_sent" && ev.event_type !== "message_sent" && (
                         <span className={`text-[10px] mb-0.5 ${isOutbound ? "text-blue-500 text-right" : "text-gray-600"}`}>
                           {EVENT_LABELS[ev.event_type] ?? ev.event_type}
                         </span>
@@ -234,7 +252,9 @@ export default async function ConversationThreadPage({
                       <div
                         className={`rounded-2xl px-3.5 py-2.5 ${
                           isOutbound
-                            ? "bg-blue-600 text-white rounded-br-sm"
+                            ? ev.sent_via === "linkedin_manual"
+                              ? "bg-orange-600/90 text-white rounded-br-sm border border-orange-500"
+                              : "bg-blue-600 text-white rounded-br-sm"
                             : "bg-gray-800 text-gray-100 border border-gray-700/60 rounded-bl-sm"
                         }`}
                       >

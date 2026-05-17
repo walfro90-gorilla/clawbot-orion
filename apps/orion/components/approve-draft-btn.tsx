@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { useRouter } from "next/navigation"
 
 interface ApproveDraftBtnProps {
   leadId: string
@@ -9,6 +10,7 @@ interface ApproveDraftBtnProps {
 }
 
 export function ApproveDraftBtn({ leadId, leadName, draft }: ApproveDraftBtnProps) {
+  const router                  = useRouter()
   const [open, setOpen]         = useState(false)
   const [message, setMessage]   = useState(draft)
   const [loading, setLoading]   = useState(false)
@@ -43,9 +45,16 @@ export function ApproveDraftBtn({ leadId, leadName, draft }: ApproveDraftBtnProp
     } finally {
       setLoading(false)
       if (result !== "error") {
+        // Refrescar datos del servidor inmediatamente: draft=null y conversation_turn++
+        // hacen que el botón "Aprobar draft" desaparezca y aparezca el hilo actualizado.
+        // El reply_sent event se inserta ~30-90s después cuando reply.js termina, pero
+        // el draft limpio se ve al instante.
+        router.refresh()
         setTimeout(() => {
           setOpen(false)
           setResult(null)
+          // Segundo refresh tras delay — captura el reply_sent event ya insertado
+          router.refresh()
         }, 3000)
       }
     }

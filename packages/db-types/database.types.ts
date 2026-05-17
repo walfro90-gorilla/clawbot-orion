@@ -507,6 +507,7 @@ export type Database = {
           id: string
           metadata: Json | null
           sent_at: string | null
+          sent_via: string | null
           subject: string | null
         }
         Insert: {
@@ -519,6 +520,7 @@ export type Database = {
           id?: string
           metadata?: Json | null
           sent_at?: string | null
+          sent_via?: string | null
           subject?: string | null
         }
         Update: {
@@ -531,6 +533,7 @@ export type Database = {
           id?: string
           metadata?: Json | null
           sent_at?: string | null
+          sent_via?: string | null
           subject?: string | null
         }
         Relationships: [

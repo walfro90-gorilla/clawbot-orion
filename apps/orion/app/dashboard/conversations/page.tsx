@@ -69,16 +69,40 @@ export default async function ConversationsPage({
   const { data: convos } = await convosQuery
   const allList = convos ?? []
 
-  // Filter by tab
+  // ── Mapear el último sent_via outbound por conversation ─────────────────────
+  // Una sola query batch para no hacer N+1. Resultado: cada conversation conoce
+  // cómo fue su último envío (orion_auto, orion_manual, linkedin_manual).
+  const convIds = allList.map((c: any) => c.id)
+  const lastOutboundByConv: Record<string, { sent_via: string; sent_at: string }> = {}
+  if (convIds.length > 0) {
+    const { data: outEvents } = await supabase
+      .from("conversation_events")
+      .select("conversation_id, sent_via, sent_at")
+      .in("conversation_id", convIds)
+      .eq("direction", "outbound")
+      .order("sent_at", { ascending: false })
+    for (const ev of outEvents ?? []) {
+      const cid = ev.conversation_id as string
+      if (!lastOutboundByConv[cid]) {
+        lastOutboundByConv[cid] = { sent_via: (ev.sent_via as string) ?? "orion_auto", sent_at: ev.sent_at as string }
+      }
+    }
+  }
+
+  // Filter by tab — incluye filtro por tipo de respuesta
   const list = allList.filter((c: any) => {
     const isInbound = (c.leads as any)?.source === "inbound"
-    if (tab === "inbound") return isInbound
-    if (tab === "outbound") return !isInbound
+    if (tab === "inbound")          return isInbound
+    if (tab === "outbound")         return !isInbound
+    if (tab === "linkedin_manual")  return lastOutboundByConv[c.id]?.sent_via === "linkedin_manual"
+    if (tab === "orion_auto")       return lastOutboundByConv[c.id]?.sent_via === "orion_auto"
     return true
   })
 
-  const inboundCount  = allList.filter((c: any) => (c.leads as any)?.source === "inbound").length
-  const outboundCount = allList.filter((c: any) => (c.leads as any)?.source !== "inbound").length
+  const inboundCount       = allList.filter((c: any) => (c.leads as any)?.source === "inbound").length
+  const outboundCount      = allList.filter((c: any) => (c.leads as any)?.source !== "inbound").length
+  const linkedinManualCount = allList.filter((c: any) => lastOutboundByConv[c.id]?.sent_via === "linkedin_manual").length
+  const orionAutoCount      = allList.filter((c: any) => lastOutboundByConv[c.id]?.sent_via === "orion_auto").length
 
   // Detect conversation signals from last message text
   function detectSignal(lastMsg: string | null, draft: string | null) {
@@ -118,9 +142,11 @@ export default async function ConversationsPage({
   }
 
   const tabs = [
-    { key: "all",      label: "Todos",      count: allList.length },
-    { key: "outbound", label: "Outbound",   count: outboundCount },
-    { key: "inbound",  label: "Entrantes",  count: inboundCount },
+    { key: "all",             label: "Todos",            count: allList.length },
+    { key: "outbound",        label: "Outbound",         count: outboundCount },
+    { key: "inbound",         label: "Entrantes",        count: inboundCount },
+    { key: "orion_auto",      label: "🤖 Orion auto",    count: orionAutoCount },
+    { key: "linkedin_manual", label: "📱 Manual LinkedIn", count: linkedinManualCount },
   ]
 
   return (
@@ -198,9 +224,15 @@ export default async function ConversationsPage({
                   const isInbound     = lead?.source === "inbound"
                   const inboundSignal = lead?.inbound_signal as string | null
                   const signalMeta    = inboundSignal ? INBOUND_SIGNAL_META[inboundSignal] : null
+                  const lastOutbound  = lastOutboundByConv[c.id]
+                  // Highlight rows where Josh respondió manual desde LinkedIn (fuera de Orion).
+                  // Color naranja sutil para identificar drift visualmente sin ruido.
+                  const rowHighlight = lastOutbound?.sent_via === "linkedin_manual"
+                    ? "bg-orange-500/5 border-l-2 border-l-orange-500/50"
+                    : isInbound ? "bg-purple-500/3" : ""
 
                   return (
-                    <tr key={c.id} className={`hover:bg-gray-800/50 transition-colors ${isInbound ? "bg-purple-500/3" : ""}`}>
+                    <tr key={c.id} className={`hover:bg-gray-800/50 transition-colors ${rowHighlight}`}>
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-1.5 flex-wrap">
                           <Link
@@ -248,6 +280,21 @@ export default async function ConversationsPage({
                           <span className="text-gray-600">—</span>
                         )}
                         <div className="mt-1.5 flex flex-wrap gap-1">
+                          {/* Último envío: orion_auto / orion_manual / linkedin_manual */}
+                          {lastOutbound && (() => {
+                            const meta: Record<string, { icon: string; label: string; cls: string }> = {
+                              orion_auto:      { icon: "🤖", label: "Orion auto",       cls: "bg-blue-500/10 border-blue-500/20 text-blue-400" },
+                              orion_manual:    { icon: "✋", label: "Aprobado",         cls: "bg-cyan-500/10 border-cyan-500/20 text-cyan-400" },
+                              linkedin_manual: { icon: "📱", label: "LinkedIn directo", cls: "bg-orange-500/10 border-orange-500/30 text-orange-400" },
+                            }
+                            const m = meta[lastOutbound.sent_via]
+                            if (!m) return null
+                            return (
+                              <span className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border font-medium ${m.cls}`} title="Cómo se envió el último mensaje">
+                                {m.icon} {m.label}
+                              </span>
+                            )
+                          })()}
                           {(() => {
                             const sig = detectSignal(c.last_message_text, c.ai_reply_draft)
                             return sig ? (

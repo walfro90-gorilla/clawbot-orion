@@ -112,15 +112,33 @@ async function recordReply(convId, accountId, messageText) {
     direction:       'outbound',
     content:         messageText.slice(0, 4000),
     sent_at:         new Date().toISOString(),
+    sent_via:        process.env.REPLY_SOURCE === 'manual' ? 'orion_manual' : 'orion_auto',
+    ai_generated:    process.env.REPLY_SOURCE !== 'manual',
   })
 
-  // Update last_message_at on conversation
-  await supabase.from('conversations').update({
-    last_message_at:   new Date().toISOString(),
-    last_message_text: `[Tú]: ${messageText.slice(0, 500)}`,
-  }).eq('id', resolvedConvId)
+  // Update last_message_at + LIMPIAR DRAFT (solo al confirmar envío exitoso).
+  // Si CLEAR_DRAFT_ON_SUCCESS=true (approve-draft flow), también incrementamos
+  // conversation_turn. Antes esto lo hacía approve-draft route ANTES de saber
+  // si reply.js iba a funcionar, lo cual causaba que la UI mostrara "enviado"
+  // aunque reply.js fallara (ej. Message Request sin Accept).
+  const conversationUpdate = {
+    last_message_at:       new Date().toISOString(),
+    last_message_text:     `[Tú]: ${messageText.slice(0, 500)}`,
+    ai_reply_draft:        null,
+    ai_draft_generated_at: null,
+  }
+  if (process.env.CLEAR_DRAFT_ON_SUCCESS === 'true') {
+    // Solo incrementar turn cuando vino de approve-draft (no de auto-reply,
+    // que ya lo hace en otro lugar).
+    const { data: convCurrent } = await supabase
+      .from('conversations')
+      .select('conversation_turn')
+      .eq('id', resolvedConvId).single()
+    conversationUpdate.conversation_turn = (convCurrent?.conversation_turn ?? 0) + 1
+  }
+  await supabase.from('conversations').update(conversationUpdate).eq('id', resolvedConvId)
 
-  console.log(`[REPLY] ✓ Recorded reply_sent in conversation_events`)
+  console.log(`[REPLY] ✓ Recorded reply_sent in conversation_events + draft limpiado`)
 }
 
 // ── Type and send message ─────────────────────────────────────────────────────
@@ -160,6 +178,59 @@ async function typeAndSend(page, textarea, leadName) {
   return true
 }
 
+// ── Detectar y aceptar "Message Request" si el thread lo requiere ─────────────
+// Cuando alguien NO conectado (2do/3er grado) te escribe, LinkedIn pone el
+// thread en "Solicitudes de mensaje". El textarea no aparece hasta hacer click
+// en "Aceptar". Sin esto, reply.js falla con "No textarea found".
+async function acceptMessageRequestIfNeeded(page, leadName) {
+  // Estrategia 1: button por texto explícito
+  const acceptBtnTexts = [
+    /^aceptar$/i,
+    /^accept$/i,
+    /^aceptar mensaje$/i,
+    /^accept message$/i,
+    /^marcar como conocido$/i,
+  ]
+
+  for (const re of acceptBtnTexts) {
+    const btn = page.getByRole('button', { name: re }).first()
+    if (await btn.isVisible({ timeout: 1500 }).catch(() => false)) {
+      console.log(`[REPLY] 📨 Message Request detectado para "${leadName}" — aceptando...`)
+      await humanClick(page, btn)
+      await sleep(randInt(2500, 4500))   // esperar a que LinkedIn reemplace el banner con el textarea
+      return true
+    }
+  }
+
+  // Estrategia 2: text-based scan (LinkedIn cambia clases pero el texto sigue)
+  // Buscar elementos con texto "aceptar" cerca del top del thread
+  const acceptByText = await page.evaluate(() => {
+    const candidates = Array.from(document.querySelectorAll('button, [role="button"]'))
+    for (const el of candidates) {
+      const txt = (el.textContent ?? '').trim().toLowerCase()
+      if (/^(aceptar|accept|marcar como conocido)$/.test(txt)) {
+        const rect = el.getBoundingClientRect()
+        if (rect.width > 0 && rect.height > 0) {
+          return { x: rect.x + rect.width/2, y: rect.y + rect.height/2 }
+        }
+      }
+    }
+    return null
+  })
+  if (acceptByText) {
+    console.log(`[REPLY] 📨 Message Request (text scan) — click @ ${acceptByText.x|0},${acceptByText.y|0}`)
+    await page.mouse.move(acceptByText.x - 50, acceptByText.y - 30)
+    await sleep(randInt(150, 350))
+    await page.mouse.move(acceptByText.x, acceptByText.y)
+    await sleep(randInt(80, 200))
+    await page.mouse.click(acceptByText.x, acceptByText.y)
+    await sleep(randInt(2500, 4500))
+    return true
+  }
+
+  return false
+}
+
 // ── Navigate to thread by ID ──────────────────────────────────────────────────
 async function sendViaThread(page, threadId, leadName) {
   console.log(`[REPLY] Navigating to thread ${threadId.slice(0, 20)}...`)
@@ -174,15 +245,26 @@ async function sendViaThread(page, threadId, leadName) {
     return 'captcha'
   }
 
-  const textarea = page.locator(
-    'div[role="textbox"][contenteditable="true"], ' +
+  const textareaSelector = 'div[role="textbox"][contenteditable="true"], ' +
     '.msg-form__contenteditable, ' +
     '[data-artdeco-is-focused] [contenteditable="true"]'
-  ).first()
 
-  const hasTextarea = await textarea.isVisible({ timeout: 10000 }).catch(() => false)
+  const textarea = page.locator(textareaSelector).first()
+  let hasTextarea = await textarea.isVisible({ timeout: 8000 }).catch(() => false)
+
+  // Si no hay textarea, puede ser Message Request — intentar aceptar
   if (!hasTextarea) {
-    console.warn(`[REPLY] No textarea found in thread — falling back to profile navigation`)
+    const accepted = await acceptMessageRequestIfNeeded(page, leadName)
+    if (accepted) {
+      hasTextarea = await page.locator(textareaSelector).first().isVisible({ timeout: 8000 }).catch(() => false)
+      if (hasTextarea) {
+        console.log(`[REPLY] ✓ Message Request aceptado — textarea ahora visible`)
+      }
+    }
+  }
+
+  if (!hasTextarea) {
+    console.warn(`[REPLY] No textarea found in thread (ni después de Accept) — falling back to profile navigation`)
     return null // signal fallback
   }
 

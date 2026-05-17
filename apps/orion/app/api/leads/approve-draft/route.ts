@@ -67,28 +67,33 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "No hay draft pendiente para este lead (ya fue enviado o cancelado)" }, { status: 409 })
   }
 
-  // Clear draft + increment turn counter + cancel any pending scheduled send
-  await admin
-    .from("conversations")
-    .update({
-      ai_reply_draft:        null,
-      ai_draft_generated_at: null,
-      ai_reply_scheduled_at: null,
-      conversation_turn:     ((conv?.conversation_turn ?? 0) + 1),
-    })
-    .eq("lead_id", leadId)
+  // SOLO cancelar el scheduled_at (no más auto-envío programado). El draft
+  // queda en DB hasta que reply.js confirme envío exitoso vía CLEAR_DRAFT_ON_SUCCESS.
+  // Razón: si reply.js falla (Message Request sin Accept, captcha, timeout), el
+  // draft sigue disponible para retry. Antes este UPDATE limpiaba draft + turn
+  // de inmediato → UI mostraba "enviado" aunque LinkedIn nunca recibiera nada.
+  if (conv?.ai_reply_scheduled_at) {
+    await admin
+      .from("conversations")
+      .update({ ai_reply_scheduled_at: null })
+      .eq("lead_id", leadId)
+  }
 
   // Trigger reply.js — background process with 2-min timeout
   const env = {
     ...process.env,
-    LEAD_ID:       leadId,
-    REPLY_MESSAGE: message.trim(),
-    DRY_RUN:       "false",
-    LIVE_SEND:     "true",
+    LEAD_ID:                 leadId,
+    REPLY_MESSAGE:           message.trim(),
+    DRY_RUN:                 "false",
+    LIVE_SEND:               "true",
+    REPLY_SOURCE:            "manual",   // marca conversation_events.sent_via = 'orion_manual'
+    CLEAR_DRAFT_ON_SUCCESS:  "true",     // reply.js limpia draft + incrementa turn solo si éxito
   }
 
+  // cwd debe ser el dir de prometheus para que dotenv cargue su .env con SUPABASE_URL,
+  // GEMINI_API_KEY, etc. Sin esto, reply.js crash con "SUPABASE_URL not set".
   const cmd = `node ${PROMETHEUS_DIR}/reply.js`
-  exec(cmd, { env, timeout: 120_000 }, (err, _stdout, stderr) => {
+  exec(cmd, { env, cwd: PROMETHEUS_DIR, timeout: 120_000 }, (err, _stdout, stderr) => {
     if (err) {
       const reason = err.killed ? "timeout (120s)" : `exit code ${err.code}`
       console.error(`[approve-draft] reply.js failed (${reason}) for lead=${leadId}:`, stderr?.slice(0, 500))

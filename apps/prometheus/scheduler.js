@@ -692,7 +692,17 @@ async function runAutoReplyJob(account) {
 
   if (!dueDrafts?.length) return;
 
+  // Lock por cuenta: el sub-loop de auto-reply (cada 3-5 min) y el tick
+  // principal pueden disparar esta función simultáneamente. Si la cuenta ya
+  // está enviando otro reply, abortamos y dejamos los drafts para el siguiente
+  // intento (su scheduled_at sigue vencido, se procesarán enseguida).
+  if (!acquireLock(account.id)) {
+    console.log(`[AUTO-REPLY] Cuenta "${account.label}" ocupada — ${dueDrafts.length} draft(s) esperarán al siguiente sub-tick.`);
+    return;
+  }
+
   console.log(`[SCHEDULER] 🤖 Auto-reply: ${dueDrafts.length} draft(s) listos para "${account.label}"`);
+  try {
 
   for (const conv of dueDrafts) {
     // Guard: draft must be a non-empty string before sending
@@ -733,6 +743,45 @@ async function runAutoReplyJob(account) {
     }
 
     await sleep(randInt(3000, 8000)); // pequeña pausa entre envíos
+  }
+  } finally {
+    releaseLock(account.id);
+  }
+}
+
+// ── Auto-reply sub-loop ──────────────────────────────────────────────────────
+// Loop separado del tick principal — corre cada 3-5 min y SOLO ejecuta
+// runAutoReplyJob. No toca LinkedIn extra (solo DB query). Resuelve la latencia
+// entre que un draft cumple su scheduled_at y se envía (antes esperaba al
+// siguiente tick principal de 20-40 min).
+async function autoReplyLoop() {
+  // Pausa inicial para no chocar con el primer tick principal
+  await sleep(randInt(45_000, 90_000));
+
+  while (true) {
+    try {
+      // Solo cuentas activas con inbound habilitado — evita lockear cuentas pausadas
+      const { data: accounts, error } = await supabase
+        .from('linkedin_accounts')
+        .select('id, label, proxy_url, status')
+        .eq('status', 'active');
+
+      if (error) {
+        console.warn('[AUTO-REPLY-LOOP] query accounts error:', error.message);
+      } else {
+        for (const account of accounts ?? []) {
+          await runAutoReplyJob(account).catch(err =>
+            console.error(`[AUTO-REPLY-LOOP] error "${account.label}":`, err.message)
+          );
+        }
+      }
+    } catch (err) {
+      console.error('[AUTO-REPLY-LOOP] tick error:', err.message);
+    }
+
+    // 3-5 min entre ciclos. No genera tráfico LinkedIn salvo cuando hay un
+    // draft real para enviar — en esos casos delegamos a reply.js (humanizado).
+    await sleep(randInt(3 * 60_000, 5 * 60_000));
   }
 }
 
@@ -843,12 +892,24 @@ async function runBatchJob(campaign, account) {
     return;
   }
 
+  // Pasar campaña.schedule_days/hours a batch.js — su isBusinessHours() ahora
+  // los respeta. Sin esto, batch.js usaba un hardcoded L-V 9-19h.
+  const campScheduleDays  = (campaign.schedule_days?.length
+    ? campaign.schedule_days
+    : ['lunes','martes','miércoles','jueves','viernes','sábado','domingo']
+  ).join(',');
+  const campStartHourEnv  = String(campaign.schedule_start_hour ?? 9);
+  const campEndHourEnv    = String(campaign.schedule_end_hour   ?? 19);
+
   const { code, lines } = await runScript('batch.js', {
-    CAMPAIGN_ID: campaign.id,
-    BATCH_SIZE:  String(batchSize),
-    DRY_RUN:     'false',
-    LIVE_SEND:   String(LIVE_SEND),
-    LI_AT:       account.li_at_cookie,
+    CAMPAIGN_ID:        campaign.id,
+    BATCH_SIZE:         String(batchSize),
+    DRY_RUN:            'false',
+    LIVE_SEND:          String(LIVE_SEND),
+    LI_AT:              account.li_at_cookie,
+    CAMPAIGN_DAYS:      campScheduleDays,
+    CAMPAIGN_START_HOUR: campStartHourEnv,
+    CAMPAIGN_END_HOUR:   campEndHourEnv,
     ...(account.proxy_url ? { PROXY_URL: account.proxy_url } : {}),
   });
 
@@ -994,6 +1055,15 @@ async function run() {
   // Primer tick con delay inicial aleatorio (1-5 min) para no arrancar exacto
   const initialDelay = randInt(60_000, 5 * 60_000);
   console.log(`[SCHEDULER] Esperando ${Math.round(initialDelay/60000)} min antes del primer tick...`);
+
+  // Sub-loop auto-reply paralelo — no espera al tick principal.
+  // Corre cada 3-5 min sin tráfico LinkedIn extra (solo DB query). Cuando hay
+  // un draft con scheduled_at vencido, lo envía con humanClick/humanType.
+  autoReplyLoop().catch(err =>
+    console.error('[AUTO-REPLY-LOOP] crashed:', err)
+  );
+  console.log('[SCHEDULER] 🚀 Sub-loop auto-reply iniciado (3-5 min)');
+
   await sleep(initialDelay);
 
   while (true) {

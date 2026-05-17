@@ -29,8 +29,9 @@ const LIVE_SEND   = process.env.LIVE_SEND === 'true';
 const DELAY_MIN_MS = DRY_RUN ? 5_000  :  60 * 1000;
 const DELAY_MAX_MS = DRY_RUN ? 10_000 : 180 * 1000;
 
-// Business hours gate — Mexico City time (UTC-5 in CDT / UTC-6 in CST)
-// Runs Mon-Fri ONLY, 9:00am–7:00pm
+// Business hours gate — Mexico City time. Lee días+horas de la campaña en lugar
+// de hardcodear L-V. El scheduler ya filtra a nivel campaña (campaign.schedule_days);
+// este check es defensa en profundidad cuando batch.js se ejecuta directo.
 function isBusinessHours() {
   const now = new Date();
   const mxHour = parseInt(
@@ -42,11 +43,18 @@ function isBusinessHours() {
   const mxDay = new Intl.DateTimeFormat('es-MX', {
     timeZone: 'America/Mexico_City',
     weekday: 'long',
-  }).format(now).toLowerCase(); // "lunes", "martes", ... "sábado", "domingo"
+  }).format(now).toLowerCase();
 
-  const isWeekday = ['lunes','martes','miércoles','jueves','viernes'].some(d => mxDay.includes(d));
-  const inHours   = mxHour >= 9 && mxHour < 19;
-  return isWeekday && inHours; // SOLO lunes–viernes 9am–7pm MX
+  // Días permitidos via env (override) o default todos los días.
+  // Scheduler pasa CAMPAIGN_DAYS=lunes,martes,...,domingo según campaign.schedule_days.
+  const envDays = (process.env.CAMPAIGN_DAYS ?? 'lunes,martes,miércoles,jueves,viernes,sábado,domingo')
+    .toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
+  const startHour = parseInt(process.env.CAMPAIGN_START_HOUR ?? '9');
+  const endHour   = parseInt(process.env.CAMPAIGN_END_HOUR   ?? '19');
+
+  const isAllowedDay = envDays.some(d => mxDay.includes(d));
+  const inHours      = mxHour >= startHour && mxHour < endHour;
+  return isAllowedDay && inHours;
 }
 
 function randInt(min, max) {
@@ -149,6 +157,7 @@ async function recordOutbound(leadId, accountId) {
     direction:       'outbound',
     content:         messageText.slice(0, 4000),
     sent_at:         new Date().toISOString(),
+    sent_via:        'orion_auto',
   })
 }
 
@@ -271,6 +280,12 @@ async function run() {
   let sent      = 0;
   let errors    = 0;
 
+  // Lead IDs ya intentados en este batch — previene reintentos del mismo lead
+  // dentro del mismo batch. Cuando un lead falla con outcome=unknown/error,
+  // batch.js resetea su status a 'pending' y retry_count++; sin este Set,
+  // claim_next_lead lo volvería a sacar inmediato → quema todo el batch en él.
+  const triedInThisBatch = new Set();
+
   for (let i = 0; i < BATCH_SIZE; i++) {
     // Business hours gate (skip in dry-run or if SKIP_HOURS_CHECK=true)
     if (!DRY_RUN && process.env.SKIP_HOURS_CHECK !== 'true' && !isBusinessHours()) {
@@ -291,12 +306,27 @@ async function run() {
       }
     }
 
-    // Claim next lead (sets status='processing' atomically)
-    const lead = await claimNextLead(CAMPAIGN_ID);
+    // Claim next lead (sets status='processing' atomically). Si claim devuelve
+    // un lead ya intentado en este batch (porque resetamos a pending tras fallo),
+    // intentar hasta 5 veces para obtener uno fresco. Si todos los siguientes
+    // siguen siendo repetidos → no quedan leads frescos → break.
+    let lead = null;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const candidate = await claimNextLead(CAMPAIGN_ID);
+      if (!candidate) break;
+      if (!triedInThisBatch.has(candidate.id)) {
+        lead = candidate;
+        break;
+      }
+      console.log(`[BATCH] Skip ${candidate.full_name ?? candidate.id.slice(0,8)} — ya intentado en este batch, buscando otro...`);
+      // Liberar el lead repetido inmediato — sin esto queda en 'processing' colgado
+      await supabase.from('leads').update({ status: 'pending' }).eq('id', candidate.id);
+    }
     if (!lead) {
-      console.log('[BATCH] No more pending leads — done.');
+      console.log('[BATCH] No more fresh pending leads — done.');
       break;
     }
+    triedInThisBatch.add(lead.id);
 
     console.log(`\n[BATCH] ─────────────────────────────────────────────`);
     console.log(`[BATCH] Lead ${i + 1}/${BATCH_SIZE}: ${lead.full_name ?? lead.linkedin_url}`);
