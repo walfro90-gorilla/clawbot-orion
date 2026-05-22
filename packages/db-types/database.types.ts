@@ -689,6 +689,80 @@ export type Database = {
           },
         ]
       }
+      extension_commands: {
+        Row: {
+          account_id: string
+          action: string
+          completed_at: string | null
+          created_at: string
+          dispatched_at: string | null
+          error: string | null
+          expires_at: string
+          id: string
+          payload: Json
+          related_lead_id: string | null
+          result: Json | null
+          status: string
+        }
+        Insert: {
+          account_id: string
+          action: string
+          completed_at?: string | null
+          created_at?: string
+          dispatched_at?: string | null
+          error?: string | null
+          expires_at?: string
+          id?: string
+          payload?: Json
+          related_lead_id?: string | null
+          result?: Json | null
+          status?: string
+        }
+        Update: {
+          account_id?: string
+          action?: string
+          completed_at?: string | null
+          created_at?: string
+          dispatched_at?: string | null
+          error?: string | null
+          expires_at?: string
+          id?: string
+          payload?: Json
+          related_lead_id?: string | null
+          result?: Json | null
+          status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "extension_commands_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: false
+            referencedRelation: "linkedin_accounts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "extension_commands_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: false
+            referencedRelation: "v_account_today"
+            referencedColumns: ["account_id"]
+          },
+          {
+            foreignKeyName: "extension_commands_related_lead_id_fkey"
+            columns: ["related_lead_id"]
+            isOneToOne: false
+            referencedRelation: "leads"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "extension_commands_related_lead_id_fkey"
+            columns: ["related_lead_id"]
+            isOneToOne: false
+            referencedRelation: "v_lead_pipeline"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       lead_notes: {
         Row: {
           author: string
@@ -883,6 +957,8 @@ export type Database = {
           cal_com_url: string | null
           created_at: string | null
           daily_connection_limit: number | null
+          extension_api_key: string | null
+          extension_last_seen_at: string | null
           fingerprint_json: Json | null
           fingerprint_locked_at: string | null
           id: string
@@ -914,6 +990,8 @@ export type Database = {
           cal_com_url?: string | null
           created_at?: string | null
           daily_connection_limit?: number | null
+          extension_api_key?: string | null
+          extension_last_seen_at?: string | null
           fingerprint_json?: Json | null
           fingerprint_locked_at?: string | null
           id?: string
@@ -945,6 +1023,8 @@ export type Database = {
           cal_com_url?: string | null
           created_at?: string | null
           daily_connection_limit?: number | null
+          extension_api_key?: string | null
+          extension_last_seen_at?: string | null
           fingerprint_json?: Json | null
           fingerprint_locked_at?: string | null
           id?: string

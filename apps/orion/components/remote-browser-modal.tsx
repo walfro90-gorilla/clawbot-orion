@@ -4,6 +4,8 @@ import { useState, useEffect, useRef, useCallback } from "react"
 
 type Phase =
   | "form"                     // collecting email + password (default)
+  | "paste"                    // manual cookie paste mode (fast path)
+  | "pasting"                  // validating + saving the pasted cookie
   | "starting"                 // spawning browser
   | "navigating"               // loading /login
   | "filling"                  // typing creds
@@ -43,6 +45,16 @@ const PHASE_PROGRESS: Record<string, { label: string; pct: number }> = {
   authenticating: { label: "Autenticando…",                   pct: 75 },
   validating:     { label: "Validando sesión…",               pct: 92 },
   verifying_2fa:  { label: "Verificando código de seguridad…", pct: 80 },
+  pasting:        { label: "Validando cookie pegada…",         pct: 70 },
+}
+
+const PASTE_ERROR_LABEL: Record<string, string> = {
+  invalid_format:    "El valor pegado no parece una cookie válida.",
+  validation_failed: "LinkedIn rechazó la cookie. Verifica que copiaste el valor completo.",
+  redirect_loop:     "LinkedIn rechazó la cookie con redirect loop. Cópiala de nuevo.",
+  not_authenticated: "La cookie no permite acceder al feed.",
+  cookie_too_short:  "La cookie pegada está incompleta — copia el valor completo.",
+  validator_error:   "Error técnico validando la cookie. Reintenta.",
 }
 
 const ERROR_LABEL: Record<string, string> = {
@@ -70,6 +82,7 @@ export function RemoteBrowserModal({ accountId, accountLabel, onClose, onSuccess
   const [email,     setEmail]     = useState("")
   const [password,  setPassword]  = useState("")
   const [twoFa,     setTwoFa]     = useState("")
+  const [pasteValue, setPasteValue] = useState("")
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [errorMsg,  setErrorMsg]  = useState<string | null>(null)
   const [frameTs,   setFrameTs]   = useState(0)  // forces img reload during streaming
@@ -235,6 +248,39 @@ export function RemoteBrowserModal({ accountId, accountLabel, onClose, onSuccess
     }
   }, [accountId])
 
+  // ── Manual paste flow — fast path for users who can extract their cookie ──
+  // Architecture note: this bypasses the remote browser entirely. The cookie
+  // is validated server-side against the account's proxy+fingerprint, so the
+  // session is still bound to the right egress IP at write time. After the
+  // first request from a worker (also via the proxy), LinkedIn re-anchors the
+  // session to that proxy IP and the original capture IP becomes irrelevant.
+  const handlePasteSubmit = useCallback(async (e: React.FormEvent) => {
+    e.preventDefault()
+    const v = pasteValue.trim()
+    if (!v) return
+    setPhase("pasting")
+    setErrorMsg(null)
+    try {
+      const res = await fetch(`/api/accounts/${accountId}/cookie/paste`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ li_at: v }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (res.ok) {
+        setPhase("success")
+        onSuccess()
+        return
+      }
+      const reasonKey = data.reason ?? data.error ?? "validator_error"
+      setPhase("validation_failed")
+      setErrorMsg(PASTE_ERROR_LABEL[reasonKey] ?? data.error ?? "Error validando")
+    } catch (err: any) {
+      setPhase("error")
+      setErrorMsg(err.message ?? "Error de red")
+    }
+  }, [pasteValue, accountId, onSuccess])
+
   // ── Streaming: frame refresh ────────────────────────────────────────────────
   useEffect(() => {
     if (phase !== "google_streaming") return
@@ -295,6 +341,7 @@ export function RemoteBrowserModal({ accountId, accountLabel, onClose, onSuccess
     sessionRef.current = null
     setErrorMsg(null)
     setTwoFa("")
+    setPasteValue("")
   }, [])
 
   const progress = PHASE_PROGRESS[phase]
@@ -376,6 +423,82 @@ export function RemoteBrowserModal({ accountId, accountLabel, onClose, onSuccess
                 <p className="text-[10px] text-gray-600 text-center leading-relaxed px-2">
                   El servidor inicia sesión por ti usando el proxy de tu cuenta para que LinkedIn
                   emita la cookie ligada a la IP correcta.
+                </p>
+              </div>
+
+              {/* Fast-path: paste cookie manually */}
+              <div className="pt-2 text-center">
+                <button
+                  type="button"
+                  onClick={() => { setErrorMsg(null); setPhase("paste") }}
+                  className="text-xs text-[#70b5f9] hover:text-[#9dcaff] hover:underline transition-colors"
+                >
+                  ⚡ Ya tengo la cookie — pegarla directamente
+                </button>
+              </div>
+            </form>
+          )}
+
+          {/* ── Manual paste view ───────────────────────────────────── */}
+          {phase === "paste" && (
+            <form onSubmit={handlePasteSubmit} className="space-y-4">
+              <div className="space-y-2">
+                <h3 className="text-sm font-semibold text-gray-100">⚡ Pegar cookie</h3>
+                <p className="text-xs text-gray-400 leading-relaxed">
+                  Si ya estás logueado en LinkedIn en tu browser, este es el camino más rápido.
+                </p>
+              </div>
+
+              <details className="bg-gray-900/60 border border-gray-800 rounded-md text-xs">
+                <summary className="cursor-pointer px-3 py-2 text-gray-300 hover:text-gray-100 font-medium">
+                  ¿Cómo encuentro mi cookie <code className="bg-gray-800 px-1 rounded">li_at</code>?
+                </summary>
+                <ol className="px-3 pb-3 pt-1 space-y-1 text-gray-400 list-decimal list-inside leading-relaxed">
+                  <li>Abre <code className="bg-gray-800 px-1 rounded">linkedin.com</code> en tu browser (logueado).</li>
+                  <li>Presiona <kbd className="bg-gray-800 px-1.5 py-0.5 rounded border border-gray-700">F12</kbd> → tab <strong>Application</strong>.</li>
+                  <li>En la izquierda: <strong>Cookies</strong> → <strong>linkedin.com</strong>.</li>
+                  <li>Busca la fila <code className="bg-gray-800 px-1 rounded">li_at</code>, doble-click en <strong>Value</strong>, copia.</li>
+                  <li>Pégalo abajo. Empieza con <code className="bg-gray-800 px-1 rounded">AQED</code>.</li>
+                </ol>
+              </details>
+
+              <label className="block">
+                <span className="block text-xs text-gray-300 mb-1.5 font-medium">Valor de la cookie</span>
+                <textarea
+                  value={pasteValue}
+                  onChange={e => setPasteValue(e.target.value)}
+                  required
+                  rows={4}
+                  autoFocus
+                  spellCheck={false}
+                  placeholder="AQEDARxtQb8De-KDAAABnidItHgAAA..."
+                  className="w-full px-3 py-2.5 bg-gray-900 border border-gray-700 rounded-md text-gray-50 text-xs font-mono break-all focus:outline-none focus:border-[#70b5f9] focus:ring-1 focus:ring-[#70b5f9] transition-colors resize-none"
+                />
+                <span className="block mt-1 text-[10px] text-gray-600">
+                  Acepta el valor crudo o el formato <code className="bg-gray-800 px-1 rounded">li_at=...</code>
+                </span>
+              </label>
+
+              <button
+                type="submit"
+                disabled={!pasteValue.trim()}
+                className="w-full py-2.5 bg-[#0a66c2] hover:bg-[#004182] disabled:bg-gray-800 disabled:text-gray-500 disabled:cursor-not-allowed text-white text-sm font-semibold rounded-full transition-colors"
+              >
+                Validar y guardar
+              </button>
+
+              <button
+                type="button"
+                onClick={() => { setPasteValue(""); setPhase("form") }}
+                className="w-full text-xs text-gray-500 hover:text-gray-300 transition-colors"
+              >
+                ← Volver al login con credenciales
+              </button>
+
+              <div className="pt-2 border-t border-gray-800/60">
+                <p className="text-[10px] text-gray-600 text-center leading-relaxed px-2">
+                  La cookie se valida pasando por el proxy de <span className="text-[#70b5f9]">{accountLabel}</span>.
+                  Si LinkedIn la acepta ahí, queda guardada y el bot la usa.
                 </p>
               </div>
             </form>

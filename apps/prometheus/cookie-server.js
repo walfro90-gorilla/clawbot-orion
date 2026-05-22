@@ -129,7 +129,7 @@ app.post('/session', async (req, res) => {
   let browser, ctx, page
   try {
     browser = await chromium.launch({
-      headless: true,
+      headless: process.env.HEADLESS === 'true',
       args: [
         '--no-sandbox',
         '--disable-dev-shm-usage',
@@ -423,7 +423,7 @@ app.post('/validate-cookie', async (req, res) => {
   let browser
   try {
     browser = await chromium.launch({
-      headless: true,
+      headless: process.env.HEADLESS === 'true',
       args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled'],
     })
     const ctx = await browser.newContext(
@@ -557,7 +557,7 @@ app.post('/auto-login', async (req, res) => {
   let browser, ctx, page
   try {
     browser = await chromium.launch({
-      headless: true,
+      headless: process.env.HEADLESS === 'true',
       args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled'],
     })
     ctx = await browser.newContext(

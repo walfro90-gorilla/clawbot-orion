@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Orion Sync</title>
+  <style>
+    body {
+      width: 320px;
+      margin: 0;
+      padding: 16px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0a0e1a;
+      color: #e5e7eb;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+    .logo {
+      font-size: 20px;
+      font-weight: 700;
+      background: linear-gradient(135deg, #0a66c2, #4f46e5);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+    .status-connected   { background: #22c55e; box-shadow: 0 0 8px #22c55e; }
+    .status-disconnected { background: #ef4444; }
+    .status-connecting   { background: #eab308; animation: pulse 1s infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.4 } }
+
+    .field {
+      margin-bottom: 12px;
+    }
+    label {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      color: #9ca3af;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    input, select {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 8px 10px;
+      background: #111827;
+      border: 1px solid #374151;
+      border-radius: 6px;
+      color: #f9fafb;
+      font-size: 13px;
+    }
+    input:focus, select:focus {
+      outline: none;
+      border-color: #4f46e5;
+      box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.2);
+    }
+    button {
+      width: 100%;
+      padding: 10px;
+      background: #0a66c2;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    button:hover { background: #084d92; }
+    button.secondary { background: transparent; border: 1px solid #4b5563; color: #d1d5db; }
+    button.secondary:hover { background: #1f2937; }
+
+    .update-banner {
+      display: none;
+      background: linear-gradient(135deg, #fbbf24, #f59e0b);
+      color: #0a0e1a;
+      padding: 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      margin-bottom: 12px;
+      font-weight: 600;
+    }
+    .update-banner a {
+      color: #0a0e1a;
+      text-decoration: underline;
+      display: block;
+      margin-top: 4px;
+      font-size: 11px;
+    }
+    .error-banner {
+      display: none;
+      background: #7f1d1d;
+      color: #fecaca;
+      padding: 8px 10px;
+      border-radius: 6px;
+      font-size: 11px;
+      margin-bottom: 12px;
+      line-height: 1.4;
+    }
+    code {
+      background: #111827;
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-size: 11px;
+    }
+
+    .info {
+      font-size: 11px;
+      color: #6b7280;
+      margin-top: 8px;
+      line-height: 1.4;
+    }
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: #9ca3af;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <span class="logo">Orion Sync</span>
+  </div>
+
+  <div class="update-banner" id="update-banner">
+    🔔 Nueva versión disponible: <span id="update-version"></span>
+    <a id="update-link" target="_blank">Descargar e instalar →</a>
+  </div>
+
+  <div class="status-row" id="status-row">
+    <span class="status-dot status-disconnected" id="status-dot"></span>
+    <span id="status-text">Sin conectar</span>
+  </div>
+
+  <div class="error-banner" id="error-banner">
+    <strong>⚠️ <span id="error-title"></span></strong>
+    <div id="error-detail" style="margin-top: 4px;"></div>
+  </div>
+
+  <hr style="border: none; border-top: 1px solid #1f2937; margin: 12px 0;" />
+
+  <div class="field">
+    <label for="orion-url">Orion URL</label>
+    <input type="url" id="orion-url" placeholder="https://app.tuOrion.com" />
+  </div>
+
+  <div class="field">
+    <label for="api-key">API Key</label>
+    <input type="text" id="api-key" placeholder="orion_sk_..." spellcheck="false" autocomplete="off" />
+    <p class="info" id="apikey-hint">Debe empezar con <code>orion_sk_</code>. Cópiala desde /dashboard/accounts.</p>
+  </div>
+
+  <div class="field">
+    <label for="account-id">Cuenta activa</label>
+    <input type="text" id="account-id" placeholder="UUID de la cuenta LinkedIn" />
+    <p class="info">Genera la API key y obten el ID de la cuenta desde <strong>/dashboard/accounts</strong> de Orion.</p>
+  </div>
+
+  <button id="connect-btn">Conectar</button>
+  <button id="disconnect-btn" class="secondary" style="margin-top: 8px; display: none;">Desconectar</button>
+
+  <p class="info" style="margin-top: 16px;">
+    Mantén Chrome abierto durante tus horas activas. La extension ejecuta las acciones
+    de LinkedIn dentro de tu sesión, sin proxy ni multi-IP detection.
+  </p>
+
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -21,7 +21,8 @@ import StealthPlugin from 'puppeteer-extra-plugin-stealth'
 import dotenv from 'dotenv'
 import { supabase } from './lib/supabase.js'
 import { generateReplyDraft, qualifyInboundMessage, generateInboundDeclineReply, fetchPlaybookExamples } from './ai.js'
-import { getOrCreateAccountFingerprint, contextOptionsFromFingerprint } from './lib/browser.js'
+import { withLeadIdMetadata } from './lib/calUrl.js'
+import { getOrCreateAccountFingerprint, contextOptionsFromFingerprint, launchPersistentBrowserContext } from './lib/browser.js'
 
 dotenv.config()
 chromium.use(StealthPlugin())
@@ -321,7 +322,8 @@ async function generateDraftAsync(lead, inboundMessageText, replyModeOverride = 
       leadProfileData:    fullLead?.profile_data ?? {},
       conversationHistory,
       inboundMessage:     inboundMessageText,
-      calUrl,
+      // Inyecta LEAD_ID para que el cal-webhook pueda mapear el booking al lead
+      calUrl:             withLeadIdMetadata(calUrl, lead.id),
       turnCount,
       aiTone:             campaign?.ai_tone ?? 'casual',
       senderPersona:      campaign?.ai_sender_persona ?? null,
@@ -1318,24 +1320,14 @@ async function run() {
     '--disable-features=IsolateOrigins,site-per-process',
   ]
 
-  const browser = await chromium.launch({
-    headless: true,
-    args: launchArgs,
-  })
-
+  // FASE 1.2: persistent context por cuenta — cookies, storage, history estables
   const fingerprint = await getOrCreateAccountFingerprint(supabase, account.id)
-  const context = await browser.newContext(contextOptionsFromFingerprint(fingerprint, proxy ?? undefined))
-
-  // Inyectar li_at cookie
-  await context.addCookies([{
-    name:     'li_at',
-    value:    account.li_at_cookie,
-    domain:   '.linkedin.com',
-    path:     '/',
-    httpOnly: true,
-    secure:   true,
-    sameSite: 'None',
-  }])
+  const contextOpts = contextOptionsFromFingerprint(fingerprint, proxy ?? undefined)
+  const context = await launchPersistentBrowserContext(chromium, account.id, contextOpts, {
+    args:       launchArgs,
+    liAtCookie: account.li_at_cookie,
+  })
+  const browser = context.browser()
 
   const page = await context.newPage()
 

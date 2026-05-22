@@ -15,7 +15,7 @@ import { chromium } from 'playwright-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import dotenv from 'dotenv';
 import { supabase, logActivity } from './lib/supabase.js';
-import { randomContextOptions, getOrCreateAccountFingerprint, contextOptionsFromFingerprint } from './lib/browser.js';
+import { randomContextOptions, getOrCreateAccountFingerprint, contextOptionsFromFingerprint, launchPersistentBrowserContext } from './lib/browser.js';
 
 dotenv.config();
 chromium.use(StealthPlugin());
@@ -279,22 +279,30 @@ async function run() {
   else       console.log('[SEARCH] ⚠️  No proxy configured — using direct IP (ban risk on datacenter IPs)');
 
   const launchArgs = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled'];
-  const browser = await chromium.launch({ headless: true, args: launchArgs });
 
-  // Use the campaign's account fingerprint when available; fall back to random.
+  // FASE 1.2: persistent context por cuenta cuando hay account_id
   const contextOpts = campaign.linkedin_account_id
     ? contextOptionsFromFingerprint(
         await getOrCreateAccountFingerprint(supabase, campaign.linkedin_account_id),
         proxy ?? undefined,
       )
     : randomContextOptions(proxy ?? undefined);
-  const context = await browser.newContext(contextOpts);
 
-  await context.addCookies([{
-    name: 'li_at', value: LI_AT_COOKIE,
-    domain: '.linkedin.com', path: '/',
-    httpOnly: true, secure: true, sameSite: 'None',
-  }]);
+  let context, browser;
+  if (campaign.linkedin_account_id) {
+    context = await launchPersistentBrowserContext(chromium, campaign.linkedin_account_id, contextOpts, {
+      args:       launchArgs,
+      liAtCookie: LI_AT_COOKIE,
+    });
+    browser = context.browser();
+  } else {
+    browser = await chromium.launch({ headless: process.env.HEADLESS === 'true', args: launchArgs });
+    context = await browser.newContext(contextOpts);
+    await context.addCookies([{
+      name: 'li_at', value: LI_AT_COOKIE, domain: '.linkedin.com',
+      path: '/', httpOnly: true, secure: true, sameSite: 'None',
+    }]);
+  }
 
   const page = await context.newPage();
 

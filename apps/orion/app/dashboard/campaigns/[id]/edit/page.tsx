@@ -179,8 +179,8 @@ export default async function CampaignEditPage({ params }: { params: Promise<{ i
 
             <Section title="Scheduler" icon="🕐" description="Controla cuándo y con qué cadencia se envían invitaciones y se buscan leads.">
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-                <Field label="Invitaciones / día" hint="Límite diario de invites por campaña.">
-                  <input name="daily_invite_target" type="number" min="1" max="20"
+                <Field label="Actividad / día (cap total)" hint="Suma invites + follow-ups/replies. LinkedIn arriesga ban si pasa de ~25 acciones/día en cuentas frías. Recomendado: 15-25.">
+                  <input name="daily_invite_target" type="number" min="1" max="50"
                     defaultValue={c.daily_invite_target ?? 8} className={inp} />
                 </Field>
                 <Field label="Gap entre batches (min)" hint="Mínimo de minutos entre un batch y el siguiente.">

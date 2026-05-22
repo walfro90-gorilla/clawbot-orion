@@ -1,0 +1,11 @@
+{
+  "apps": [{
+    "name": "xvfb",
+    "script": "/usr/bin/Xvfb",
+    "args": ":99 -screen 0 1280x800x24 -ac +extension RANDR -nolisten tcp -dpi 96",
+    "autorestart": true,
+    "max_restarts": 10,
+    "exec_mode": "fork",
+    "interpreter": "none"
+  }]
+}

@@ -3,7 +3,7 @@ import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import dotenv from 'dotenv';
 import { generateMessage } from './ai.js';
 import { supabase, logActivity } from './lib/supabase.js';
-import { randomContextOptions, getOrCreateAccountFingerprint, contextOptionsFromFingerprint } from './lib/browser.js';
+import { randomContextOptions, getOrCreateAccountFingerprint, contextOptionsFromFingerprint, launchPersistentBrowserContext } from './lib/browser.js';
 import { humanClick, readingPause } from './lib/humanize.js';
 
 dotenv.config();
@@ -366,79 +366,60 @@ async function openComposeArea(page, cta) {
       return 'captcha';
     }
 
-    // ── Nuevo comportamiento: enviar SIEMPRE sin nota ─────────────────────────
-    // La nota de conexión fue eliminada del flujo. El primer mensaje real llega
-    // como FU1 (followup.js) después de que el lead acepte la conexión.
-    // Esto reduce la fricción inicial y preserva los mensajes para los FU.
+    // ── Nuevo comportamiento (2026-05-17): enviar CON nota ────────────────────
+    // Razón: la nota crea el thread/conversation server-side al instante, lo cual
+    // permite capturar `linkedin_thread_id` desde el primer momento. Sin nota,
+    // el thread se crea solo cuando el lead responde, y los "silent connects"
+    // (acepta pero nunca responde) caen al bug SPA stale state en FU1.
+    //
+    // El main code (después de openComposeArea) tipea el mensaje y hace clic en
+    // Send. Esta función solo abre la nota y retorna el textarea.
+    //
+    // Si el modal no aparece (LinkedIn ejecutó Quick Connect sin pedir nota),
+    // retornamos 'quick-connect' como fallback — el invite ya está enviado sin
+    // nota, pero al menos no se rompe el flujo.
 
-    // Prioridad 1: clic directo en "Enviar sin nota" si el modal ya lo muestra
-    const sendWithoutBtn = page.getByRole('button', {
-      name: /send without note|enviar sin nota|skip note|omitir nota|send now|enviar ahora/i,
-    }).first();
-    const hasSendWithout = await sendWithoutBtn.isVisible({ timeout: 5000 }).catch(() => false);
-    if (hasSendWithout) {
-      console.log('[CLAWBOT] Modal detectado — haciendo clic en "Enviar sin nota"...');
-      await humanClick(page, sendWithoutBtn);
-      await page.waitForTimeout(randInt(800, 1400));
-      console.log('[CLAWBOT] ✓ Invitación enviada sin nota (modal "Enviar sin nota").');
-      return 'quick-connect';
-    }
-
-    // Prioridad 2: si el modal muestra "Añadir nota", buscar el botón hermano "Enviar sin nota"
+    // Prioridad 1: si el modal ya muestra "Añadir nota", hacer clic para abrir el textarea
     const addNoteBtn = page.getByRole('button', {
       name: /add a note|añadir una nota|añadir nota|add a personalised note|add a personalized note|personalizar|personali[sz]e|con nota|agregar nota|with a note/i,
     }).first();
-    const hasAddNote = await addNoteBtn.isVisible({ timeout: 3000 }).catch(() => false);
+    const hasAddNote = await addNoteBtn.isVisible({ timeout: 5000 }).catch(() => false);
     if (hasAddNote) {
-      // El modal está abierto — buscar "Enviar sin nota" en el mismo contexto
-      const skipBtn = page.getByRole('button', {
-        name: /send without note|enviar sin nota|skip|omitir|send now|enviar ahora/i,
-      }).first();
-      const hasSkip = await skipBtn.isVisible({ timeout: 2000 }).catch(() => false);
-      if (hasSkip) {
-        console.log('[CLAWBOT] Modal con "Añadir nota" — haciendo clic en "Enviar sin nota"...');
-        await humanClick(page, skipBtn);
-        await page.waitForTimeout(randInt(800, 1400));
-        console.log('[CLAWBOT] ✓ Invitación enviada sin nota (modal "Añadir nota" → skip).');
-        return 'quick-connect';
+      console.log('[CLAWBOT] Modal "Añadir nota" detectado — haciendo clic para abrir textarea...');
+      await humanClick(page, addNoteBtn);
+      await page.waitForTimeout(randInt(700, 1200));
+      const ta = page.locator(
+        'textarea#custom-message, textarea[name="message"], textarea[aria-label*="nota" i], textarea[aria-label*="message" i], [contenteditable="true"][aria-label*="nota" i]'
+      ).first();
+      if (await ta.isVisible({ timeout: 3000 }).catch(() => false)) {
+        console.log('[CLAWBOT] ✓ Textarea de nota abierto.');
+        return ta;
       }
-      // Último recurso: cerrar el modal con Escape (invitación no enviada aún)
-      await page.keyboard.press('Escape');
-      await page.waitForTimeout(500);
+      console.warn('[CLAWBOT] ⚠️  "Añadir nota" clickeado pero textarea no encontrado.');
     }
 
-    // Prioridad 3: Shadow DOM con textarea ya visible — cerrar sin escribir
-    const shadowHasTextarea = await page.evaluate(() => {
-      const host = document.querySelector('#interop-outlet, [data-testid="interop-shadowdom"]');
-      const root = host?.shadowRoot;
-      if (!root) return false;
-      return root.querySelectorAll('textarea').length > 0;
-    });
-    if (shadowHasTextarea) {
-      // Buscar y clickear botón de envío sin nota en el shadow DOM
-      const sent = await page.evaluate(() => {
-        const host = document.querySelector('#interop-outlet, [data-testid="interop-shadowdom"]');
-        const root = host?.shadowRoot;
-        if (!root) return false;
-        const btns = Array.from(root.querySelectorAll('button'));
-        const skipBtn = btns.find(b => /sin nota|without note|skip|omitir|send now|enviar ahora/i.test(b.textContent ?? ''))
-        if (skipBtn) { skipBtn.click(); return true; }
-        return false;
-      });
-      if (sent) {
-        await page.waitForTimeout(randInt(800, 1400));
-        console.log('[CLAWBOT] ✓ Invitación enviada sin nota (shadow DOM skip button).');
-        return 'quick-connect';
-      }
+    // Prioridad 2: textarea ya visible directamente (algunas variantes del modal lo muestran sin paso intermedio)
+    const directTa = page.locator(
+      'textarea#custom-message, textarea[name="message"], textarea[aria-label*="nota" i]'
+    ).first();
+    if (await directTa.isVisible({ timeout: 1500 }).catch(() => false)) {
+      console.log('[CLAWBOT] ✓ Textarea de nota visible directamente.');
+      return directTa;
     }
 
-    // Fallback final: si no encontró ningún modal, el quick-connect ya lo envió
+    // Nota: Playwright pierza shadow DOM abiertos automáticamente con selectores
+    // CSS, así que las prioridades 1-2 ya cubren el caso de textarea dentro de
+    // #interop-outlet (shadow root del modal). No hace falta una rama separada.
+
+    // Fallback final: el modal nunca apareció — Quick Connect ya envió la
+    // invitación sin nota. Mejor que abortar: dejamos el invite enviado y
+    // confiamos en inbox.js para hacer backfill del thread_id eventualmente.
     const visibleBtns = await page.evaluate(() => {
       const domBtns = Array.from(document.querySelectorAll('button')).map(b => b.textContent?.trim());
       return [...new Set(domBtns)].filter(t => t && t.length > 0 && t.length < 60);
     });
     console.log('[CLAWBOT] Visible buttons after Connect click:', JSON.stringify(visibleBtns));
-    console.warn('[CLAWBOT] ⚠️  Quick Connect — invitation sent WITHOUT note (no modal found).');
+    console.warn('[CLAWBOT] ⚠️  Quick Connect — invitation sent WITHOUT note (no modal found, no thread_id capturable).');
     return 'quick-connect';
   }
 
@@ -483,11 +464,9 @@ async function run() {
   if (proxy) console.log(`[CLAWBOT] Using proxy: ${proxy.server} (user=${proxy.username ?? 'none'})`);
   else       console.log('[CLAWBOT] ⚠️  No proxy configured — using direct IP (ban risk on datacenter IPs)');
 
-  const browser = await chromium.launch({ headless: true, args: launchArgs });
-
-  // Fingerprint stability: use the account's stored UA+viewport so it matches
-  // what cookie-server used when capturing li_at. Falls back to a fresh random
-  // fingerprint only when ACCOUNT_ID isn't propagated (legacy single-account).
+  // FASE 1.2: persistent browser context por cuenta (cookies + storage + history
+  // estables entre runs). LinkedIn ve "Chrome con historia" en lugar de "Chrome
+  // fresco cada invite" → bot signal eliminado.
   const ACCOUNT_ID = process.env.ACCOUNT_ID || null;
   const contextOpts = ACCOUNT_ID
     ? contextOptionsFromFingerprint(
@@ -495,19 +474,54 @@ async function run() {
         proxy ?? undefined,
       )
     : randomContextOptions(proxy ?? undefined);
-  const context = await browser.newContext(contextOpts);
 
-  await context.addCookies([{
-    name: 'li_at',
-    value: LI_AT_COOKIE,
-    domain: '.linkedin.com',
-    path: '/',
-    httpOnly: true,
-    secure: true,
-    sameSite: 'None',
-  }]);
+  let context, browser;
+  if (ACCOUNT_ID) {
+    // Persistent context: profile vive en /var/lib/orion/profiles/<account_id>/
+    context = await launchPersistentBrowserContext(chromium, ACCOUNT_ID, contextOpts, {
+      args:        launchArgs,
+      liAtCookie:  LI_AT_COOKIE,  // se inyecta/actualiza en el profile
+    });
+    browser = context.browser();  // referencia para .close() al final
+  } else {
+    // Fallback legacy: launch ephemeral (sin profile) cuando no hay ACCOUNT_ID
+    browser = await chromium.launch({ headless: process.env.HEADLESS === 'true', args: launchArgs });
+    context = await browser.newContext(contextOpts);
+    await context.addCookies([{
+      name: 'li_at', value: LI_AT_COOKIE, domain: '.linkedin.com',
+      path: '/', httpOnly: true, secure: true, sameSite: 'None',
+    }]);
+  }
 
   const page = await context.newPage();
+
+  // ── 1a. Network listener — capture thread_id from invite-with-note response ──
+  // Cuando enviamos un invite CON nota, LinkedIn responde con el URN del thread/
+  // conversación. Lo capturamos aquí para guardarlo en DB y evitar el bug SPA
+  // stale state en FU1. URLs típicas:
+  //   POST /voyager/api/voyagerRelationshipsDashMemberRelationships?action=verifyQuotaAndCreateV2
+  //   POST /voyager/api/relationships/dash/relationships
+  // Y la respuesta incluye URNs como:
+  //   urn:li:fsd_invitation:(...,2-<base64-thread-id>)
+  //   urn:li:msg_conversation:(...,2-<base64-thread-id>)
+  const capturedThreadIds = [];
+  page.on('response', async (res) => {
+    const url = res.url();
+    // Filtrar a APIs de relationships/invitations/messaging
+    if (!/voyager\/api\/(voyagerRelationshipsDash|relationships|messaging|voyagerMessagingDash)/i.test(url)) return;
+    if (!res.ok()) return;
+    try {
+      const body = await res.text();
+      // Buscar URNs de conversación (formato 2-<base64>) — son los thread_ids usables
+      // por followup.js para construir /messaging/thread/<id>/
+      const matches = [...body.matchAll(/\b(2-[A-Za-z0-9_-]{20,})\b/g)];
+      for (const m of matches) {
+        if (!capturedThreadIds.includes(m[1])) capturedThreadIds.push(m[1]);
+      }
+    } catch { /* ignore — some responses are streamed/empty */ }
+  });
+  // Hacer accesible para el código de envío
+  page.__capturedThreadIds = capturedThreadIds;
 
   // ── 1b. Session warmup — visit feed before going to profile ──────────────
   // A real user never opens LinkedIn and goes directly to a profile URL.
@@ -1031,6 +1045,24 @@ async function run() {
 
   if (confirmed) {
     console.log('[CLAWBOT] ✓ SENT — stage5_sent.png saved.');
+
+    // Esperar un poco más para que las APIs de relationships terminen y
+    // el listener capture el URN del thread.
+    await page.waitForTimeout(randInt(1500, 2500));
+
+    // Output captured thread_ids para que batch.js los parsee y guarde en DB.
+    // Solo aplica si fue invite WITH note (cta.type === 'connect'). Para mensajes
+    // regulares o InMail, el thread_id no aplica del mismo modo.
+    if (cta.type === 'connect' && page.__capturedThreadIds && page.__capturedThreadIds.length > 0) {
+      // Tomamos el thread_id más largo (suele ser el más específico — algunos
+      // matches son URN parciales)
+      const sorted = [...page.__capturedThreadIds].sort((a, b) => b.length - a.length);
+      const threadId = sorted[0];
+      console.log(`[CLAWBOT] 📌 THREAD_ID_CAPTURED=${threadId}`);
+    } else if (cta.type === 'connect') {
+      console.log('[CLAWBOT] ⚠️  No thread_id captured from network — inbox.js intentará backfill.');
+    }
+
     if (LEAD_ID) {
       await supabase.from('leads').update({ sent_at: new Date().toISOString() }).eq('id', LEAD_ID);
       await logActivity(null, LEAD_ID, 'invite_sent', 'success', {

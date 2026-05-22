@@ -126,8 +126,21 @@ function parseOutcome(lines, exitCode) {
   return 'unknown';
 }
 
+// ── Parse THREAD_ID_CAPTURED line from worker output ─────────────────────
+// worker.js emite `[CLAWBOT] 📌 THREAD_ID_CAPTURED=<id>` cuando logra capturar
+// el thread/conversation URN tras enviar invite-with-note. Lo guardamos en
+// conversations.linkedin_thread_id para que followup.js use FAST PATH y evite
+// el bug SPA stale state al mandar FU1.
+function parseThreadId(lines) {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = lines[i].match(/THREAD_ID_CAPTURED=([A-Za-z0-9_-]+)/);
+    if (m) return m[1];
+  }
+  return null;
+}
+
 // ── Record outbound message in conversation_events ────────────────────────
-async function recordOutbound(leadId, accountId) {
+async function recordOutbound(leadId, accountId, threadId) {
   // Fetch the AI message that was sent to this lead
   const { data: lead } = await supabase
     .from('leads')
@@ -138,18 +151,34 @@ async function recordOutbound(leadId, accountId) {
   const messageText = lead?.ai_message
   if (!messageText) return // no message text to record
 
-  // Upsert conversation record (creates if not exists)
+  // Upsert conversation record (creates if not exists).
+  // Si capturamos thread_id en este run, lo guardamos aquí. Si no, dejamos
+  // que inbox.js lo backfille luego cuando el convo aparezca en /messaging/.
+  const upsertPayload = {
+    lead_id:             leadId,
+    linkedin_account_id: accountId,
+    status:              'initiated',
+  }
+  if (threadId) upsertPayload.linkedin_thread_id = threadId
+
   const { data: conv } = await supabase
     .from('conversations')
-    .upsert({
-      lead_id:             leadId,
-      linkedin_account_id: accountId,
-      status:              'initiated',
-    }, { onConflict: 'lead_id' })
-    .select('id')
+    .upsert(upsertPayload, { onConflict: 'lead_id' })
+    .select('id, linkedin_thread_id')
     .single()
 
   if (!conv?.id) return
+
+  // Si la convo ya existía pero sin thread_id y ahora sí lo tenemos, actualizar.
+  if (threadId && !conv.linkedin_thread_id) {
+    await supabase.from('conversations')
+      .update({ linkedin_thread_id: threadId })
+      .eq('id', conv.id)
+  }
+
+  if (threadId) {
+    console.log(`[BATCH] 📌 thread_id guardado para lead ${leadId.slice(0, 8)}: ${threadId.slice(0, 24)}...`)
+  }
 
   await supabase.from('conversation_events').insert({
     conversation_id: conv.id,
@@ -343,7 +372,8 @@ async function run() {
 
     // Record outbound message in conversation history
     if (outcome === 'sent' && accountId) {
-      await recordOutbound(lead.id, accountId)
+      const threadId = parseThreadId(lines)
+      await recordOutbound(lead.id, accountId, threadId)
     }
 
     if (shouldStop) {

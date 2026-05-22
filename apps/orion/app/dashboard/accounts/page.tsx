@@ -4,6 +4,7 @@ import { redirect } from "next/navigation"
 import type { AccountToday } from "@clawbot/db-types"
 import { ProxyChecker }     from "@/components/proxy-checker"
 import { CookieRefreshBtn } from "@/components/cookie-refresh-btn"
+import { ExtensionPanel }   from "@/components/extension-panel"
 
 async function updateAccount(formData: FormData) {
   "use server"
@@ -228,6 +229,14 @@ export default async function AccountsPage() {
                   }}
                 />
               </div>
+
+              {/* Extension panel — Sub-Fase 2.6 */}
+              <ExtensionPanel
+                accountId={a.account_id ?? ""}
+                accountLabel={a.label ?? "cuenta"}
+                initialApiKey={(raw as any)?.extension_api_key ?? null}
+                downloadBaseUrl="http://209.50.63.149/download"
+              />
 
               {/* Edit form */}
               <details className="group">

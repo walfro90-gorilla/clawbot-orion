@@ -215,22 +215,46 @@ export default async function DashboardPage({
       year: "numeric", month: "2-digit", day: "2-digit",
     }).format(d)  // "2026-05-17"
   })()
-  // Convertir CDMX date → rango UTC [00:00 CDMX, 24:00 CDMX] como ISO
-  const todayStartUtc = `${todayCDMX}T06:00:00.000Z`  // CDMX = UTC-6
-  const todayEndUtc   = `${todayCDMX}T30:00:00.000Z`  // = next day 06:00 UTC
+  const yesterdayCDMX = (() => {
+    const d = new Date(Date.now() - 86_400_000)
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/Mexico_City",
+      year: "numeric", month: "2-digit", day: "2-digit",
+    }).format(d)
+  })()
+  // Convertir CDMX date → rango UTC [00:00 CDMX, 24:00 CDMX] como ISO válido.
+  // CDMX = UTC-6, así que 00:00 CDMX = 06:00 UTC del mismo día,
+  // y 24:00 CDMX = 06:00 UTC del DÍA SIGUIENTE.
+  const addOneDayIso = (yyyyMmDd: string) => {
+    const [y, m, d] = yyyyMmDd.split("-").map(Number)
+    const next = new Date(Date.UTC(y, m - 1, d + 1))
+    return next.toISOString().slice(0, 10)  // "YYYY-MM-DD"
+  }
+  const todayStartUtc     = `${todayCDMX}T06:00:00.000Z`
+  const todayEndUtc       = `${addOneDayIso(todayCDMX)}T06:00:00.000Z`
+  const yesterdayStartUtc = `${yesterdayCDMX}T06:00:00.000Z`
+  const yesterdayEndUtc   = `${addOneDayIso(yesterdayCDMX)}T06:00:00.000Z`
+  const last14StartUtc    = new Date(Date.now() - 14 * 86_400_000).toISOString()
 
   const acctFilter = (q: any) => (isRestricted && linkedAccountId)
     ? q.eq("linkedin_account_id", linkedAccountId)
     : q
 
-  const baseConvQ = admin.from("conversations").select("id").then(r => r.data?.map((c: any) => c.id) ?? [])
-  const accountConvIds = await (async () => {
-    const q = admin.from("conversations").select("id, linkedin_account_id")
-    const { data } = isRestricted && linkedAccountId
-      ? await q.eq("linkedin_account_id", linkedAccountId)
-      : await q
-    return (data ?? []).map((c: any) => c.id)
-  })()
+  // Helper: cuenta eventos hoy filtrando por cuenta vía FK join (sin .in con cientos de UUIDs).
+  // Si god_admin (no restricted), no se aplica filtro por cuenta.
+  const countEventsToday = (build: (q: any) => any) => {
+    let q: any = admin.from("conversation_events").select(
+      isRestricted && linkedAccountId
+        ? "id, conversations!inner(linkedin_account_id)"
+        : "id",
+      { count: "exact", head: true },
+    )
+    q = q.gte("sent_at", todayStartUtc).lt("sent_at", todayEndUtc)
+    if (isRestricted && linkedAccountId) {
+      q = q.eq("conversations.linkedin_account_id", linkedAccountId)
+    }
+    return build(q)
+  }
 
   const [
     invitesToday,
@@ -241,31 +265,11 @@ export default async function DashboardPage({
     activeConvosCount,
     pendingInvitesCount,
   ] = await Promise.all([
-    admin.from("conversation_events")
-      .select("id", { count: "exact", head: true })
-      .eq("event_type", "invite_sent")
-      .gte("sent_at", todayStartUtc).lt("sent_at", todayEndUtc)
-      .in("conversation_id", accountConvIds.length ? accountConvIds : ["00000000-0000-0000-0000-000000000000"]),
-    admin.from("conversation_events")
-      .select("id", { count: "exact", head: true })
-      .like("event_type", "follow_up_sent%")
-      .gte("sent_at", todayStartUtc).lt("sent_at", todayEndUtc)
-      .in("conversation_id", accountConvIds.length ? accountConvIds : ["00000000-0000-0000-0000-000000000000"]),
-    admin.from("conversation_events")
-      .select("id", { count: "exact", head: true })
-      .eq("event_type", "reply_sent").eq("sent_via", "orion_auto")
-      .gte("sent_at", todayStartUtc).lt("sent_at", todayEndUtc)
-      .in("conversation_id", accountConvIds.length ? accountConvIds : ["00000000-0000-0000-0000-000000000000"]),
-    admin.from("conversation_events")
-      .select("id", { count: "exact", head: true })
-      .eq("event_type", "reply_sent").eq("sent_via", "orion_manual")
-      .gte("sent_at", todayStartUtc).lt("sent_at", todayEndUtc)
-      .in("conversation_id", accountConvIds.length ? accountConvIds : ["00000000-0000-0000-0000-000000000000"]),
-    admin.from("conversation_events")
-      .select("id", { count: "exact", head: true })
-      .eq("event_type", "reply_received")
-      .gte("sent_at", todayStartUtc).lt("sent_at", todayEndUtc)
-      .in("conversation_id", accountConvIds.length ? accountConvIds : ["00000000-0000-0000-0000-000000000000"]),
+    countEventsToday(q => q.eq("event_type", "invite_sent")),
+    countEventsToday(q => q.like("event_type", "follow_up_sent%")),
+    countEventsToday(q => q.eq("event_type", "reply_sent").eq("sent_via", "orion_auto")),
+    countEventsToday(q => q.eq("event_type", "reply_sent").eq("sent_via", "orion_manual")),
+    countEventsToday(q => q.eq("event_type", "reply_received")),
     acctFilter(admin.from("conversations").select("id", { count: "exact", head: true }))
       .gt("conversation_turn", 0),
     (async () => {
@@ -294,6 +298,91 @@ export default async function DashboardPage({
     activeConvos:   activeConvosCount.count ?? 0,
     pendingQueue:   pendingInvitesCount.count ?? 0,
   }
+
+  // ── Hero gamificado: invites de ayer + streak por cuenta ─────────────────
+  // invites_sent_today ya viene de v_account_today.
+  // Aquí calculamos: invites ayer (comparación) + activeDays últimos 14d (streak).
+  const heroAccountIds = (await (async () => {
+    const cq = admin.from("conversations").select("linkedin_account_id")
+    const { data } = isRestricted && linkedAccountId
+      ? await cq.eq("linkedin_account_id", linkedAccountId)
+      : await cq
+    return Array.from(new Set((data ?? []).map((c: any) => c.linkedin_account_id).filter(Boolean)))
+  })()) as string[]
+
+  const heroByAccount: Record<string, { yesterday: number; activeDays: Set<string> }> = {}
+  for (const id of heroAccountIds) heroByAccount[id] = { yesterday: 0, activeDays: new Set() }
+
+  if (heroAccountIds.length > 0) {
+    // Convos del usuario para mapear event → cuenta (sin .in con cientos de UUIDs)
+    const { data: convoMap } = await admin
+      .from("conversations")
+      .select("id, linkedin_account_id")
+      .in("linkedin_account_id", heroAccountIds)
+    const convoToAcct = new Map<string, string>()
+    for (const c of convoMap ?? []) convoToAcct.set((c as any).id, (c as any).linkedin_account_id)
+
+    // Invite events últimos 14d para esas convos
+    const { data: inviteEvents } = await admin
+      .from("conversation_events")
+      .select("conversation_id, sent_at")
+      .eq("event_type", "invite_sent")
+      .gte("sent_at", last14StartUtc)
+      .order("sent_at", { ascending: false })
+      .limit(1000)
+
+    for (const ev of inviteEvents ?? []) {
+      const acctId = convoToAcct.get((ev as any).conversation_id)
+      if (!acctId) continue
+      const bucket = heroByAccount[acctId]
+      if (!bucket) continue
+      const sentAt = (ev as any).sent_at as string
+      // Día CDMX
+      const dayCDMX = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "America/Mexico_City", year: "numeric", month: "2-digit", day: "2-digit",
+      }).format(new Date(sentAt))
+      bucket.activeDays.add(dayCDMX)
+      if (sentAt >= yesterdayStartUtc && sentAt < yesterdayEndUtc) bucket.yesterday++
+    }
+  }
+
+  // Streak = días consecutivos hacia atrás desde HOY (o desde AYER si hoy=0)
+  function calcStreak(activeDays: Set<string>): number {
+    let streak = 0
+    let cursor = new Date()
+    // Si hoy aún no tiene actividad, empezar a contar desde ayer
+    const todayKey = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/Mexico_City", year: "numeric", month: "2-digit", day: "2-digit",
+    }).format(cursor)
+    if (!activeDays.has(todayKey)) cursor = new Date(cursor.getTime() - 86_400_000)
+    for (let i = 0; i < 30; i++) {
+      const k = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "America/Mexico_City", year: "numeric", month: "2-digit", day: "2-digit",
+      }).format(cursor)
+      if (activeDays.has(k)) { streak++; cursor = new Date(cursor.getTime() - 86_400_000) }
+      else break
+    }
+    return streak
+  }
+
+  const heroCards = ((accounts as AccountToday[]) ?? []).map(a => {
+    const bucket = heroByAccount[a.account_id ?? ""] ?? { yesterday: 0, activeDays: new Set<string>() }
+    const todayInvites = (a.invites_sent_today ?? 0)
+    const target = a.daily_connection_limit ?? 0
+    const pctTarget = target > 0 ? Math.min(Math.round(todayInvites / target * 100), 100) : 0
+    return {
+      accountId: a.account_id ?? "unknown",
+      label: a.label ?? "Cuenta",
+      status: a.status,
+      invitesToday: todayInvites,
+      messagesToday: a.messages_sent_today ?? 0,
+      remaining: a.remaining_quota ?? 0,
+      target,
+      pctTarget,
+      yesterday: bucket.yesterday,
+      streak: calcStreak(bucket.activeDays),
+    }
+  })
 
   const stats    = campaigns as CampaignStats[] ?? []
   const accs     = accounts  as AccountToday[]  ?? []
@@ -460,71 +549,50 @@ export default async function DashboardPage({
         </section>
       )}
 
-      {/* ── Resumen del día (hoy CDMX) ─────────────────────────────────────────── */}
-      <section className="space-y-2">
-        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider flex items-center gap-2">
-          📊 Resumen del día
-          <span className="text-xs font-normal normal-case text-gray-500">
-            {new Date().toLocaleDateString("es-MX", { timeZone: "America/Mexico_City", weekday: "long", day: "numeric", month: "long" })}
-          </span>
-        </h2>
-        <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
-          <div className="bg-gradient-to-br from-blue-950/60 to-blue-900/30 border border-blue-500/30 rounded-xl p-3">
-            <div className="text-blue-300 text-[10px] uppercase tracking-wider font-bold">Invites</div>
-            <div className="text-blue-100 text-3xl font-bold leading-tight mt-1">{todaySummary.invites}</div>
-            <div className="text-blue-300/60 text-[10px] mt-0.5">enviadas hoy</div>
+      {/* ── HOY · Hero gamificado por cuenta ────────────────────────────────── */}
+      {heroCards.length > 0 && (
+        <section className="space-y-3">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider flex items-center gap-2">
+              🎯 Hoy
+              <span className="text-xs font-normal normal-case text-gray-500">
+                {new Date().toLocaleDateString("es-MX", { timeZone: "America/Mexico_City", weekday: "long", day: "numeric", month: "long" })}
+              </span>
+            </h2>
+            <span className="text-[10px] text-gray-600">
+              Meta = límite diario de la cuenta · 🔥 = racha de días seguidos enviando
+            </span>
           </div>
-          <div className="bg-gradient-to-br from-indigo-950/60 to-indigo-900/30 border border-indigo-500/30 rounded-xl p-3">
-            <div className="text-indigo-300 text-[10px] uppercase tracking-wider font-bold">Follow-ups</div>
-            <div className="text-indigo-100 text-3xl font-bold leading-tight mt-1">{todaySummary.fus}</div>
-            <div className="text-indigo-300/60 text-[10px] mt-0.5">FU1-FU5 hoy</div>
+          <div className={`grid gap-3 ${heroCards.length === 1 ? "grid-cols-1" : "grid-cols-1 md:grid-cols-2"}`}>
+            {heroCards.map(h => <TodayHeroCard key={h.accountId} hero={h} />)}
           </div>
-          <div className="bg-gradient-to-br from-purple-950/60 to-purple-900/30 border border-purple-500/30 rounded-xl p-3">
-            <div className="text-purple-300 text-[10px] uppercase tracking-wider font-bold">Replies in</div>
-            <div className="text-purple-100 text-3xl font-bold leading-tight mt-1">{todaySummary.repliesIn}</div>
-            <div className="text-purple-300/60 text-[10px] mt-0.5">leads que respondieron</div>
-          </div>
-          <div className="bg-gradient-to-br from-green-950/60 to-green-900/30 border border-green-500/30 rounded-xl p-3">
-            <div className="text-green-300 text-[10px] uppercase tracking-wider font-bold">🤖 Auto-reply</div>
-            <div className="text-green-100 text-3xl font-bold leading-tight mt-1">{todaySummary.autoReplies}</div>
-            <div className="text-green-300/60 text-[10px] mt-0.5">{todaySummary.manualReplies > 0 ? `+ ${todaySummary.manualReplies} manuales` : "respuestas Gemini"}</div>
-          </div>
-          <div className="bg-gradient-to-br from-cyan-950/60 to-cyan-900/30 border border-cyan-500/30 rounded-xl p-3">
-            <div className="text-cyan-300 text-[10px] uppercase tracking-wider font-bold">💬 Activas</div>
-            <div className="text-cyan-100 text-3xl font-bold leading-tight mt-1">{todaySummary.activeConvos}</div>
-            <div className="text-cyan-300/60 text-[10px] mt-0.5">conversaciones turn&gt;0</div>
-          </div>
-          <div className="bg-gradient-to-br from-yellow-950/60 to-yellow-900/30 border border-yellow-500/30 rounded-xl p-3">
-            <div className="text-yellow-300 text-[10px] uppercase tracking-wider font-bold">⏳ En cola</div>
-            <div className="text-yellow-100 text-3xl font-bold leading-tight mt-1">{todaySummary.pendingQueue}</div>
-            <div className="text-yellow-300/60 text-[10px] mt-0.5">invites pending</div>
-          </div>
-        </div>
-      </section>
 
-      {/* ── KPI cards ─────────────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <KpiCard
-          label={range ? "Leads nuevos" : "Total Leads"}
-          value={displayTotals.leads}    color="blue"   icon="👥"
-          subtitle={range ? "creados en período" : undefined}
-        />
-        <KpiCard
-          label="Invitados"
-          value={displayTotals.invited}  color="indigo" icon="✉️"
-          subtitle={range ? "enviadas en período" : undefined}
-        />
-        <KpiCard
-          label="Respondieron"
-          value={displayTotals.replied}  color="orange" icon="📩"
-          subtitle={range ? "respuestas recibidas" : undefined}
-        />
-        <KpiCard
-          label="Reuniones"
-          value={displayTotals.meetings} color="green"  icon="📅"
-          subtitle={range ? "agendadas en período" : undefined}
-        />
-      </div>
+          {/* Mini-KPIs secundarios (fuera del hero, datos agregados) */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+            <MiniMetric icon="📨" label="Follow-ups hoy"     value={todaySummary.fus}          tone="indigo" />
+            <MiniMetric icon="💬" label="Respuestas recibidas" value={todaySummary.repliesIn}  tone="purple" />
+            <MiniMetric icon="🤖" label="Auto-replies Gemini" value={todaySummary.autoReplies} tone="green"
+              hint={todaySummary.manualReplies > 0 ? `+ ${todaySummary.manualReplies} manuales` : undefined} />
+            <MiniMetric icon="🗣️" label="Conversaciones activas" value={todaySummary.activeConvos} tone="cyan"
+              hint="≥1 turno con respuesta" />
+          </div>
+        </section>
+      )}
+
+      {/* ── Cohort del período (solo si hay filtro de fecha) ───────────────── */}
+      {dateRange && (
+        <section className="space-y-2">
+          <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">
+            📈 Cohort · {rangeLabel(range, spFrom, spTo)}
+          </h2>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            <KpiCard label="Leads nuevos"  value={displayTotals.leads}    color="blue"   icon="👥" subtitle="creados en período" />
+            <KpiCard label="Invitados"     value={displayTotals.invited}  color="indigo" icon="✉️" subtitle="enviadas en período" />
+            <KpiCard label="Respondieron"  value={displayTotals.replied}  color="orange" icon="📩" subtitle="respuestas recibidas" />
+            <KpiCard label="Reuniones"     value={displayTotals.meetings} color="green"  icon="📅" subtitle="agendadas en período" />
+          </div>
+        </section>
+      )}
 
       {/* ── Pipeline Funnel ──────────────────────────────────────────────────── */}
       <PipelineFunnel
@@ -718,6 +786,120 @@ function CookieHealthCard({ account }: { account: any }) {
   )
 }
 
+// ── Today hero card (gamificado por cuenta) ────────────────────────────────
+
+const STATUS_STYLE: Record<string, { dot: string; label: string; text: string }> = {
+  active:       { dot: "bg-green-400",  label: "Activa",       text: "text-green-400"  },
+  rate_limited: { dot: "bg-yellow-400", label: "Rate-limited", text: "text-yellow-400" },
+  banned:       { dot: "bg-red-500",    label: "Baneada",      text: "text-red-400"    },
+  disconnected: { dot: "bg-gray-500",   label: "Desconectada", text: "text-gray-400"   },
+}
+
+function TodayHeroCard({ hero }: {
+  hero: {
+    accountId: string; label: string; status: string | null;
+    invitesToday: number; messagesToday: number; remaining: number; target: number;
+    pctTarget: number; yesterday: number; streak: number;
+  }
+}) {
+  const st = STATUS_STYLE[hero.status ?? ""] ?? STATUS_STYLE.disconnected
+  const delta = hero.invitesToday - hero.yesterday
+  const trendColor = delta > 0 ? "text-green-400" : delta < 0 ? "text-red-400" : "text-gray-500"
+  const trendArrow = delta > 0 ? "↑" : delta < 0 ? "↓" : "→"
+  const barColor =
+    hero.pctTarget >= 90 ? "bg-green-500" :
+    hero.pctTarget >= 60 ? "bg-blue-500"  :
+    hero.pctTarget >= 30 ? "bg-indigo-500":
+    "bg-gray-700"
+  const targetReached = hero.target > 0 && hero.invitesToday >= hero.target
+
+  return (
+    <div className="bg-gradient-to-br from-gray-900 to-gray-900/60 border border-gray-800 rounded-2xl p-5 space-y-4">
+      {/* Header */}
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2 min-w-0">
+          <span className={`w-2 h-2 rounded-full shrink-0 ${st.dot}`} />
+          <span className="text-gray-50 font-semibold truncate">{hero.label}</span>
+          <span className={`text-[10px] ${st.text}`}>· {st.label}</span>
+        </div>
+        {hero.streak > 0 && (
+          <span className="text-xs px-2 py-0.5 rounded-full bg-orange-500/15 text-orange-400 border border-orange-500/30 font-bold whitespace-nowrap">
+            🔥 {hero.streak} día{hero.streak === 1 ? "" : "s"} seguidos
+          </span>
+        )}
+      </div>
+
+      {/* Main number + progress vs goal */}
+      <div className="flex items-end justify-between gap-4">
+        <div>
+          <div className="flex items-baseline gap-2">
+            <span className="text-5xl font-bold text-gray-50 leading-none">{hero.invitesToday}</span>
+            <span className="text-sm text-gray-500">/ {hero.target || "?"} invites</span>
+          </div>
+          <div className="mt-2 flex items-center gap-2 text-xs">
+            <span className={trendColor + " font-bold"}>{trendArrow} {Math.abs(delta)}</span>
+            <span className="text-gray-600">vs ayer ({hero.yesterday})</span>
+          </div>
+        </div>
+        {targetReached && (
+          <span className="text-3xl" title="¡Meta del día completada!">🏆</span>
+        )}
+      </div>
+
+      {/* Progress bar */}
+      {hero.target > 0 && (
+        <div className="space-y-1">
+          <div className="w-full bg-gray-800 rounded-full h-2.5 overflow-hidden">
+            <div className={`h-2.5 rounded-full transition-all ${barColor}`} style={{ width: `${hero.pctTarget}%` }} />
+          </div>
+          <div className="flex justify-between text-[10px] text-gray-500">
+            <span>{hero.pctTarget}% de la meta</span>
+            <span>{hero.remaining} restantes</span>
+          </div>
+        </div>
+      )}
+
+      {/* Secondary stats */}
+      <div className="flex gap-4 text-xs text-gray-400 pt-1 border-t border-gray-800/60">
+        <div>
+          <span className="text-gray-50 font-semibold">{hero.messagesToday}</span>
+          <span className="ml-1 text-gray-500">FU/replies</span>
+        </div>
+        <div className="ml-auto">
+          <Link href="/dashboard/accounts" className="text-blue-400 hover:text-blue-300">Ver cuenta →</Link>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Mini metric (secundario) ──────────────────────────────────────────────
+
+function MiniMetric({ icon, label, value, tone, hint }: {
+  icon: string; label: string; value: number; tone: "indigo" | "purple" | "green" | "cyan"; hint?: string
+}) {
+  const tones: Record<string, string> = {
+    indigo: "border-indigo-500/20 hover:border-indigo-500/40",
+    purple: "border-purple-500/20 hover:border-purple-500/40",
+    green:  "border-green-500/20  hover:border-green-500/40",
+    cyan:   "border-cyan-500/20   hover:border-cyan-500/40",
+  }
+  return (
+    <div className={`bg-gray-900/60 border rounded-xl px-3 py-2.5 transition-colors ${tones[tone]}`}>
+      <div className="flex items-center gap-2">
+        <span className="text-base">{icon}</span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-baseline gap-2">
+            <span className="text-xl font-bold text-gray-50 leading-none">{value}</span>
+            {hint && <span className="text-[9px] text-gray-500 truncate">{hint}</span>}
+          </div>
+          <div className="text-[10px] text-gray-500 mt-0.5 truncate">{label}</div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── KPI card ─────────────────────────────────────────────────────────────────
 
 function KpiCard({ label, value, color, icon, subtitle }: {
@@ -806,11 +988,52 @@ function PipelineFunnel({ counts, filtered, filterLabel }: {
   filterLabel?: string
 }) {
   const activeStages = FUNNEL_STAGES.filter(s => s.value !== "dead")
-  // maxVal excluye sub-etapas FM para que las barras principales mantengan proporción
-  const maxVal = Math.max(...activeStages.filter(s => !s.value.startsWith("_fm")).map(s => counts[s.value] ?? 0), 1)
   const dead = counts["dead"] ?? 0
   const disq = counts["disqualified"] ?? 0
   const totalInPipeline = activeStages.reduce((s, st) => s + (counts[st.value] ?? 0), 0)
+
+  // Conversion anclada al cohort de "Invitados": cuántos llegaron a cada etapa.
+  // "En cola" NO entra en el cálculo (no son parte del cohort enviado).
+  // Las sub-etapas FM también se comparan contra Invitados.
+  const invitedBase = (counts["invite_sent"] ?? 0)
+    + (counts["connected"] ?? 0)
+    + (counts["follow_up_sent"] ?? 0) + (counts["follow_up_sent_2"] ?? 0)
+    + (counts["follow_up_sent_3"] ?? 0) + (counts["follow_up_sent_4"] ?? 0)
+    + (counts["follow_up_sent_5"] ?? 0)
+    + (counts["replied"] ?? 0) + (counts["meeting_booked"] ?? 0) + dead
+  // Para la barra: la etapa con más leads define la escala
+  const maxVal = Math.max(...activeStages.filter(s => !s.value.startsWith("_fm")).map(s => counts[s.value] ?? 0), 1)
+
+  // Funnel cohort: cuántos del cohort "invited" llegaron HASTA esta etapa.
+  // Se calcula como suma de la etapa actual + todas las posteriores (las
+  // etapas más avanzadas implican que pasaron por la actual).
+  const stageOrder: Record<string, number> = {
+    "invite_sent": 0, "connected": 1,
+    "follow_up_sent": 2, "follow_up_sent_2": 3, "follow_up_sent_3": 4,
+    "follow_up_sent_4": 5, "follow_up_sent_5": 6,
+    "replied": 7, "meeting_booked": 8,
+  }
+  function cohortReached(stage: string): number {
+    const minIdx = stageOrder[stage]
+    if (minIdx === undefined) return 0
+    let total = 0
+    for (const [s, idx] of Object.entries(stageOrder)) {
+      if (idx >= minIdx) total += (counts[s] ?? 0)
+    }
+    // replied y meeting_booked también cuentan al haber "pasado" por etapas previas
+    return total
+  }
+
+  // Tasas clave (cohort %)
+  const acceptanceRate = invitedBase > 0
+    ? Math.round((cohortReached("connected") / invitedBase) * 100)
+    : 0
+  const responseRate = invitedBase > 0
+    ? Math.round(((counts["replied"] ?? 0) + (counts["meeting_booked"] ?? 0)) / invitedBase * 100)
+    : 0
+  const meetingRate = ((counts["replied"] ?? 0) + (counts["meeting_booked"] ?? 0)) > 0
+    ? Math.round((counts["meeting_booked"] ?? 0) / ((counts["replied"] ?? 0) + (counts["meeting_booked"] ?? 0)) * 100)
+    : 0
 
   return (
     <section className="space-y-3">
@@ -825,17 +1048,32 @@ function PipelineFunnel({ counts, filtered, filterLabel }: {
         </div>
         <Link href="/dashboard/leads" className="text-xs text-blue-400 hover:text-blue-300">Ver todos →</Link>
       </div>
+
+      {/* Tasas clave (gamificación de rendimiento) */}
+      <div className="grid grid-cols-3 gap-2">
+        <RatePill icon="🤝" label="Acceptance" value={acceptanceRate}
+          subtitle={`${cohortReached("connected")} de ${invitedBase} invitados`}
+          benchmarks={{ great: 30, ok: 15 }} />
+        <RatePill icon="💬" label="Response"   value={responseRate}
+          subtitle={`${(counts["replied"] ?? 0) + (counts["meeting_booked"] ?? 0)} respondieron`}
+          benchmarks={{ great: 10, ok: 5 }} />
+        <RatePill icon="📅" label="Meeting"    value={meetingRate}
+          subtitle={`${counts["meeting_booked"] ?? 0} de los que respondieron`}
+          benchmarks={{ great: 40, ok: 20 }} />
+      </div>
+
       <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-2">
-        {activeStages.map((stage, i) => {
-          const val     = counts[stage.value] ?? 0
-          const isFm    = stage.value.startsWith("_fm")
-          // Para las sub-etapas FM, no comparar conversión con la etapa anterior
-          const prev    = (!isFm && i > 0 && !activeStages[i - 1].value.startsWith("_fm"))
-            ? (counts[activeStages[i - 1].value] ?? 0)
+        {activeStages.map((stage) => {
+          const val   = counts[stage.value] ?? 0
+          const isFm  = stage.value.startsWith("_fm")
+          const isQueue = stage.value === "pending"
+          // % cohort: para etapas del funnel (no En cola, no FM), cuántos del
+          // cohort de invitados llegaron a esta etapa o más adelante.
+          const cohortPct = !isFm && !isQueue && invitedBase > 0 && stageOrder[stage.value] !== undefined
+            ? Math.round((cohortReached(stage.value) / invitedBase) * 100)
             : null
-          const pct     = Math.round((val / maxVal) * 100)
-          const conv    = prev !== null && prev > 0 ? Math.round((val / prev) * 100) : null
-          const href    = isFm ? "/dashboard/conversations" : `/dashboard/leads?status=${stage.value}`
+          const pct   = Math.round((val / maxVal) * 100)
+          const href  = isFm ? "/dashboard/conversations" : `/dashboard/leads?status=${stage.value}`
           return (
             <Link key={stage.value} href={href}
               className={`flex items-center gap-3 group hover:bg-gray-800/40 rounded-lg px-2 py-1.5 -mx-2 transition-colors ${isFm ? "ml-4 opacity-80" : ""}`}>
@@ -850,10 +1088,10 @@ function PipelineFunnel({ counts, filtered, filterLabel }: {
                 />
               </div>
               <div className={`w-8 text-right font-bold text-gray-50 shrink-0 ${isFm ? "text-xs" : "text-sm"}`}>{val}</div>
-              <div className="w-12 text-right shrink-0">
-                {conv !== null ? (
-                  <span className={`text-[10px] font-medium ${conv >= 50 ? "text-green-400" : conv >= 20 ? "text-yellow-400" : "text-red-400"}`}>
-                    {conv}%
+              <div className="w-12 text-right shrink-0" title="% del cohort de invitados que llegó a esta etapa">
+                {cohortPct !== null ? (
+                  <span className={`text-[10px] font-medium ${cohortPct >= 30 ? "text-green-400" : cohortPct >= 10 ? "text-yellow-400" : "text-gray-500"}`}>
+                    {cohortPct}%
                   </span>
                 ) : <span className="text-[10px] text-gray-700">—</span>}
               </div>
@@ -872,10 +1110,47 @@ function PipelineFunnel({ counts, filtered, filterLabel }: {
                 🚫 {disq} descalificados
               </Link>
             )}
+            <span className="ml-auto text-[10px] text-gray-700">
+              % = del cohort de {invitedBase} invitados
+            </span>
           </div>
         )}
       </div>
     </section>
+  )
+}
+
+// ── Rate pill (gamificado) ────────────────────────────────────────────────
+
+function RatePill({ icon, label, value, subtitle, benchmarks }: {
+  icon: string; label: string; value: number; subtitle: string;
+  benchmarks: { great: number; ok: number }
+}) {
+  const tier =
+    value >= benchmarks.great ? "great" :
+    value >= benchmarks.ok    ? "ok"    :
+    value > 0                 ? "low"   : "zero"
+  const styles: Record<string, { ring: string; text: string; bg: string; emoji: string }> = {
+    great: { ring: "border-green-500/40",  text: "text-green-400",  bg: "bg-green-500/5",  emoji: "🚀" },
+    ok:    { ring: "border-blue-500/30",   text: "text-blue-400",   bg: "bg-blue-500/5",   emoji: "👍" },
+    low:   { ring: "border-yellow-500/30", text: "text-yellow-400", bg: "bg-yellow-500/5", emoji: "⚠️" },
+    zero:  { ring: "border-gray-700",      text: "text-gray-500",   bg: "bg-gray-900/40",  emoji: "·"  },
+  }
+  const s = styles[tier]
+  return (
+    <div className={`rounded-xl border px-3 py-2.5 ${s.ring} ${s.bg}`}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className="text-sm">{icon}</span>
+          <span className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold truncate">{label}</span>
+        </div>
+        <span className="text-sm">{s.emoji}</span>
+      </div>
+      <div className="flex items-baseline gap-1 mt-0.5">
+        <span className={`text-2xl font-bold ${s.text}`}>{value}%</span>
+      </div>
+      <div className="text-[9px] text-gray-500 truncate">{subtitle}</div>
+    </div>
   )
 }
 

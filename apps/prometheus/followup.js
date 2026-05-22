@@ -25,6 +25,7 @@ import { supabase, logActivity, incrementDaily } from './lib/supabase.js'
 import { getOrCreateAccountFingerprint, contextOptionsFromFingerprint } from './lib/browser.js'
 import { generateFollowUpMessage, fetchPlaybookExamples } from './ai.js'
 import { humanClick, humanType, humanFill, readingPause, varyMessage, humanScroll as humanScrollLib } from './lib/humanize.js'
+import { withLeadIdMetadata } from './lib/calUrl.js'
 
 dotenv.config()
 chromium.use(StealthPlugin())
@@ -1195,7 +1196,7 @@ async function run() {
   const launchArgs = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled']
   if (proxy?.server) launchArgs.push(`--proxy-server=${proxy.server}`)
 
-  const browser = await chromium.launch({ headless: true, args: launchArgs })
+  const browser = await chromium.launch({ headless: process.env.HEADLESS === 'true', args: launchArgs })
 
   // Load fingerprint ONCE per run — every per-lead newContext below reuses it.
   // Each iteration spawns a fresh context (SPA-state isolation) but the UA +
@@ -1233,6 +1234,10 @@ async function run() {
       // deberían recibir el mismo texto palabra-por-palabra (señal de bot).
       // Gemini incorpora 1-2 detalles del perfil real manteniendo la estructura
       // del template configurado en /campaigns/edit.
+      // Inyecta LEAD_ID en cal URL para que el webhook pueda vincular bookings
+      // de Cal.com de vuelta a este lead específico.
+      const calUrlForLead = withLeadIdMetadata(calUrl, lead.id)
+
       if (FOLLOW_UP_STEP === 1 && staticFollowUpMessage && isAiMode) {
         try {
           const { inviteMessage, previousFollowUps } = await fetchConversationContext(lead.id)
@@ -1242,7 +1247,7 @@ async function run() {
             inviteMessage,
             previousFollowUps,
             followUpStep:    1,
-            calUrl,
+            calUrl:          calUrlForLead,
             aiTone:          campaign.ai_tone ?? 'casual',
             senderPersona:   campaign.ai_sender_persona ?? null,
             companyContext:  campaign.ai_company_context ?? null,
@@ -1256,8 +1261,8 @@ async function run() {
           // Fallback a template literal si Gemini falla — no perdemos el FU
           messageToSend = staticFollowUpMessage
             .replace(/\[Nombre\]/gi, firstName)
-            .replace(/\[LINK_AGENDA\]/gi, calUrl ?? 'https://cal.com')
-            .replace(/\[LINK CALENDLY O GHL\]/gi, calUrl ?? 'https://cal.com')
+            .replace(/\[LINK_AGENDA\]/gi, calUrlForLead ?? 'https://cal.com')
+            .replace(/\[LINK CALENDLY O GHL\]/gi, calUrlForLead ?? 'https://cal.com')
           aiGenerated = false
           console.warn(`[FOLLOWUP] ⚠️  AI FU1 falló (${aiErr.message}) — usando template literal`)
         }
@@ -1265,8 +1270,8 @@ async function run() {
         // ── FU2-5: template literal (la historia ya tiene contexto) ────────────
         messageToSend = staticFollowUpMessage
           .replace(/\[Nombre\]/gi, firstName)
-          .replace(/\[LINK_AGENDA\]/gi, calUrl ?? 'https://cal.com')
-          .replace(/\[LINK CALENDLY O GHL\]/gi, calUrl ?? 'https://cal.com')
+          .replace(/\[LINK_AGENDA\]/gi, calUrlForLead ?? 'https://cal.com')
+          .replace(/\[LINK CALENDLY O GHL\]/gi, calUrlForLead ?? 'https://cal.com')
         aiGenerated = false
         console.log(`[FOLLOWUP] 📝 Template FU${FOLLOW_UP_STEP} literal para "${lead.full_name}" (${messageToSend.length} chars)`)
       } else if (isAiMode) {
@@ -1279,7 +1284,7 @@ async function run() {
             inviteMessage,
             previousFollowUps,
             followUpStep:    FOLLOW_UP_STEP,
-            calUrl,
+            calUrl:          calUrlForLead,
             aiTone:          campaign.ai_tone ?? 'casual',
             senderPersona:   campaign.ai_sender_persona ?? null,
             companyContext:  campaign.ai_company_context ?? null,

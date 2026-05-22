@@ -10,6 +10,7 @@
 
 import { createClient } from '@supabase/supabase-js'
 import { generateReplyDraft } from './ai.js'
+import { withLeadIdMetadata } from './lib/calUrl.js'
 import dotenv from 'dotenv'
 dotenv.config()
 
@@ -70,7 +71,8 @@ async function generateForLead(leadId) {
     leadProfileData:    lead.profile_data ?? {},
     conversationHistory: events ?? [],
     inboundMessage:     inboundText,
-    calUrl:             account?.cal_com_url,
+    // Inyecta LEAD_ID para que el cal-webhook pueda mapear el booking al lead
+    calUrl:             withLeadIdMetadata(account?.cal_com_url, lead.id),
     turnCount,
   })
 

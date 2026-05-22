@@ -74,10 +74,19 @@ function mxTime() {
   return { mxHour, mxDay, mxDate, now };
 }
 
-/** true si estamos en horario laboral según los días y horas configurados */
+/** true si estamos en horario laboral según los días y horas configurados.
+ *  FASE 1.4: lunch pause 13:00-14:00 CDMX — humanos almuerzan, bots no.
+ *  Esto reduce la probabilidad de batches durante "lunch" donde un humano
+ *  típicamente está fuera del laptop. Aplica solo a batch/FU, no inbox. */
 function isBusinessHours(startHour = 9, endHour = 19, days = ['lunes','martes','miércoles','jueves','viernes']) {
   const { mxHour, mxDay } = mxTime();
-  return days.some(d => mxDay.includes(d)) && mxHour >= startHour && mxHour < endHour;
+  if (!days.some(d => mxDay.includes(d))) return false;
+  if (mxHour < startHour || mxHour >= endHour) return false;
+  // Lunch pause: 13:00–13:59 CDMX (saltable con SKIP_LUNCH_PAUSE=true para testing)
+  if (process.env.SKIP_LUNCH_PAUSE !== 'true') {
+    if (mxHour === 13) return false;
+  }
+  return true;
 }
 
 /** Inbox puede correr Lun–Dom 8–21h (cualquier día activo) */
@@ -464,6 +473,25 @@ async function processCampaign(campaign) {
       return;
     }
 
+    // ── Guard: COOLDOWN POST-RENEW (Patch 1) ─────────────────────────────────────
+    // Cuando una cookie es renovada, LinkedIn la observa con mayor escrutinio.
+    // Si la usamos inmediatamente para batch/FU, el patrón "login → producir
+    // actividad en <30 min sin lectura natural del feed" dispara su anti-bot.
+    // Histórico: cookie renovada 18-may 12:45 → batch 12:59 (14 min) → muerta 13:38.
+    //
+    // Patch: bloquear batch/FU si la cookie tiene <COOKIE_WARMUP_MIN minutos de vida.
+    // El inbox.js sí puede correr (es lectura, "calienta" la sesión naturalmente).
+    const COOKIE_WARMUP_MIN = 45;
+    if (account.li_at_cookie_updated_at) {
+      const minSinceRenew = (Date.now() - new Date(account.li_at_cookie_updated_at).getTime()) / 60_000;
+      if (minSinceRenew < COOKIE_WARMUP_MIN) {
+        const remaining = Math.round(COOKIE_WARMUP_MIN - minSinceRenew);
+        console.log(`[SCHEDULER] 🌡️  Cookie de "${account.label}" recién renovada (${Math.round(minSinceRenew)}min) — esperando warmup natural. Faltan ~${remaining} min.`);
+        await logJob({ campaignId: cid, accountId, jobType: 'batch', status: 'skipped', skipReason: 'cookie_warmup' });
+        return;
+      }
+    }
+
     // Guard: límite diario ya alcanzado
     const { data: limitOk } = await supabase.rpc('check_daily_limit', { p_account_id: accountId });
     if (!limitOk) {
@@ -825,9 +853,32 @@ async function runSearchJob(campaign, accountId) {
   console.log(`[SCHEDULER] ✅ Search done: +${saved} leads (${(durationMs/1000).toFixed(1)}s)`);
 }
 
-// Warmup caps: limitan las invitaciones diarias según la temperatura de la cuenta
-// Caps por defecto según temperatura de cuenta (sin nota = menos spam signal → caps ligeramente más altos).
-// Si la cuenta tiene daily_connection_limit configurado, ese valor reemplaza al cap de warmup.
+// FASE 1.3 — Warmup ramp progresivo por edad de cuenta
+//
+// Reemplaza WARMUP_CAPS estático (cold/warming/warm/hot) por una curva continua
+// basada en `warmup_started_at`. Cuentas nuevas arrancan suaves y suben gradualmente.
+//
+// Curva (cap = MIN(curva_warmup, daily_connection_limit_del_user)):
+//   Día 1-3:    3 invites/día
+//   Día 4-7:    5
+//   Día 8-14:   8
+//   Día 15-21:  12
+//   Día 22-30:  18
+//   Día 31+:    cap configurado por usuario (sin tope warmup)
+//
+// Si warmup_started_at es NULL → tratamos como cuenta legacy con cap libre.
+function effectiveWarmupCap(account) {
+  if (!account.warmup_started_at) return null;  // sin restricción
+  const days = (Date.now() - new Date(account.warmup_started_at).getTime()) / 86_400_000;
+  if (days < 3)  return 3;
+  if (days < 7)  return 5;
+  if (days < 14) return 8;
+  if (days < 21) return 12;
+  if (days < 30) return 18;
+  return null;  // ramp completo, cap libre
+}
+
+// Legacy (mantenido para compatibilidad si warmup_started_at es null en alguna cuenta):
 const WARMUP_CAPS = { cold: 5, warming: 12, warm: 20, hot: 25 };
 
 // ── Batch job ─────────────────────────────────────────────────────────────────
@@ -844,10 +895,38 @@ async function runBatchJob(campaign, account) {
     .maybeSingle();
 
   const sentToday      = (todayStats?.invites_sent ?? 0) + (todayStats?.messages_sent ?? 0);
-  const warmupDefault  = WARMUP_CAPS[account.warmup_status ?? 'cold'] ?? 5;
+
+  // FASE 1.3: warmup ramp PROGRESIVO basado en edad de cuenta.
+  // Si la cuenta tiene <30 días desde warmup_started_at, aplicamos cap curvado.
+  const warmupRamp     = effectiveWarmupCap(account);    // null si cuenta >30d o sin warmup
+  const warmupLegacy   = WARMUP_CAPS[account.warmup_status ?? 'cold'] ?? 5;  // fallback
+  const warmupDefault  = warmupRamp ?? warmupLegacy;
   // daily_connection_limit en la cuenta actúa como override manual del cap de warmup
   const accountCap     = account.daily_connection_limit ?? warmupDefault;
-  const effectiveCap   = Math.min(campaign.daily_invite_target, accountCap);
+  let   effectiveCap   = Math.min(campaign.daily_invite_target, accountCap, warmupDefault);
+
+  if (warmupRamp !== null) {
+    const days = Math.floor((Date.now() - new Date(account.warmup_started_at).getTime()) / 86_400_000);
+    console.log(`[SCHEDULER] 🌱 Warmup ramp activo "${account.label}": día ${days} → cap warmup = ${warmupRamp}`);
+  }
+
+  // ── Patch 2: SOFT CAP post-renew ──────────────────────────────────────────────
+  // Cookie con <48h de vida → LinkedIn la observa con más escrutinio. Histórico:
+  // cookies recién renovadas se invalidan rápido cuando el bot las usa al 100%
+  // del cap inmediatamente. Reducimos el cap a 60% durante las primeras 48h
+  // para dar tiempo a "ratificar" la sesión con uso conservador.
+  const POST_RENEW_HOURS    = 48;
+  const POST_RENEW_FACTOR   = 0.6;
+  if (account.li_at_cookie_updated_at) {
+    const hoursSinceRenew = (Date.now() - new Date(account.li_at_cookie_updated_at).getTime()) / 3_600_000;
+    if (hoursSinceRenew < POST_RENEW_HOURS) {
+      const softCap = Math.max(5, Math.floor(effectiveCap * POST_RENEW_FACTOR));
+      if (softCap < effectiveCap) {
+        console.log(`[SCHEDULER] 🌱 Soft cap post-renew para "${account.label}": ${effectiveCap} → ${softCap} (cookie ${hoursSinceRenew.toFixed(1)}h de vida, normaliza tras 48h)`);
+        effectiveCap = softCap;
+      }
+    }
+  }
 
   if (accountCap < campaign.daily_invite_target) {
     const source = account.daily_connection_limit ? 'límite manual de cuenta' : `warmup ${account.warmup_status ?? 'cold'}`;
@@ -870,8 +949,23 @@ async function runBatchJob(campaign, account) {
     console.warn(`[SCHEDULER] ⚠️  Sin proxy para batch "${campaign.name}" (cuenta: ${account.label ?? account.id}) — ban risk alto.`);
   }
 
-  // Batch size: aleatorio entre 3 y min(6, remaining) para variar el patrón
-  const batchSize = randInt(3, Math.min(6, remaining));
+  // FASE 1.4: Natural distribution — batch size siempre pequeño (1-2)
+  //
+  // Un humano no manda 3-6 invites en 10 minutos seguidos; manda 1, navega
+  // un rato, manda otro. Para que la distribución luzca natural, cada batch
+  // procesa 1 invite (a veces 2 si remaining es alto). El gap entre batches
+  // lo gestiona min_batch_gap_min de la campaña.
+  //
+  // Weighted: 70% prob = 1 invite, 30% prob = 2 invites.
+  const isCookieFresh = account.li_at_cookie_updated_at &&
+    (Date.now() - new Date(account.li_at_cookie_updated_at).getTime()) < POST_RENEW_HOURS * 3_600_000;
+  let batchSize;
+  if (isCookieFresh) {
+    batchSize = 1;  // siempre 1 cuando cookie fresca
+  } else {
+    batchSize = Math.random() < 0.70 ? 1 : Math.min(2, remaining);
+  }
+  console.log(`[SCHEDULER] 🌱 Batch size ${batchSize}${isCookieFresh ? ' (cookie fresca)' : ''} · remaining=${remaining}`);
   console.log(`[SCHEDULER] 📤 Batch "${campaign.name}" | size=${batchSize} | enviados hoy=${sentToday}/${campaign.daily_invite_target}`);
 
   const t0 = Date.now();

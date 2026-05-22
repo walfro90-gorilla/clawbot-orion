@@ -16,7 +16,7 @@ import { chromium } from 'playwright-extra'
 import StealthPlugin from 'puppeteer-extra-plugin-stealth'
 import dotenv from 'dotenv'
 import { supabase } from './lib/supabase.js'
-import { getOrCreateAccountFingerprint, contextOptionsFromFingerprint } from './lib/browser.js'
+import { getOrCreateAccountFingerprint, contextOptionsFromFingerprint, launchPersistentBrowserContext } from './lib/browser.js'
 import { humanClick, humanType, varyMessage } from './lib/humanize.js'
 
 dotenv.config()
@@ -368,18 +368,15 @@ async function run() {
   if (proxy) console.log(`[REPLY] Using proxy: ${proxy.server}`)
   else       console.log('[REPLY] ⚠️  No proxy — ban risk')
 
-  const browser = await chromium.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled'],
-  })
-
+  // FASE 1.2: persistent context por cuenta
+  const launchArgs = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled']
   const fingerprint = await getOrCreateAccountFingerprint(supabase, account.id)
-  const context = await browser.newContext(contextOptionsFromFingerprint(fingerprint, proxy ?? undefined))
-
-  await context.addCookies([{
-    name: 'li_at', value: account.li_at_cookie,
-    domain: '.linkedin.com', path: '/', httpOnly: true, secure: true, sameSite: 'None',
-  }])
+  const contextOpts = contextOptionsFromFingerprint(fingerprint, proxy ?? undefined)
+  const context = await launchPersistentBrowserContext(chromium, account.id, contextOpts, {
+    args:       launchArgs,
+    liAtCookie: account.li_at_cookie,
+  })
+  const browser = context.browser()
 
   const page = await context.newPage()
   await page.route('**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf}', r => r.abort())

@@ -157,3 +157,111 @@ export async function accountContextOptions(supabase, accountId, proxyConfig = n
   const fp = await getOrCreateAccountFingerprint(supabase, accountId);
   return contextOptionsFromFingerprint(fp, proxyConfig);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FASE 1.2 — Persistent browser context por cuenta
+//
+// Problema antes: cada run `chromium.launch().newContext()` creaba un Chrome
+// "fresco sin historia". LinkedIn ve esto como bot signal — usuarios reales
+// tienen cookies, localStorage, IndexedDB, cache, history acumulados a lo largo
+// del tiempo.
+//
+// Solución: `chromium.launchPersistentContext(profileDir)` por cuenta:
+//   - Cookies persisten entre runs
+//   - LocalStorage persiste (LinkedIn guarda settings/UI state ahí)
+//   - IndexedDB persiste (notificaciones leídas, conversation cache)
+//   - Cache de imágenes/scripts persiste (faster loads, real-browser pattern)
+//   - History persiste (LinkedIn ve "este Chrome ya visitó perfiles antes")
+//
+// Profile path: /var/lib/orion/profiles/<account_id>/
+//
+// Importante: este context ES el browser+context combinado. No se llama
+// .newContext() después — el handle retornado es ya el context.
+// ─────────────────────────────────────────────────────────────────────────────
+
+import path from 'path'
+import fs from 'fs'
+
+const PROFILES_BASE = process.env.ORION_PROFILES_DIR || '/var/lib/orion/profiles'
+
+export function profilePathForAccount(accountId) {
+  if (!accountId) throw new Error('profilePathForAccount: accountId requerido')
+  return path.join(PROFILES_BASE, accountId)
+}
+
+/**
+ * Lanza un Chromium con context persistente por cuenta. Reemplaza el patrón
+ * `chromium.launch().newContext()` + addCookies() en workers.
+ *
+ * El primer run para una cuenta crea el profile y la cookie li_at se añade
+ * vía cookies. Runs subsiguientes ya tienen la cookie en el profile.
+ *
+ * @param {object} chromium       — playwright-extra chromium con stealth
+ * @param {string} accountId
+ * @param {object} contextOptions — viewport, UA, locale, proxy, etc.
+ * @param {object} opts
+ * @param {string[]} opts.args    — Chromium launch args
+ * @param {string|null} opts.liAtCookie — si se pasa, se inyecta como cookie li_at
+ *                                        (la primera vez o si la actual está vencida)
+ * @returns {Promise<BrowserContext>}
+ */
+export async function launchPersistentBrowserContext(chromium, accountId, contextOptions = {}, opts = {}) {
+  const profileDir = profilePathForAccount(accountId)
+  if (!fs.existsSync(profileDir)) {
+    fs.mkdirSync(profileDir, { recursive: true })
+    console.log(`[browser] Profile creado: ${profileDir}`)
+  }
+
+  const args = opts.args ?? ['--no-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled']
+
+  const context = await chromium.launchPersistentContext(profileDir, {
+    ...contextOptions,
+    headless: process.env.HEADLESS === 'true',
+    args,
+  })
+
+  // Inyectar cookie li_at — si ya existe en el profile, se actualiza con la
+  // versión más reciente (renovaciones via paste/extension). LinkedIn no se
+  // queja de reemplazar la misma cookie con el mismo valor.
+  if (opts.liAtCookie) {
+    await context.addCookies([{
+      name:     'li_at',
+      value:    opts.liAtCookie,
+      domain:   '.linkedin.com',
+      path:     '/',
+      httpOnly: true,
+      secure:   true,
+      sameSite: 'None',
+    }])
+  }
+
+  return context
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FASE 1.1 — Anti-detect launch options (Chrome headed + Xvfb)
+//
+// LinkedIn detecta `headless: true` vía múltiples vectores:
+//   - navigator.webdriver
+//   - chrome.app undefined
+//   - permissions.query devuelve 'prompt' (vs 'denied' en real)
+//   - missing real fonts/plugins
+//   - "HeadlessChrome" en User-Agent (Stealth lo oculta pero hay más)
+//
+// Solución: correr Chrome HEADED dentro de Xvfb (display virtual :99).
+// Esto bypassa todos los signals headless porque Chrome NO sabe que es headless —
+// está renderizando a un display X11 normal, simplemente sin monitor físico.
+//
+// Override por env: HEADLESS=true → headless verdadero (útil para debug local).
+// Default: headless: false (anti-detect mode).
+//
+// Requiere: Xvfb daemon corriendo en :99 (gestionado por PM2 process 'xvfb')
+// y DISPLAY=:99 en el env del proceso que lanza Chromium.
+// ─────────────────────────────────────────────────────────────────────────────
+export function launchOptions(extraArgs = []) {
+  const isHeadless = process.env.HEADLESS === 'true';
+  return {
+    headless: isHeadless,
+    args: extraArgs,
+  };
+}
