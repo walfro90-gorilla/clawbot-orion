@@ -341,6 +341,7 @@ export type Database = {
           follow_up_step5_message: string | null
           gemini_system_prompt: string
           id: string
+          invite_with_note: boolean
           is_active: boolean | null
           last_batch_at: string | null
           last_followup_at: string | null
@@ -399,6 +400,7 @@ export type Database = {
           follow_up_step5_message?: string | null
           gemini_system_prompt: string
           id?: string
+          invite_with_note?: boolean
           is_active?: boolean | null
           last_batch_at?: string | null
           last_followup_at?: string | null
@@ -457,6 +459,7 @@ export type Database = {
           follow_up_step5_message?: string | null
           gemini_system_prompt?: string
           id?: string
+          invite_with_note?: boolean
           is_active?: boolean | null
           last_batch_at?: string | null
           last_followup_at?: string | null
@@ -959,6 +962,7 @@ export type Database = {
           daily_connection_limit: number | null
           extension_api_key: string | null
           extension_last_seen_at: string | null
+          extension_paused: boolean
           fingerprint_json: Json | null
           fingerprint_locked_at: string | null
           id: string
@@ -970,6 +974,7 @@ export type Database = {
           inbox_paused: boolean
           label: string | null
           last_inbox_check_at: string | null
+          last_sent_invites_check_at: string | null
           li_at_cookie: string
           li_at_cookie_updated_at: string | null
           linkedin_profile_url: string | null
@@ -981,7 +986,9 @@ export type Database = {
           proxy_url: string | null
           reply_delay_max: number | null
           reply_delay_min: number | null
+          sent_invites_gap_min: number
           status: string | null
+          timezone: string
           user_id: string | null
           warmup_started_at: string | null
           warmup_status: string
@@ -992,6 +999,7 @@ export type Database = {
           daily_connection_limit?: number | null
           extension_api_key?: string | null
           extension_last_seen_at?: string | null
+          extension_paused?: boolean
           fingerprint_json?: Json | null
           fingerprint_locked_at?: string | null
           id?: string
@@ -1003,6 +1011,7 @@ export type Database = {
           inbox_paused?: boolean
           label?: string | null
           last_inbox_check_at?: string | null
+          last_sent_invites_check_at?: string | null
           li_at_cookie: string
           li_at_cookie_updated_at?: string | null
           linkedin_profile_url?: string | null
@@ -1014,7 +1023,9 @@ export type Database = {
           proxy_url?: string | null
           reply_delay_max?: number | null
           reply_delay_min?: number | null
+          sent_invites_gap_min?: number
           status?: string | null
+          timezone?: string
           user_id?: string | null
           warmup_started_at?: string | null
           warmup_status?: string
@@ -1025,6 +1036,7 @@ export type Database = {
           daily_connection_limit?: number | null
           extension_api_key?: string | null
           extension_last_seen_at?: string | null
+          extension_paused?: boolean
           fingerprint_json?: Json | null
           fingerprint_locked_at?: string | null
           id?: string
@@ -1036,6 +1048,7 @@ export type Database = {
           inbox_paused?: boolean
           label?: string | null
           last_inbox_check_at?: string | null
+          last_sent_invites_check_at?: string | null
           li_at_cookie?: string
           li_at_cookie_updated_at?: string | null
           linkedin_profile_url?: string | null
@@ -1047,7 +1060,9 @@ export type Database = {
           proxy_url?: string | null
           reply_delay_max?: number | null
           reply_delay_min?: number | null
+          sent_invites_gap_min?: number
           status?: string | null
+          timezone?: string
           user_id?: string | null
           warmup_started_at?: string | null
           warmup_status?: string

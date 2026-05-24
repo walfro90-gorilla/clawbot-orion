@@ -1,4 +1,4 @@
-// v0.3.0 — Sub-Fase 2.5: search command (buildSearchUrl + companySize buckets)
+// v0.5.4 — autoDiscardable + reviveTabIfDiscarded — sobrevive background mode
 // ─────────────────────────────────────────────────────────────────────────────
 // Orion Sync — Background Service Worker (Manifest V3)
 //
@@ -104,6 +104,8 @@ function compareVersions(a, b) {
 
 // ── Connection management ────────────────────────────────────────────────────
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 async function initIfConfigured() {
   const { orion_url, orion_api_key, active_account_id } = await chrome.storage.local.get([
     STORAGE_KEYS.ORION_URL,
@@ -114,6 +116,27 @@ async function initIfConfigured() {
     console.log('[Orion] Not configured — open popup to set API key + account')
     return
   }
+
+  // Validation: detecta config cruzada (API key en campo Account ID y viceversa).
+  // Si el usuario configuró mal en una versión anterior sin validación, el storage
+  // queda con valores inválidos y el SW reintenta infinitamente. Mejor detectar
+  // aquí y NO reintentar — popup verá last_auth_error y mostrará banner.
+  const apiKeyValid = orion_api_key.startsWith('orion_sk_') && orion_api_key.length >= 30
+  const accountIdValid = UUID_RE.test(active_account_id)
+
+  if (!apiKeyValid || !accountIdValid) {
+    const reason = !apiKeyValid && !accountIdValid ? 'ambos_campos_cruzados'
+                 : !apiKeyValid ? 'apikey_no_empieza_con_orion_sk_'
+                 : 'account_id_no_es_uuid'
+    console.error(`[Orion] ⛔ Config inválida en storage — NO se conecta. Razón: ${reason}`)
+    console.error(`[Orion]   apiKey valid: ${apiKeyValid}, accountId valid: ${accountIdValid}`)
+    console.error(`[Orion]   Abre el popup y reconfigura — probablemente cruzaste API Key y Account ID.`)
+    await chrome.storage.local.set({
+      last_auth_error: { error: 'config_invalid_' + reason, ts: Date.now() },
+    })
+    return
+  }
+
   connect(orion_url, orion_api_key, active_account_id)
 }
 
@@ -262,10 +285,12 @@ async function executeCommand(commandId, action, payload) {
       // send_invite/send_followup). content.js requiere estar en /messaging/.
       const msgTabs = await chrome.tabs.query({ url: '*://*.linkedin.com/messaging/*' })
       if (msgTabs.length > 0) {
-        tab = msgTabs[0]
+        tab = await reviveTabIfDiscarded(msgTabs[0])
       } else {
         tab = await navigateTabAndWait('https://www.linkedin.com/messaging/', 15000)
       }
+    } else if (action === 'check_sent_invites') {
+      tab = await navigateTabAndWait('https://www.linkedin.com/mynetwork/invitation-manager/sent/', 15000)
     } else {
       tab = await findOrCreateLinkedInTab(action)
     }
@@ -329,14 +354,48 @@ async function findOrCreateLinkedInTab(action) {
     const msgTabs = await chrome.tabs.query({ url: '*://*.linkedin.com/messaging/*' })
     if (msgTabs.length > 0) {
       console.log(`[Orion] Encontradas ${msgTabs.length} tab(s) en /messaging/`)
-      return msgTabs[0]
+      return await reviveTabIfDiscarded(msgTabs[0])
     }
   }
   const tabs = await chrome.tabs.query({ url: '*://*.linkedin.com/*' })
   console.log(`[Orion] Tabs linkedin disponibles: ${tabs.length}`)
-  if (tabs.length > 0) return tabs[0]
+  if (tabs.length > 0) return await reviveTabIfDiscarded(tabs[0])
   console.log(`[Orion] Sin tabs LinkedIn — creando nueva`)
-  return await chrome.tabs.create({ url: 'https://www.linkedin.com/feed/', active: false })
+  const newTab = await chrome.tabs.create({ url: 'https://www.linkedin.com/feed/', active: false })
+  await waitForTabComplete(newTab.id, 15000)
+  await sleep(2000)
+  await markNonDiscardable(newTab.id)
+  return await chrome.tabs.get(newTab.id)
+}
+
+// Si la tab está descartada por Chrome (background mode aggressive memory mgmt),
+// dispararla un reload y esperar a que recargue. Sin esto, content.js no responde
+// porque la página no está cargada en memoria.
+async function reviveTabIfDiscarded(tab) {
+  if (!tab) return tab
+  // Refresh tab info (puede ser stale)
+  let t = await chrome.tabs.get(tab.id)
+  if (t.discarded) {
+    console.log(`[Orion] Tab ${t.id} descartada por Chrome — reloading antes de dispatch`)
+    await chrome.tabs.reload(t.id)
+    await waitForTabComplete(t.id, 20000)
+    await sleep(2500)  // hidratación React
+    t = await chrome.tabs.get(t.id)
+  }
+  await markNonDiscardable(t.id)
+  return t
+}
+
+// Le dice a Chrome "esta tab NO la descartes" — Chrome la mantiene en memoria
+// incluso en background mode. Honra la flag en >95% de los casos. No-op si ya
+// está set.
+async function markNonDiscardable(tabId) {
+  try {
+    await chrome.tabs.update(tabId, { autoDiscardable: false })
+  } catch (err) {
+    // Algunas versiones viejas de Chrome no soportan autoDiscardable
+    console.warn(`[Orion] autoDiscardable=false falló (puede ser viejo Chrome): ${err.message}`)
+  }
 }
 
 // Navega una tab LinkedIn a la URL dada y espera a que termine de cargar.
@@ -346,11 +405,16 @@ async function navigateTabAndWait(targetUrl, timeoutMs = 15000) {
   const tabs = await chrome.tabs.query({ url: '*://*.linkedin.com/*' })
   let tab = tabs[0]
   if (!tab) {
+    console.log(`[Orion] Sin tab LinkedIn — creando con ${targetUrl}`)
     tab = await chrome.tabs.create({ url: targetUrl, active: false })
-    await sleep(3000)  // espera básica para nueva tab
+    await waitForTabComplete(tab.id, timeoutMs)
+    await sleep(2500)
+    await markNonDiscardable(tab.id)
     return await chrome.tabs.get(tab.id)
   }
 
+  // Revive si está descartada antes de cualquier cosa
+  tab = await reviveTabIfDiscarded(tab)
   const tabId = tab.id
 
   // Si ya está en la URL exacta — solo refrescar para activar modal/handlers

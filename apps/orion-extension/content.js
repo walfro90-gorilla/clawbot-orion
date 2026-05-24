@@ -11,7 +11,7 @@
 // scripts de LinkedIn (ej. para leer Voyager API), usaríamos chrome.scripting.
 // ─────────────────────────────────────────────────────────────────────────────
 
-console.log('[Orion content] v0.5.1 loaded on', window.location.href)
+console.log('[Orion content] v0.5.5 loaded on', window.location.href)
 
 // ── Keep-alive port para que el service worker no se duerma ─────────────────
 // MV3 mata el SW después de 30s idle. Mientras esta página de LinkedIn esté
@@ -60,6 +60,8 @@ async function executeAction(action, payload) {
   switch (action) {
     case 'check_inbox':
       return await checkInbox(payload)
+    case 'check_sent_invites':
+      return await checkSentInvites(payload)
     case 'send_invite':
       return await sendInvite(payload)
     case 'send_followup':
@@ -1431,22 +1433,71 @@ function extractProfilesFromPage() {
 
     // Walk up 4 levels para encontrar card container
     let card = link.parentElement?.parentElement?.parentElement?.parentElement || null
-    const paras = card
-      ? Array.from(card.querySelectorAll('p'))
-          .map(p => (p.textContent || '').replace(/\s+/g, ' ').trim())
-          .filter(t =>
-            t &&
-            t !== name &&
-            t.length < 100 &&
-            !NOISE_RE.test(t) &&
-            !t.includes(name.split(' ')[0])
-          )
-      : []
 
-    const headline = paras.find(t => !/^[•·\-]\s/.test(t) && t.length > 5) || null
-    const locationStr = paras.find(t =>
-      t !== headline && (t.includes(',') || (t.length < 60 && t.length > 3))
-    ) || null
+    // Estrategia preferida: clases LinkedIn explícitas para primary/secondary subtitle
+    // primary-subtitle = headline (Director, CTO, etc.)
+    // secondary-subtitle = location (Ciudad, País)
+    let headline = null
+    let locationStr = null
+    if (card) {
+      const primaryEl = card.querySelector('[class*="primary-subtitle"], [class*="entity-result__primary-subtitle"]')
+      const secondaryEl = card.querySelector('[class*="secondary-subtitle"], [class*="entity-result__secondary-subtitle"]')
+      if (primaryEl)   headline    = (primaryEl.textContent || '').replace(/\s+/g, ' ').trim()
+      if (secondaryEl) locationStr = (secondaryEl.textContent || '').replace(/\s+/g, ' ').trim()
+    }
+
+    // Fallback: parsing por <p> con heurísticas mejoradas
+    if (!headline) {
+      const paras = card
+        ? Array.from(card.querySelectorAll('p'))
+            .map(p => (p.textContent || '').replace(/\s+/g, ' ').trim())
+            .filter(t =>
+              t &&
+              t !== name &&
+              t.length < 100 &&
+              !NOISE_RE.test(t) &&
+              !t.includes(name.split(' ')[0])
+            )
+        : []
+
+      // Detector de "esto es location": 2+ comas, palabras de geografía, sin verbo/rol
+      const looksLikeLocation = (t) => {
+        if (!t) return false
+        const lower = t.toLowerCase()
+        const geoTerms = ['méxico', 'mexico', 'estado', 'ciudad de', 'área metropolitana',
+                          'metropolitan area', 'spain', 'argentina', 'chile', 'colombia',
+                          'peru', 'usa', 'united states', 'monterrey', 'guadalajara',
+                          'cdmx', 'tabasco', 'jalisco', 'puebla']
+        const commas = (t.match(/,/g) || []).length
+        if (commas >= 2) return true
+        if (geoTerms.some(g => lower.includes(g)) && commas >= 1) return true
+        // Si toda la string son palabras capitalizadas separadas por comas → ubicación
+        if (/^[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+([\s\-]+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)*(,\s*[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)+$/.test(t)) return true
+        return false
+      }
+
+      const looksLikeTitle = (t) => {
+        if (!t || t.length < 5) return false
+        const lower = t.toLowerCase()
+        const roleTerms = ['director', 'directora', 'gerente', 'manager', 'chief', 'ceo',
+                           'cto', 'cio', 'cfo', 'cmo', 'cdo', 'coo', 'vp', 'vice president',
+                           'founder', 'fundador', 'cofundador', 'head of', 'jefe', 'lead',
+                           'consultor', 'consultant', 'analista', 'analyst', 'especialista',
+                           'engineer', 'ingeniero', 'developer', 'designer', 'president',
+                           'presidente', 'owner', 'partner', 'socio', 'profesional']
+        return roleTerms.some(r => lower.includes(r))
+      }
+
+      // Prioridad 1: el primer paragraph que parece un título de trabajo
+      headline = paras.find(p => looksLikeTitle(p) && !looksLikeLocation(p)) ?? null
+      // Prioridad 2: el primer paragraph que NO es location
+      if (!headline) headline = paras.find(p => !looksLikeLocation(p) && p.length > 5) ?? null
+      // Prioridad 3: lo que venga (caso degradado)
+      if (!headline) headline = paras[0] ?? null
+
+      // Location: el primer que parece location, no es el headline
+      if (!locationStr) locationStr = paras.find(p => p !== headline && looksLikeLocation(p)) ?? null
+    }
 
     results.push({ profileUrl, name, headline, location: locationStr })
   }
@@ -1495,4 +1546,80 @@ async function goToNextSearchPage(nextPageNum) {
   // Después del navigation el content.js se reinyecta — el comando current finaliza aquí
   // El bridge tendrá que considerar paginación por URL como un solo-page scrape
   return false
+}
+
+// ── 3.5 — check_sent_invites — scrape /mynetwork/invitation-manager/sent/ ────
+//
+// Detecta accepts sin nota: si nuestra DB tiene leads en status='invite_sent'
+// pero NO aparecen en la lista de pending sent invitations, fueron aceptados
+// (o withdrew, pero asumimos accept como caso común).
+//
+// El bridge cruza con DB. content.js solo scrape la lista.
+
+async function checkSentInvites(payload = {}) {
+  console.log(`[Orion content] checkSentInvites currentUrl=${location.href}`)
+
+  if (!/\/mynetwork\/invitation-manager\/sent/.test(location.pathname)) {
+    return {
+      action: 'check_sent_invites',
+      status: 'error',
+      error: 'not_on_sent_invitations_page',
+      currentUrl: location.href,
+    }
+  }
+
+  // Esperar al contenedor principal
+  const sels = [
+    'main section',
+    'main div[class*="invitation-card"]',
+    'main',
+  ]
+  const found = await waitForSelector(sels, 12000)
+  if (!found) {
+    return { action: 'check_sent_invites', status: 'error', error: 'container_not_found' }
+  }
+  await sleep(1500)
+
+  // Scroll para asegurar lazy-load completo
+  for (let i = 0; i < 4; i++) {
+    window.scrollBy(0, 600)
+    await sleep(randInt(400, 800))
+  }
+  window.scrollTo({ top: 0, behavior: 'smooth' })
+  await sleep(1000)
+
+  // Cada invitación pending tiene:
+  // - <a href="/in/<vanity>/"> con el nombre del invitado
+  // - Algún wrapper con "Pendiente" o "Pending" text
+  // Estrategia: extraer todos los anchors a /in/<vanity> en main, dedupe.
+  const main = document.querySelector('main') || document.body
+  const links = Array.from(main.querySelectorAll('a[href*="/in/"]'))
+  const pending = []
+  const seenUrls = new Set()
+
+  for (const link of links) {
+    const href = link.getAttribute('href') || ''
+    const full = href.startsWith('http') ? href : `https://www.linkedin.com${href}`
+    const url = full.split('?')[0].replace(/\/$/, '') + '/'
+    if (!url.includes('/in/')) continue
+    if (seenUrls.has(url)) continue
+    // Nombre desde anchor (preferimos text nodes directos)
+    const name = Array.from(link.childNodes)
+      .filter(n => n.nodeType === 3)
+      .map(n => n.textContent.trim())
+      .filter(Boolean)
+      .join(' ')
+      .trim()
+    if (!name || name.length > 80) continue
+    seenUrls.add(url)
+    pending.push({ profileUrl: url, name })
+  }
+
+  return {
+    action: 'check_sent_invites',
+    status: 'ok',
+    pending,
+    count: pending.length,
+    scrapedAt: new Date().toISOString(),
+  }
 }

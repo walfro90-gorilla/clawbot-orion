@@ -240,6 +240,74 @@ async function handleCommandResult(msg) {
       console.error(`[bridge] ingest search failed:`, err.message)
     }
   }
+  // check_sent_invites ingest — marca leads como connected si dejaron de estar pending
+  if (!isError && action === 'check_sent_invites' && result?.status === 'ok' && Array.isArray(result?.pending)) {
+    try {
+      await ingestCheckSentInvites(commandId, result.pending)
+    } catch (err) {
+      console.error(`[bridge] ingest check_sent_invites failed:`, err.message)
+    }
+  }
+}
+
+// ── Ingest: check_sent_invites → marca accepts (leads que dejaron de estar pending)
+async function ingestCheckSentInvites(commandId, pending) {
+  const { data: cmd } = await supabase
+    .from('extension_commands')
+    .select('account_id')
+    .eq('id', commandId)
+    .single()
+  if (!cmd?.account_id) return
+
+  // Cargar leads invite_sent de campañas de esta cuenta
+  const { data: invitedLeads } = await supabase
+    .from('leads')
+    .select('id, full_name, linkedin_url, sent_at, campaigns!inner(linkedin_account_id)')
+    .eq('campaigns.linkedin_account_id', cmd.account_id)
+    .eq('status', 'invite_sent')
+
+  if (!invitedLeads || invitedLeads.length === 0) {
+    console.log(`[bridge] check_sent_invites: 0 leads en invite_sent para esta cuenta`)
+    return
+  }
+
+  // Normalizar urls de pending (LinkedIn agrega trailing slash, query params, etc.)
+  const normalize = (url) => (url || '')
+    .toLowerCase()
+    .replace(/^https?:\/\/(www\.)?linkedin\.com/, '')
+    .split('?')[0]
+    .replace(/\/$/, '')
+  const pendingUrls = new Set(pending.map(p => normalize(p.profileUrl)))
+  const pendingNames = new Set(pending.map(p => (p.name ?? '').toLowerCase().trim()))
+
+  let accepted = 0
+  // Safety: solo marcar como connected si el invite tiene al menos 1h de antigüedad.
+  // Evita marcar como accept un invite que justo se mandó hace 5 min cuya pestaña
+  // todavía no actualizó la lista de pending.
+  const minSentAgeMs = 60 * 60 * 1000
+
+  for (const lead of invitedLeads) {
+    if (!lead.sent_at) continue
+    const ageMs = Date.now() - new Date(lead.sent_at).getTime()
+    if (ageMs < minSentAgeMs) continue
+
+    const urlMatch = pendingUrls.has(normalize(lead.linkedin_url))
+    const nameMatch = lead.full_name && pendingNames.has(lead.full_name.toLowerCase().trim())
+    const stillPending = urlMatch || nameMatch
+
+    if (!stillPending) {
+      // Lead ya no aparece como pending → fue aceptado (o withdraw)
+      const { error } = await supabase.from('leads').update({
+        status: 'connected',
+        connected_at: new Date().toISOString(),
+      }).eq('id', lead.id)
+      if (!error) {
+        accepted++
+        console.log(`[bridge] ✅ Accept detectado: ${lead.full_name} (invite_sent → connected)`)
+      }
+    }
+  }
+  console.log(`[bridge] check_sent_invites ingest: ${accepted} accepts detectados de ${invitedLeads.length} pending`)
 }
 
 // ── Ingest: search → insertar leads nuevos en DB ───────────────────────────
@@ -318,20 +386,28 @@ async function ingestSendFollowup(commandId, result) {
     return
   }
 
-  // Determinar qué FU step según payload (default FU1 si no especificado)
-  const step = cmd.payload?.step ?? 1
-  const statusValue = step === 1 ? 'follow_up_sent'
-                  : step === 2 ? 'follow_up_sent_2'
-                  : step === 3 ? 'follow_up_sent_3'
-                  : step === 4 ? 'follow_up_sent_4'
-                  : 'follow_up_sent_5'
-  const timestampField = step === 1 ? 'last_followup_at'
-                      : `last_followup${step}_at`
+  // kind='reply' (FM auto-reply) — NO cambia status del lead (sigue 'replied'),
+  // solo registra el outbound event en conversation. El lead sigue activo en
+  // la cadena de conversación FM hasta que responda de nuevo o convierta a meeting.
+  const kind = cmd.payload?.kind ?? 'follow_up'
+  const isReply = kind === 'reply'
 
-  await supabase.from('leads').update({
-    status: statusValue,
-    [timestampField]: new Date().toISOString(),
-  }).eq('id', leadId)
+  let statusValue = null
+  let timestampField = null
+  if (!isReply) {
+    const step = cmd.payload?.step ?? 1
+    statusValue = step === 1 ? 'follow_up_sent'
+                : step === 2 ? 'follow_up_sent_2'
+                : step === 3 ? 'follow_up_sent_3'
+                : step === 4 ? 'follow_up_sent_4'
+                : 'follow_up_sent_5'
+    timestampField = step === 1 ? 'last_followup_at' : `last_followup${step}_at`
+
+    await supabase.from('leads').update({
+      status: statusValue,
+      [timestampField]: new Date().toISOString(),
+    }).eq('id', leadId)
+  }
 
   await supabase.rpc('increment_daily_activity', {
     p_account_id: cmd.account_id,
@@ -356,7 +432,7 @@ async function ingestSendFollowup(commandId, result) {
     if (conv?.id) {
       await supabase.from('conversation_events').insert({
         conversation_id: conv.id,
-        event_type:      statusValue,
+        event_type:      isReply ? 'auto_reply' : statusValue,
         direction:       'outbound',
         content:         messageText.slice(0, 4000),
         sent_at:         new Date().toISOString(),
@@ -365,7 +441,11 @@ async function ingestSendFollowup(commandId, result) {
     }
   }
 
-  console.log(`[bridge] ✅ send_followup step ${step} ingested: lead ${leadId.slice(0,8)} → ${statusValue}`)
+  if (isReply) {
+    console.log(`[bridge] ✅ FM auto-reply enviado a lead ${leadId.slice(0,8)} (status sigue 'replied')`)
+  } else {
+    console.log(`[bridge] ✅ send_followup step ${cmd.payload?.step ?? 1} ingested: lead ${leadId.slice(0,8)} → ${statusValue}`)
+  }
 }
 
 // ── Ingest: send_invite → actualizar lead.status + daily_activity ──────────
@@ -486,22 +566,53 @@ async function ingestCheckInbox(commandId, conversations) {
       }
     }
 
-    // Si unread > 0 + snippet existe → posible reply nueva
-    // (Validación contra duplicados: comparar con conversations.last_message_text)
+    // Si unread > 0 + snippet existe → posible reply nueva del lead
+    // Identificar si el snippet es del lead (no nuestro "Tú: ...")
     if (convo.unread > 0 && convo.snippet) {
-      const { data: existingConv } = await supabase
-        .from('conversations')
-        .select('id, last_message_text')
-        .eq('lead_id', lead.id)
-        .maybeSingle()
+      const snippet = convo.snippet ?? ''
+      // LinkedIn shows "Tú:" para outbound y "Nombre:" para inbound (a veces nada)
+      const isFromUser = /^(tú|tu|you)\s*:/i.test(snippet.trim())
+      const snippetTrimmed = snippet.replace(/^[^:]+:\s*/, '').trim()
 
-      // Si el snippet difiere del último guardado, registramos como reply nueva
-      const snippetTrimmed = convo.snippet.replace(/^[^:]+:\s*/, '').trim()  // strip "Nombre: " prefix
-      if (!existingConv || (existingConv.last_message_text ?? '').slice(0, 100) !== snippetTrimmed.slice(0, 100)) {
-        newReplies.push({ lead: lead.full_name, snippet: snippetTrimmed.slice(0, 100) })
-        console.log(`[bridge] 💬 Posible reply nueva de ${lead.full_name}: "${snippetTrimmed.slice(0, 60)}..."`)
-        // No insertamos conversation_events directamente sin thread_id —
-        // se deja para Sub-Fase 2.3+ cuando podamos identificar mensajes únicos.
+      if (!isFromUser) {
+        // Es una reply REAL del lead — actualizar conversation + marcar replied
+        const upsertData = {
+          lead_id:             lead.id,
+          linkedin_account_id: cmd.account_id,
+          status:              'active',
+          last_message_text:   snippetTrimmed.slice(0, 500),
+          last_message_at:     new Date().toISOString(),
+        }
+        if (convo.threadId) upsertData.linkedin_thread_id = convo.threadId
+
+        const { data: conv } = await supabase
+          .from('conversations')
+          .upsert(upsertData, { onConflict: 'lead_id' })
+          .select('id, linkedin_thread_id')
+          .single()
+
+        // Marcar lead como 'replied' si venía de la cadena FU (pausa FU automática)
+        const fuStatuses = ['invite_sent','connected','follow_up_sent','follow_up_sent_2','follow_up_sent_3','follow_up_sent_4','follow_up_sent_5']
+        if (fuStatuses.includes(lead.status)) {
+          await supabase.from('leads').update({
+            status: 'replied',
+            replied_at: new Date().toISOString(),
+          }).eq('id', lead.id)
+          console.log(`[bridge] 💬 Reply detectado: ${lead.full_name} → status='replied' (FU pausado)`)
+        }
+
+        // Registrar event inbound
+        if (conv?.id) {
+          await supabase.from('conversation_events').insert({
+            conversation_id: conv.id,
+            event_type:      'reply_received',
+            direction:       'inbound',
+            content:         snippetTrimmed.slice(0, 4000),
+            sent_at:         new Date().toISOString(),
+          })
+        }
+
+        newReplies.push({ lead: lead.full_name, snippet: snippetTrimmed.slice(0, 100), threadId: convo.threadId })
       }
     }
   }
@@ -531,11 +642,30 @@ async function pollAndDispatch() {
   const connectedAccountIds = Array.from(connections.keys())
   if (connectedAccountIds.length === 0) return
 
+  // Sub-Fase 3.7: Serialización por cuenta para evitar tab collision.
+  // Cada cuenta solo puede tener 1 comando NAVEGACIONAL en flight.
+  // Si ya hay 'dispatched' para una cuenta, skipeamos esa cuenta este tick.
+  const { data: inFlight } = await supabase
+    .from('extension_commands')
+    .select('account_id, action, dispatched_at')
+    .eq('status', 'dispatched')
+    .in('account_id', connectedAccountIds)
+    .gt('expires_at', new Date().toISOString())
+
+  const busyAccounts = new Set((inFlight ?? []).map(c => c.account_id))
+  if (busyAccounts.size > 0) {
+    const labels = [...busyAccounts].map(id => connections.get(id)?.label ?? id.slice(0,8))
+    console.log(`[bridge] Cuentas con comando en flight (skip dispatch): ${labels.join(', ')}`)
+  }
+
+  const availableAccounts = connectedAccountIds.filter(id => !busyAccounts.has(id))
+  if (availableAccounts.length === 0) return
+
   const { data: commands, error } = await supabase
     .from('extension_commands')
     .select('id, account_id, action, payload')
     .eq('status', 'pending')
-    .in('account_id', connectedAccountIds)
+    .in('account_id', availableAccounts)
     .gt('expires_at', new Date().toISOString())
     .order('created_at')
     .limit(20)
@@ -546,7 +676,11 @@ async function pollAndDispatch() {
   }
   if (!commands || commands.length === 0) return
 
+  // De los pending: dispatch SOLO el primero por cuenta (FIFO).
+  // Los demás esperan al próximo poll cuando este complete.
+  const dispatchedThisTick = new Set()
   for (const cmd of commands) {
+    if (dispatchedThisTick.has(cmd.account_id)) continue
     const conn = connections.get(cmd.account_id)
     if (!conn || conn.ws.readyState !== 1 /* OPEN */) continue
 
@@ -568,6 +702,7 @@ async function pollAndDispatch() {
         action:    cmd.action,
         payload:   cmd.payload,
       }))
+      dispatchedThisTick.add(cmd.account_id)  // serialization marker
       console.log(`[bridge] Dispatched ${cmd.action} to ${conn.label} (cmd ${cmd.id.slice(0,8)})`)
     } catch (err) {
       console.error(`[bridge] Dispatch error: ${err.message}`)

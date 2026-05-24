@@ -107,6 +107,51 @@ export default async function MonitorPage() {
     ).order("created_at", { ascending: false }).limit(50),
   ])
 
+  // ── Extension health: queue + errors + bridge connectivity ──────────────────
+  const [
+    { data: extErrors },
+    { count: extPending },
+    { count: extDispatched },
+    { count: extTimeouts24h },
+  ] = await Promise.all([
+    db.from("extension_commands")
+      .select("id, account_id, action, status, error, created_at, completed_at, payload")
+      .in("status", ["error", "timeout"])
+      .gt("created_at", new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
+      .order("created_at", { ascending: false })
+      .limit(30),
+    db.from("extension_commands")
+      .select("id", { count: "exact", head: true })
+      .eq("status", "pending")
+      .gt("expires_at", new Date().toISOString()),
+    db.from("extension_commands")
+      .select("id", { count: "exact", head: true })
+      .eq("status", "dispatched")
+      .gt("expires_at", new Date().toISOString()),
+    db.from("extension_commands")
+      .select("id", { count: "exact", head: true })
+      .eq("status", "timeout")
+      .gt("created_at", new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()),
+  ])
+
+  // Bridge /health fetch (puede fallar si bridge caído)
+  type BridgeAccount = { accountId: string; label: string; lastSeen: number }
+  let bridgeOnline = false
+  let bridgeAccounts: BridgeAccount[] = []
+  let bridgeUptime: number | null = null
+  try {
+    const r = await fetch("http://localhost:4002/health", {
+      cache: "no-store",
+      signal: AbortSignal.timeout(2000),
+    })
+    if (r.ok) {
+      const j = await r.json()
+      bridgeOnline = true
+      bridgeAccounts = j.connected_accounts ?? []
+      bridgeUptime = j.uptime ?? null
+    }
+  } catch {}
+
   // Alertas críticas + pipeline data
   const [
     { count: leadsFailed },
@@ -245,6 +290,107 @@ export default async function MonitorPage() {
           {!isBusinessHours && <span className="text-gray-500 ml-1">(fuera de horario — solo inbox)</span>}
         </div>
       )}
+
+      {/* ── Extension health: bridge + queue + errores recientes ───────────── */}
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wide">
+            🩺 Extension health (Smart Hybrid)
+          </h2>
+          <span className={`text-xs px-2.5 py-1 rounded-full border ${
+            bridgeOnline
+              ? "bg-green-500/10 border-green-500/30 text-green-400"
+              : "bg-red-500/10 border-red-500/30 text-red-400"
+          }`}>
+            Bridge {bridgeOnline ? `🟢 online (uptime ${Math.floor((bridgeUptime ?? 0)/60)}min)` : "🔴 offline"}
+          </span>
+        </div>
+
+        {/* Stats grid */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {[
+            { label: "Extensions conectadas", value: bridgeAccounts.length, danger: bridgeAccounts.length === 0, icon: "🔌" },
+            { label: "Cola pendiente",        value: extPending ?? 0,        danger: (extPending ?? 0) > 10, icon: "📋" },
+            { label: "En flight",             value: extDispatched ?? 0,     danger: false, icon: "🚀" },
+            { label: "Errores 24h + timeouts",value: (extErrors?.length ?? 0) + (extTimeouts24h ?? 0), danger: ((extErrors?.length ?? 0) + (extTimeouts24h ?? 0)) > 5, icon: "💥" },
+          ].map(({ label, value, danger, icon }) => (
+            <div key={label} className={`rounded-lg p-3 border text-center ${
+              danger && value > 0
+                ? "bg-red-500/10 border-red-500/30"
+                : "bg-gray-800/40 border-gray-700"
+            }`}>
+              <div className="text-lg">{icon}</div>
+              <div className={`text-xl font-bold ${danger && value > 0 ? "text-red-400" : "text-gray-50"}`}>{value}</div>
+              <div className="text-gray-500 text-[10px] uppercase tracking-wide mt-0.5">{label}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Connected extensions detail */}
+        {bridgeAccounts.length > 0 && (
+          <div className="border-t border-gray-800 pt-3">
+            <p className="text-xs text-gray-500 uppercase tracking-wide mb-2">Cuentas conectadas</p>
+            <div className="flex flex-wrap gap-2">
+              {bridgeAccounts.map(a => {
+                const ageSec = Math.floor((Date.now() - a.lastSeen) / 1000)
+                return (
+                  <span key={a.accountId} className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg bg-green-500/5 border border-green-500/20 text-green-400">
+                    <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+                    {a.label}
+                    <span className="text-gray-500">· {ageSec}s</span>
+                  </span>
+                )
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Errors table (collapsible) */}
+        {(extErrors && extErrors.length > 0) && (
+          <details className="border-t border-gray-800 pt-3 group">
+            <summary className="cursor-pointer text-xs text-red-400 hover:text-red-300 select-none">
+              ⚠️ Ver {extErrors.length} comando(s) con error/timeout en últimas 24h
+            </summary>
+            <div className="mt-3 overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-gray-500 border-b border-gray-800">
+                    <th className="text-left py-2 font-medium">Hora</th>
+                    <th className="text-left py-2 font-medium">Cuenta</th>
+                    <th className="text-left py-2 font-medium">Acción</th>
+                    <th className="text-left py-2 font-medium">Status</th>
+                    <th className="text-left py-2 font-medium">Error</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {extErrors.slice(0, 20).map((c: any) => {
+                    const acc = accMap[c.account_id]
+                    const hora = new Date(c.created_at).toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit" })
+                    const errShort = (c.error ?? "").slice(0, 80)
+                    return (
+                      <tr key={c.id} className="border-b border-gray-800/40">
+                        <td className="py-1.5 text-gray-400 font-mono">{hora}</td>
+                        <td className="py-1.5 text-gray-300">{acc?.label ?? c.account_id.slice(0, 8)}</td>
+                        <td className="py-1.5 text-gray-300">{c.action}</td>
+                        <td className="py-1.5">
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                            c.status === "timeout"
+                              ? "bg-yellow-500/15 text-yellow-400 border border-yellow-500/30"
+                              : "bg-red-500/15 text-red-400 border border-red-500/30"
+                          }`}>
+                            {c.status}
+                          </span>
+                        </td>
+                        <td className="py-1.5 text-gray-500 truncate max-w-[300px]" title={c.error ?? ""}>{errShort}</td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </details>
+        )}
+      </div>
 
       {/* ── Alertas críticas ──────────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">

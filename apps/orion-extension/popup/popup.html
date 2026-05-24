@@ -5,174 +5,191 @@
   <title>Orion Sync</title>
   <style>
     body {
-      width: 320px;
+      width: 340px;
       margin: 0;
-      padding: 16px;
+      padding: 14px;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       background: #0a0e1a;
       color: #e5e7eb;
+      font-size: 13px;
     }
-    .header {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      margin-bottom: 16px;
-    }
+
+    .header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
     .logo {
-      font-size: 20px;
-      font-weight: 700;
+      font-size: 18px; font-weight: 700;
       background: linear-gradient(135deg, #0a66c2, #4f46e5);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
     }
-    .status-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      display: inline-block;
-    }
+    .version { font-size: 10px; color: #6b7280; font-family: monospace; }
+
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
     .status-connected   { background: #22c55e; box-shadow: 0 0 8px #22c55e; }
     .status-disconnected { background: #ef4444; }
     .status-connecting   { background: #eab308; animation: pulse 1s infinite; }
+    .status-paused       { background: #f59e0b; }
     @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.4 } }
 
-    .field {
-      margin-bottom: 12px;
+    .status-row { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #9ca3af; margin-bottom: 8px; }
+
+    .monitor {
+      background: #0f172a; border: 1px solid #1f2937; border-radius: 8px;
+      padding: 10px; margin-bottom: 10px;
     }
+    .monitor-row { display: flex; justify-content: space-between; align-items: center; font-size: 12px; padding: 3px 0; }
+    .monitor-label { color: #9ca3af; }
+    .monitor-value { color: #f9fafb; font-weight: 600; }
+    .monitor-value.muted { color: #6b7280; font-weight: 500; }
+
+    .pause-btn {
+      width: 100%; padding: 10px; border-radius: 8px; border: 1px solid;
+      font-size: 13px; font-weight: 600; cursor: pointer;
+      transition: all 0.15s; margin-bottom: 12px;
+      display: flex; align-items: center; justify-content: center; gap: 6px;
+    }
+    .pause-btn.active {
+      background: #f59e0b1a; border-color: #f59e0b66; color: #fbbf24;
+    }
+    .pause-btn.active:hover { background: #f59e0b30; }
+    .pause-btn.inactive {
+      background: #1f293730; border-color: #374151; color: #d1d5db;
+    }
+    .pause-btn.inactive:hover { background: #1f2937; }
+
+    .field { margin-bottom: 10px; }
     label {
-      display: block;
-      font-size: 11px;
-      font-weight: 600;
-      color: #9ca3af;
-      margin-bottom: 4px;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
+      display: block; font-size: 10px; font-weight: 600; color: #9ca3af;
+      margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em;
     }
-    input, select {
-      width: 100%;
-      box-sizing: border-box;
-      padding: 8px 10px;
-      background: #111827;
-      border: 1px solid #374151;
-      border-radius: 6px;
-      color: #f9fafb;
-      font-size: 13px;
+    input {
+      width: 100%; box-sizing: border-box; padding: 7px 9px;
+      background: #111827; border: 1px solid #374151; border-radius: 6px;
+      color: #f9fafb; font-size: 12px;
     }
-    input:focus, select:focus {
-      outline: none;
-      border-color: #4f46e5;
-      box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.2);
-    }
+    input:focus { outline: none; border-color: #4f46e5; box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.2); }
+
     button {
-      width: 100%;
-      padding: 10px;
-      background: #0a66c2;
-      color: white;
-      border: none;
-      border-radius: 6px;
-      font-size: 13px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: background 0.15s;
+      width: 100%; padding: 9px; background: #0a66c2; color: white;
+      border: none; border-radius: 6px; font-size: 13px; font-weight: 600;
+      cursor: pointer; transition: background 0.15s;
     }
     button:hover { background: #084d92; }
     button.secondary { background: transparent; border: 1px solid #4b5563; color: #d1d5db; }
     button.secondary:hover { background: #1f2937; }
 
     .update-banner {
-      display: none;
-      background: linear-gradient(135deg, #fbbf24, #f59e0b);
-      color: #0a0e1a;
-      padding: 10px;
-      border-radius: 6px;
-      font-size: 12px;
-      margin-bottom: 12px;
-      font-weight: 600;
+      display: none; background: linear-gradient(135deg, #fbbf24, #f59e0b);
+      color: #0a0e1a; padding: 8px 10px; border-radius: 6px;
+      font-size: 11px; margin-bottom: 10px; font-weight: 600;
     }
-    .update-banner a {
-      color: #0a0e1a;
-      text-decoration: underline;
-      display: block;
-      margin-top: 4px;
-      font-size: 11px;
-    }
+    .update-banner a { color: #0a0e1a; text-decoration: underline; display: block; margin-top: 2px; font-size: 10px; }
+
     .error-banner {
-      display: none;
-      background: #7f1d1d;
-      color: #fecaca;
-      padding: 8px 10px;
-      border-radius: 6px;
-      font-size: 11px;
-      margin-bottom: 12px;
-      line-height: 1.4;
-    }
-    code {
-      background: #111827;
-      padding: 1px 5px;
-      border-radius: 3px;
-      font-size: 11px;
+      display: none; background: #7f1d1d; color: #fecaca;
+      padding: 7px 9px; border-radius: 6px; font-size: 10px;
+      margin-bottom: 10px; line-height: 1.4;
     }
 
-    .info {
-      font-size: 11px;
-      color: #6b7280;
-      margin-top: 8px;
-      line-height: 1.4;
+    .config-summary {
+      font-size: 10px; color: #6b7280;
+      padding: 6px 0; border-top: 1px solid #1f2937; margin-top: 6px;
     }
-    .status-row {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 12px;
-      color: #9ca3af;
+    .config-summary .key { color: #9ca3af; font-family: monospace; }
+
+    details { margin-top: 8px; }
+    summary { cursor: pointer; font-size: 11px; color: #6b7280; padding: 4px 0; }
+    summary:hover { color: #d1d5db; }
+    details[open] summary { color: #d1d5db; margin-bottom: 8px; }
+
+    code {
+      background: #111827; padding: 1px 4px;
+      border-radius: 3px; font-size: 10px; font-family: monospace;
     }
+    .info { font-size: 10px; color: #6b7280; margin-top: 6px; line-height: 1.4; }
+
+    hr { border: none; border-top: 1px solid #1f2937; margin: 10px 0; }
   </style>
 </head>
 <body>
+  <!-- Header con logo + status + versión -->
   <div class="header">
     <span class="logo">Orion Sync</span>
+    <span class="version" id="version">v0.5.5</span>
   </div>
 
-  <div class="update-banner" id="update-banner">
-    🔔 Nueva versión disponible: <span id="update-version"></span>
-    <a id="update-link" target="_blank">Descargar e instalar →</a>
-  </div>
-
-  <div class="status-row" id="status-row">
+  <div class="status-row">
     <span class="status-dot status-disconnected" id="status-dot"></span>
     <span id="status-text">Sin conectar</span>
   </div>
 
+  <!-- Update banner -->
+  <div class="update-banner" id="update-banner">
+    🔔 Nueva versión: <span id="update-version"></span>
+    <a id="update-link" target="_blank">Actualizar →</a>
+  </div>
+
+  <!-- Error banner -->
   <div class="error-banner" id="error-banner">
     <strong>⚠️ <span id="error-title"></span></strong>
-    <div id="error-detail" style="margin-top: 4px;"></div>
+    <div id="error-detail" style="margin-top: 3px;"></div>
   </div>
 
-  <hr style="border: none; border-top: 1px solid #1f2937; margin: 12px 0;" />
-
-  <div class="field">
-    <label for="orion-url">Orion URL</label>
-    <input type="url" id="orion-url" placeholder="https://app.tuOrion.com" />
+  <!-- Mini-monitor (visible cuando hay conexión + datos cargados) -->
+  <div class="monitor" id="monitor" style="display: none;">
+    <div class="monitor-row">
+      <span class="monitor-label">Cuenta</span>
+      <span class="monitor-value" id="m-account">—</span>
+    </div>
+    <div class="monitor-row">
+      <span class="monitor-label">Hoy</span>
+      <span class="monitor-value" id="m-today">— invites · — msgs</span>
+    </div>
+    <div class="monitor-row">
+      <span class="monitor-label">En cola</span>
+      <span class="monitor-value" id="m-queue">—</span>
+    </div>
+    <div class="monitor-row">
+      <span class="monitor-label">Última acción</span>
+      <span class="monitor-value muted" id="m-last">—</span>
+    </div>
+    <div class="config-summary" id="m-config">
+      <span class="key">warmup</span> · <span class="key">status</span>
+    </div>
   </div>
 
-  <div class="field">
-    <label for="api-key">API Key</label>
-    <input type="text" id="api-key" placeholder="orion_sk_..." spellcheck="false" autocomplete="off" />
-    <p class="info" id="apikey-hint">Debe empezar con <code>orion_sk_</code>. Cópiala desde /dashboard/accounts.</p>
-  </div>
+  <!-- Pause/Resume toggle -->
+  <button class="pause-btn inactive" id="pause-btn" style="display: none;">
+    <span id="pause-icon">⏸️</span>
+    <span id="pause-text">Pausar actividad</span>
+  </button>
 
-  <div class="field">
-    <label for="account-id">Cuenta activa</label>
-    <input type="text" id="account-id" placeholder="UUID de la cuenta LinkedIn" />
-    <p class="info">Genera la API key y obten el ID de la cuenta desde <strong>/dashboard/accounts</strong> de Orion.</p>
-  </div>
+  <!-- Config (collapsible) -->
+  <details id="config-details">
+    <summary>⚙️ Configuración</summary>
 
-  <button id="connect-btn">Conectar</button>
-  <button id="disconnect-btn" class="secondary" style="margin-top: 8px; display: none;">Desconectar</button>
+    <div class="field">
+      <label for="orion-url">Orion URL</label>
+      <input type="url" id="orion-url" placeholder="https://app.tuOrion.com" />
+    </div>
 
-  <p class="info" style="margin-top: 16px;">
-    Mantén Chrome abierto durante tus horas activas. La extension ejecuta las acciones
-    de LinkedIn dentro de tu sesión, sin proxy ni multi-IP detection.
+    <div class="field">
+      <label for="api-key">API Key</label>
+      <input type="text" id="api-key" placeholder="orion_sk_..." spellcheck="false" autocomplete="off" />
+      <p class="info">Debe empezar con <code>orion_sk_</code>. Cópiala desde /dashboard/accounts.</p>
+    </div>
+
+    <div class="field">
+      <label for="account-id">Cuenta activa</label>
+      <input type="text" id="account-id" placeholder="UUID de la cuenta LinkedIn" />
+      <p class="info">Obten el ID desde <strong>/dashboard/accounts</strong>.</p>
+    </div>
+
+    <button id="connect-btn">Conectar</button>
+    <button id="disconnect-btn" class="secondary" style="margin-top: 6px; display: none;">Desconectar</button>
+  </details>
+
+  <p class="info" style="margin-top: 12px;">
+    Mantén Chrome abierto en horario laboral. Con <code>chrome://settings/system</code> →
+    "Continuar en segundo plano", funciona aunque cierres la ventana.
   </p>
 
   <script src="popup.js"></script>

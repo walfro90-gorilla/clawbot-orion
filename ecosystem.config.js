@@ -22,10 +22,12 @@ module.exports = {
     {
       name:        'prometheus-scheduler',
       cwd:         '/root/clawbot/apps/prometheus',
-      script:      'scheduler.js',
+      // Sub-Fase 3: scheduler-extension.js inserta comandos en extension_commands
+      // en lugar de spawnear Playwright. Rollback: cambiar a 'scheduler.js'.
+      script:      'scheduler-extension.js',
       interpreter: 'node',
       autorestart: true,
-      env: { NODE_ENV: 'production', DISPLAY: ':99' },
+      env: { NODE_ENV: 'production' },
     },
     {
       name:        'extension-bridge',

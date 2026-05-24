@@ -31,8 +31,11 @@ export async function middleware(request: NextRequest) {
 
   const isAuthRoute = request.nextUrl.pathname.startsWith("/login")
   const isPublicRoute = request.nextUrl.pathname === "/"
-  // Public endpoint usado por la extension (sin auth) para chequear updates
-  const isPublicExtensionRoute = request.nextUrl.pathname === "/api/extension/version"
+  // Public endpoints usados por la extension (sin auth Supabase — auth vía API key)
+  const isPublicExtensionRoute =
+    request.nextUrl.pathname === "/api/extension/version" ||
+    request.nextUrl.pathname === "/api/extension/account-status" ||
+    request.nextUrl.pathname === "/api/extension/pause-toggle"
 
   if (!user && !isAuthRoute && !isPublicRoute && !isPublicExtensionRoute) {
     const url = request.nextUrl.clone()
