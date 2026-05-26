@@ -35,7 +35,8 @@ export async function middleware(request: NextRequest) {
   const isPublicExtensionRoute =
     request.nextUrl.pathname === "/api/extension/version" ||
     request.nextUrl.pathname === "/api/extension/account-status" ||
-    request.nextUrl.pathname === "/api/extension/pause-toggle"
+    request.nextUrl.pathname === "/api/extension/pause-toggle" ||
+    request.nextUrl.pathname === "/api/extension/capture-failure"
 
   if (!user && !isAuthRoute && !isPublicRoute && !isPublicExtensionRoute) {
     const url = request.nextUrl.clone()

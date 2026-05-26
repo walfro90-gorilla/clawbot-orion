@@ -123,8 +123,26 @@
 
   <!-- Update banner -->
   <div class="update-banner" id="update-banner">
-    🔔 Nueva versión: <span id="update-version"></span>
-    <a id="update-link" target="_blank">Actualizar →</a>
+    <div style="display: flex; align-items: center; gap: 6px; font-size: 12px;">
+      <span style="font-size: 14px;">🔔</span>
+      <span>Actualización disponible:</span>
+      <span style="background: rgba(0,0,0,0.2); padding: 1px 6px; border-radius: 4px; font-family: monospace; font-size: 11px;">v<span id="current-version-inline">?</span></span>
+      <span>→</span>
+      <span style="background: #0a0e1a; color: #fbbf24; padding: 1px 6px; border-radius: 4px; font-family: monospace; font-size: 11px; font-weight: 700;">v<span id="update-version"></span></span>
+    </div>
+    <div style="margin-top: 6px; font-weight: 500; font-size: 10px;">
+      Copia este comando y pega en <strong>PowerShell</strong>:
+    </div>
+    <div style="display: flex; gap: 4px; margin-top: 4px;">
+      <code id="update-cmd" style="flex: 1; background: rgba(0,0,0,0.4); color: #fef3c7; padding: 5px 7px; border-radius: 4px; font-size: 10px; word-break: break-all; user-select: all; cursor: text;"></code>
+      <button id="update-copy" style="width: auto; padding: 5px 10px; font-size: 10px; background: #0a0e1a; color: #fbbf24; border: none; border-radius: 4px; cursor: pointer; font-weight: 600;">📋 Copiar</button>
+    </div>
+    <div style="margin-top: 4px; font-size: 9px; color: rgba(10,14,26,0.75); line-height: 1.4;">
+      <strong>Después de ejecutar:</strong> abre <code style="background: rgba(0,0,0,0.15); padding: 0 2px; border-radius: 2px;">chrome://extensions</code> → 🔄 Recargar Orion Sync → F5 en tab LinkedIn.
+      <div style="margin-top: 3px; opacity: 0.7;">
+        ℹ️ Por seguridad de Chrome, la extension no puede ejecutar comandos directamente.
+      </div>
+    </div>
   </div>
 
   <!-- Error banner -->

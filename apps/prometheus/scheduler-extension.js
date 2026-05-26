@@ -17,17 +17,19 @@ import {
   isBusinessHours, isInboxHours,
   isExtensionOnline, getConnectedAccountIds,
   getEffectiveDailyCap, getDailyActivityToday, getPendingLeadsCount,
+  hasInFlightCommand, wasMessageRecentlySent,
   passesTitleFilters,
   dispatchSearch, dispatchInvite, dispatchCheckInbox, dispatchCheckSentInvites, dispatchFollowup,
   checkCampaignActiveGates,
 } from './lib/extension-dispatch.js'
-import { generateLinkedInMessage } from './lib/ai-message.js'
+import { generateLinkedInMessage, generateLinkedInReply, personalizeFollowupMessage } from './lib/ai-message.js'
 
 dotenv.config()
 
 const TICK_INTERVAL_MS = parseInt(process.env.TICK_INTERVAL_MS ?? '300000')  // 5 min default
 const TICK_TIMEOUT_MS  = parseInt(process.env.TICK_TIMEOUT_MS  ?? '240000')  // 4 min: máx un tick
 const HUNG_TIMEOUT_MS  = parseInt(process.env.HUNG_TIMEOUT_MS  ?? '600000')  // 10 min: watchdog mata el proceso
+const MAX_DAILY_MESSAGES = parseInt(process.env.MAX_DAILY_MESSAGES ?? '30')  // FU+FM combinado por cuenta/día
 const DRY_RUN = process.env.DRY_RUN === 'true'
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
@@ -239,14 +241,50 @@ async function tryInvitesForCampaign(campaign, account) {
 // ── Follow-up trigger (3.4) ──────────────────────────────────────────────────
 // Sweep de leads listos para próximo step de FU. Plantilla > AI gen.
 
-function substituteTemplate(template, lead) {
+// Hash determinístico de un string → unsigned int. Usado para jitter per-lead
+// reproducible (mismo lead = mismo offset siempre).
+function hashStringToInt(s) {
+  let h = 0
+  for (let i = 0; i < s.length; i++) {
+    h = ((h << 5) - h) + s.charCodeAt(i)
+    h |= 0  // force i32
+  }
+  return Math.abs(h)
+}
+
+function substituteTemplate(template, lead, account) {
   if (!template) return null
   const first = (lead.full_name ?? '').split(/\s+/)[0]
-  return template
-    .replace(/\{nombre\}/gi, first)
-    .replace(/\{first_name\}/gi, first)
-    .replace(/\{nombre_completo\}/gi, lead.full_name ?? '')
-    .replace(/\{full_name\}/gi, lead.full_name ?? '')
+  const fullName = lead.full_name ?? ''
+  const company = lead.profile_data?.currentCompany ?? lead.profile_data?.company ?? ''
+  const headline = lead.profile_data?.headline ?? ''
+  const calUrl = account?.cal_com_url ?? ''
+
+  // Substituir SIN sensitive case-sensitivity para soportar tanto:
+  // - {placeholder} (formato nuevo Wal)
+  // - [Placeholder] (formato legacy Josh server-proxy)
+  // - [PLACEHOLDER] (también variantes)
+  const subs = {
+    nombre:           first,
+    first_name:       first,
+    nombre_completo:  fullName,
+    full_name:        fullName,
+    empresa:          company,
+    company:          company,
+    headline:         headline,
+    cal_url:          calUrl,
+    cal_com:          calUrl,
+    calendly:         calUrl,
+  }
+
+  let out = template
+  for (const [key, value] of Object.entries(subs)) {
+    // {key} variants
+    out = out.replace(new RegExp(`\\{${key}\\}`, 'gi'), value)
+    // [Key] / [KEY] variants
+    out = out.replace(new RegExp(`\\[${key}\\]`, 'gi'), value)
+  }
+  return out
 }
 
 const FU_STEPS = [
@@ -262,8 +300,26 @@ async function tryFollowupsForCampaign(campaign, account) {
     return { skipped: true, reason: 'follow_up_paused' }
   }
 
-  // Para cada step, buscar leads que se cumplen
-  for (const step of FU_STEPS) {
+  // Cap diario de mensajes (FU+FM combinado) — protege contra blasts
+  const todayActivity = await getDailyActivityToday(account.id, account.timezone)
+  const msgsToday = todayActivity.messages_sent ?? 0
+  if (msgsToday >= MAX_DAILY_MESSAGES) {
+    return { skipped: true, reason: 'daily_messages_cap_reached', msgsToday, cap: MAX_DAILY_MESSAGES }
+  }
+
+  // Priorizamos steps avanzados (FU5 > FU4 > ... > FU1) para evitar que un backlog
+  // grande en FU1 starve a los FUs avanzados. Leads más profundos en el funnel
+  // están más cerca de meeting → progresarlos primero tiene mayor ROI.
+  // Más Fisher-Yates shuffle ligero para humanización (no siempre mismo orden).
+  const stepsOrdered = [...FU_STEPS].reverse()
+  if (Math.random() < 0.3) {  // 30% de ticks: random shuffle (anti-pattern detection)
+    for (let i = stepsOrdered.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1))
+      ;[stepsOrdered[i], stepsOrdered[j]] = [stepsOrdered[j], stepsOrdered[i]]
+    }
+  }
+
+  for (const step of stepsOrdered) {
     const template = campaign[step.tplField]
     const hasAiFallback = !!campaign.gemini_system_prompt &&
                           campaign.gemini_system_prompt.trim().length > 20
@@ -273,19 +329,36 @@ async function tryFollowupsForCampaign(campaign, account) {
     if (!delay && delay !== 0) continue  // sin delay = step deshabilitado
 
     // ¿Cuánto tiempo desde el último step para este lead?
-    const cutoffMs = step.delayUnit === 'days' ? delay * 86_400_000 : delay * 3_600_000
+    const baseCutoffMs = step.delayUnit === 'days' ? delay * 86_400_000 : delay * 3_600_000
+    // Jitter per-lead: usamos hash de lead.id para tener delay consistente por lead
+    // pero distribuido aleatoriamente para no levantar bandera en LinkedIn por uniformidad
+    const jitterHours = campaign.follow_up_jitter_hours ?? 0
+    const jitterMs = jitterHours * 3_600_000
+    // Query usa el cutoff INFERIOR (más laxo) para traer candidates;
+    // el filter individual por lead después aplica el jitter exacto
+    const cutoffMs = baseCutoffMs - jitterMs
     const cutoffIso = new Date(Date.now() - cutoffMs).toISOString()
     const prevTimeField = step.num === 1 ? 'connected_at' : FU_STEPS[step.num - 2].lastField
 
+    // Safety gate: skip leads cuya prev step timestamp es muy antigua
+    // (típicamente leads históricos de batches viejos). Por default 30 días.
+    // Configurable via campaign.fu_max_age_days o env FU_MAX_AGE_DAYS.
+    const maxAgeDays = campaign.fu_max_age_days ?? parseInt(process.env.FU_MAX_AGE_DAYS ?? '30')
+    const tooOldIso = new Date(Date.now() - maxAgeDays * 86_400_000).toISOString()
+
+    // LEFT JOIN: traemos leads con O sin thread_id — para invites sin nota
+    // el lead conectado NO tiene thread hasta que enviemos el primer mensaje.
+    // Sub-Fase 3.8: content.js maneja ambos casos (compose-new desde perfil
+    // si no hay thread, o reply en thread si existe).
     const { data: due } = await supabase
       .from('leads')
-      .select(`id, full_name, linkedin_url, status, ${prevTimeField},
-               conversations!inner(linkedin_thread_id, linkedin_account_id)`)
+      .select(`id, full_name, linkedin_url, status, profile_data, ${prevTimeField},
+               conversations(linkedin_thread_id, linkedin_account_id)`)
       .eq('campaign_id', campaign.id)
-      .eq('conversations.linkedin_account_id', account.id)
       .in('status', step.statusFrom)
       .lt(prevTimeField, cutoffIso)
-      .not('conversations.linkedin_thread_id', 'is', null)
+      .gte(prevTimeField, tooOldIso)
+      .not('linkedin_url', 'is', null)  // necesitamos URL del perfil
       .limit(3)
 
     if (!due || due.length === 0) continue
@@ -301,16 +374,51 @@ async function tryFollowupsForCampaign(campaign, account) {
       }
     }
 
-    // Tomar uno (humanización: 1 FU por tick por step)
-    const lead = due[0]
-    let message = substituteTemplate(template, lead)
+    // Per-lead jitter check: filtrar leads cuyo delay personal no se cumplió aún
+    const dueWithJitter = jitterHours > 0
+      ? due.filter(lead => {
+          // Hash determinístico del lead.id → offset entre -jitterMs y +jitterMs
+          const h = hashStringToInt(lead.id)
+          const offset = (h % (2 * jitterMs + 1)) - jitterMs  // [-jitterMs, +jitterMs]
+          const leadCutoffMs = baseCutoffMs + offset
+          const leadCutoffIso = new Date(Date.now() - leadCutoffMs).toISOString()
+          return lead[prevTimeField] <= leadCutoffIso
+        })
+      : due
 
-    // Si no hay template configurado, generar via AI con gemini_system_prompt
-    if (!message && hasAiFallback) {
-      const aiType = `follow_up_${step.num}`
-      const aiRes = await generateLinkedInMessage(campaign, lead, aiType)
+    if (dueWithJitter.length === 0) continue  // ningún lead cumple su delay personal aún
+
+    // Lead-level dedup: si el primer candidato ya tiene comando en flight,
+    // intentar con el siguiente. Previene zombies de doble-dispatch.
+    let lead = null
+    for (const candidate of dueWithJitter) {
+      const inFlight = await hasInFlightCommand(candidate.id, 'send_followup')
+      if (!inFlight) { lead = candidate; break }
+      console.log(`[SCH-EXT]   ⏭️  FU skip ${candidate.full_name} — cmd en flight`)
+    }
+    if (!lead) continue  // todos los candidates del step ya tienen cmd activo
+
+    let message = null
+
+    if (template && hasAiFallback) {
+      // ★ MODO HÍBRIDO: template como intención + Gemini personaliza al lead
+      const persRes = await personalizeFollowupMessage(
+        campaign, lead, template, step.num, account.cal_com_url ?? null
+      )
+      if (persRes.error) {
+        console.warn(`[SCH-EXT]   AI personalize failed (FU${step.num}): ${persRes.error} — fallback a template literal`)
+        message = substituteTemplate(template, lead, account)
+      } else {
+        message = persRes.message
+      }
+    } else if (template) {
+      // Solo template, sin gemini_system_prompt → substitución literal
+      message = substituteTemplate(template, lead, account)
+    } else if (hasAiFallback) {
+      // Solo AI, sin template → gen completo
+      const aiRes = await generateLinkedInMessage(campaign, lead, `follow_up_${step.num}`)
       if (aiRes.error) {
-        console.warn(`[SCH-EXT]   AI FU gen failed (${aiType}): ${aiRes.error}`)
+        console.warn(`[SCH-EXT]   AI FU gen failed: ${aiRes.error}`)
         continue
       }
       message = aiRes.message
@@ -318,16 +426,35 @@ async function tryFollowupsForCampaign(campaign, account) {
 
     if (!message) continue
 
-    const threadId = lead.conversations?.[0]?.linkedin_thread_id
-    if (!threadId) continue
-    const threadUrl = `https://www.linkedin.com/messaging/thread/${threadId}/`
+    // Sub-Fase 3.8: si hay thread_id (lead respondió o invite con nota),
+    // usar threadUrl directo. Si NO (invite sin nota), pasar profileUrl.
+    // Supabase devuelve conversations como array si hay múltiples o como objeto si LEFT JOIN single — normalizamos.
+    const conversationsArr = Array.isArray(lead.conversations)
+      ? lead.conversations
+      : (lead.conversations ? [lead.conversations] : [])
+    const threadId = conversationsArr.find(c => c?.linkedin_account_id === account.id)?.linkedin_thread_id
+    const threadUrl = threadId ? `https://www.linkedin.com/messaging/thread/${threadId}/` : null
+    const profileUrl = lead.linkedin_url
+    const navUrl = threadUrl ?? profileUrl
 
     if (DRY_RUN) {
-      console.log(`[SCH-EXT] DRY_RUN FU${step.num} → "${lead.full_name}" (${threadUrl})`)
+      console.log(`[SCH-EXT] DRY_RUN FU${step.num} → "${lead.full_name}" (${navUrl}) thread=${!!threadId}`)
       return { dispatched: false, dryRun: true, step: step.num }
     }
 
-    const cmdId = await dispatchFollowup(account, lead, step.num, message, threadUrl)
+    // Content dedup: si ya enviamos este mismo texto a este lead en últimas 4h,
+    // asume que la send pasada fue real y avanza status. Evita duplicados aún
+    // si hasInFlightCommand no atajó (e.g., cmd completado pero ingest falló).
+    if (await wasMessageRecentlySent(lead.id, message, 4)) {
+      console.warn(`[SCH-EXT]   ⚠️  FU dedup: mensaje idéntico ya enviado a ${lead.full_name} en últimas 4h — forzando advance status`)
+      await supabase.from('leads').update({
+        status: step.statusTo,
+        [step.lastField]: new Date().toISOString(),
+      }).eq('id', lead.id)
+      return { skipped: true, reason: 'content_dedup', leadName: lead.full_name }
+    }
+
+    const cmdId = await dispatchFollowup(account, lead, step.num, message, threadUrl, profileUrl)
     if (!cmdId) continue
 
     await logJob({
@@ -353,7 +480,18 @@ async function tryAutoReplyForCampaign(campaign, account) {
     return { skipped: true, reason: `auto_reply_mode_${mode}` }
   }
 
-  // Find leads que respondieron y aún no les hemos contestado
+  // Cap diario de mensajes (FU+FM combinado)
+  const todayActivity = await getDailyActivityToday(account.id, account.timezone)
+  const msgsToday = todayActivity.messages_sent ?? 0
+  if (msgsToday >= MAX_DAILY_MESSAGES) {
+    return { skipped: true, reason: 'daily_messages_cap_reached', msgsToday, cap: MAX_DAILY_MESSAGES }
+  }
+
+  // Safety gate: solo procesar replies recientes — los históricos viejos
+  // probablemente ya se respondieron manualmente o quedaron en olvido.
+  const maxAgeDays = campaign.fm_max_age_days ?? parseInt(process.env.FM_MAX_AGE_DAYS ?? '7')
+  const tooOldIso = new Date(Date.now() - maxAgeDays * 86_400_000).toISOString()
+
   const { data: replied } = await supabase
     .from('leads')
     .select(`id, full_name, replied_at, profile_data,
@@ -361,6 +499,7 @@ async function tryAutoReplyForCampaign(campaign, account) {
     .eq('campaign_id', campaign.id)
     .eq('conversations.linkedin_account_id', account.id)
     .eq('status', 'replied')
+    .gte('replied_at', tooOldIso)  // ★ safety: no procesar replies >7d
     .not('conversations.linkedin_thread_id', 'is', null)
     .order('replied_at', { ascending: true })
     .limit(5)
@@ -388,6 +527,12 @@ async function tryAutoReplyForCampaign(campaign, account) {
     const lastOutAt = lastOutbound?.sent_at ? new Date(lastOutbound.sent_at).getTime() : 0
     if (lastOutAt > lastInboundAt) continue  // ya respondimos a este reply
 
+    // Lead-level dedup: si hay cmd en flight para este lead, skip (evita doble-reply)
+    if (await hasInFlightCommand(lead.id, 'send_followup')) {
+      console.log(`[SCH-EXT]   ⏭️  AI reply skip ${lead.full_name} — cmd en flight`)
+      continue
+    }
+
     // Delay aleatorio entre detección y respuesta (humanización)
     const delayMin = account.reply_delay_min ?? campaign.auto_reply_delay_min ?? 1
     const delayMax = account.reply_delay_max ?? campaign.auto_reply_delay_max ?? 5
@@ -397,17 +542,35 @@ async function tryAutoReplyForCampaign(campaign, account) {
       continue
     }
 
-    // Determinar qué FM step usar: cuenta cuántos outbound events hay en este thread
-    const { count: outboundCount } = await supabase
+    // Determinar qué FM step usar: cuenta auto_reply events outbound previos
+    const { count: autoReplyCount } = await supabase
       .from('conversation_events')
       .select('id', { count: 'exact', head: true })
       .eq('conversation_id', conv.id)
-      .eq('direction', 'outbound')
-    const fmStep = Math.min((outboundCount ?? 0) + 1, 3)  // FM1, FM2, FM3 max
+      .eq('event_type', 'auto_reply')
+    const fmStep = Math.min((autoReplyCount ?? 0) + 1, 3)  // FM1, FM2, FM3 max
 
-    // Generar respuesta vía AI
-    const aiType = `fm_${fmStep}`
-    const aiRes = await generateAIReply(campaign, lead, conv.last_message_text, fmStep)
+    // Fetch conversation history completa (todos los events del thread, cronológico)
+    const { data: events } = await supabase
+      .from('conversation_events')
+      .select('direction, content, sent_at, event_type')
+      .eq('conversation_id', conv.id)
+      .order('sent_at', { ascending: true })
+      .limit(20)  // últimos 20 mensajes son contexto suficiente
+
+    const conversationHistory = (events ?? []).map(e => ({
+      direction: e.direction,
+      content:   e.content,
+      sent_at:   e.sent_at,
+    }))
+
+    // Generar respuesta vía AI con conversation history + cal_url + objetivo agendar
+    const aiType = `fm_reply_${fmStep}`
+    const aiRes = await generateLinkedInReply(campaign, lead, {
+      conversationHistory,
+      calUrl: account.cal_com_url ?? null,
+      fmStep,
+    })
     if (aiRes.error) {
       console.warn(`[SCH-EXT]   AI reply gen failed: ${aiRes.error}`)
       return { skipped: true, reason: 'ai_gen_failed', error: aiRes.error }
@@ -416,6 +579,12 @@ async function tryAutoReplyForCampaign(campaign, account) {
     if (DRY_RUN) {
       console.log(`[SCH-EXT] DRY_RUN ${aiType} → ${lead.full_name}: "${aiRes.message.slice(0, 80)}..."`)
       return { dispatched: false, dryRun: true }
+    }
+
+    // Content dedup: si el AI generó el mismo texto que ya enviamos antes, skip
+    if (await wasMessageRecentlySent(lead.id, aiRes.message, 4)) {
+      console.warn(`[SCH-EXT]   ⚠️  AI reply dedup: mismo texto ya enviado a ${lead.full_name} — skip`)
+      continue
     }
 
     const threadUrl = `https://www.linkedin.com/messaging/thread/${conv.linkedin_thread_id}/`
@@ -449,18 +618,10 @@ async function tryAutoReplyForCampaign(campaign, account) {
   return { skipped: true, reason: 'no_replies_due' }
 }
 
-// Genera AI reply usando gemini_system_prompt + fm{N}_example_reply como guía
-async function generateAIReply(campaign, lead, leadReplyText, fmStep) {
-  // Construir un campaign sintético que incluye el texto del lead como contexto
-  const augmentedLead = {
-    ...lead,
-    profile_data: {
-      ...(lead.profile_data || {}),
-      lastInboundMessage: leadReplyText,  // se incluye en el user prompt
-    },
-  }
-  // Usar el tipo follow_up_N que tiene más libertad de longitud (500 chars vs 150)
-  return await generateLinkedInMessage(campaign, augmentedLead, `follow_up_${fmStep}`)
+// (legacy removed — ahora usamos generateLinkedInReply con conversation history)
+async function _generateAIReply_DEPRECATED(campaign, lead, leadReplyText, fmStep) {
+  // Mantenida solo como referencia. NO LLAMAR.
+  return await generateLinkedInMessage(campaign, lead, `follow_up_${fmStep}`)
 }
 
 // ── Inbox trigger (3.4) ──────────────────────────────────────────────────────
@@ -576,7 +737,7 @@ async function tick() {
         inbox_gap_min, inbox_paused, last_inbox_check_at,
         sent_invites_gap_min, last_sent_invites_check_at,
         reply_delay_min, reply_delay_max,
-        extension_paused, timezone,
+        extension_paused, timezone, cal_com_url,
         extension_last_seen_at
       )
     `)

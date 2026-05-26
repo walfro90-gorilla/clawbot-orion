@@ -50,23 +50,24 @@ function rangeLabel(range: Range, from?: string, to?: string): string {
   }
 }
 
-// ── Cookie health thresholds (days since last update) ─────────────────────────
-// LinkedIn li_at cookies duran ~1 año pero para automatización rotarlas regularmente
-// reduce riesgo de detección. Umbrales recomendados:
-const COOKIE_WARNING_DAYS  = 30   // 🟡 Planear renovación
-const COOKIE_CRITICAL_DAYS = 60   // 🔴 Riesgo alto
+// ── Extension health thresholds (minutos desde último heartbeat) ─────────────
+// La extension MV3 dispara un heartbeat al WebSocket. Si el Chrome del usuario
+// está cerrado o la extension dormida, no llegan comandos. Umbrales:
+const EXT_WARNING_MIN  = 30      // 🟡 Heartbeat stale (Chrome idle)
+const EXT_CRITICAL_MIN = 60 * 6  // 🔴 6h sin contacto = offline
 
-function cookieHealth(updatedAt: string | null): {
-  status: "ok" | "warning" | "critical" | "unknown"
-  days: number | null
+function extensionHealth(lastSeenAt: string | null, paused: boolean | null): {
+  status: "ok" | "warning" | "critical" | "unknown" | "paused"
+  minutes: number | null
   label: string
-  daysUntilWarning: number | null
 } {
-  if (!updatedAt) return { status: "unknown", days: null, label: "Sin registro", daysUntilWarning: null }
-  const days = Math.floor((Date.now() - new Date(updatedAt).getTime()) / 86_400_000)
-  if (days >= COOKIE_CRITICAL_DAYS) return { status: "critical", days, label: `${days} días`, daysUntilWarning: null }
-  if (days >= COOKIE_WARNING_DAYS)  return { status: "warning",  days, label: `${days} días`, daysUntilWarning: COOKIE_CRITICAL_DAYS - days }
-  return { status: "ok", days, label: `${days} días`, daysUntilWarning: COOKIE_WARNING_DAYS - days }
+  if (paused) return { status: "paused", minutes: null, label: "Pausada por usuario" }
+  if (!lastSeenAt) return { status: "unknown", minutes: null, label: "Nunca conectada" }
+  const mins = Math.floor((Date.now() - new Date(lastSeenAt).getTime()) / 60_000)
+  if (mins >= EXT_CRITICAL_MIN) return { status: "critical", minutes: mins, label: `Offline ${Math.floor(mins/60)}h` }
+  if (mins >= EXT_WARNING_MIN)  return { status: "warning",  minutes: mins, label: `Stale ${mins} min` }
+  if (mins < 1) return { status: "ok", minutes: mins, label: "En línea" }
+  return { status: "ok", minutes: mins, label: `Hace ${mins} min` }
 }
 
 export default async function DashboardPage({
@@ -100,10 +101,10 @@ export default async function DashboardPage({
   // Accounts for cookie health: admin sees all, user sees only their own
   const rawAccountsQuery = isRestricted && linkedAccountId
     ? admin.from("linkedin_accounts")
-        .select("id, label, status, li_at_cookie_updated_at, proxy_url")
+        .select("id, label, status, extension_last_seen_at, extension_paused, warmup_status")
         .eq("id", linkedAccountId)
     : admin.from("linkedin_accounts")
-        .select("id, label, status, li_at_cookie_updated_at, proxy_url")
+        .select("id, label, status, extension_last_seen_at, extension_paused, warmup_status")
         .order("label")
 
   // Active alerts (admin sees all, users see only their account's)
@@ -606,22 +607,22 @@ export default async function DashboardPage({
         <FmPipeline fm1={fm1} fm2={fm2} fm3={fm3} />
       )}
 
-      {/* ── Cookie health monitor ─────────────────────────────────────────────── */}
+      {/* ── Extension health monitor ───────────────────────────────────────────── */}
       {rawAccs.length > 0 && (
         <section className="space-y-3">
           <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">Salud de cookies li_at</h2>
+            <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">Salud de extensiones</h2>
             <span className="text-xs text-gray-600">
-              ⚡ Recomendado renovar cada {COOKIE_WARNING_DAYS}–{COOKIE_CRITICAL_DAYS} días
+              ⚡ Chrome con extension abierto = automatización viva
             </span>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
             {rawAccs.map((acc: any) => (
-              <CookieHealthCard key={acc.id} account={acc} />
+              <ExtensionHealthCard key={acc.id} account={acc} />
             ))}
           </div>
           <p className="text-xs text-gray-600 text-right">
-            Actualiza las cookies en{" "}
+            Detalles en{" "}
             <Link href="/dashboard/accounts" className="text-blue-400 hover:text-blue-300">
               Cuentas LinkedIn →
             </Link>
@@ -705,17 +706,25 @@ function AlertCard({ alert }: { alert: any }) {
   )
 }
 
-// ── Cookie health card ────────────────────────────────────────────────────────
+// ── Extension health card ────────────────────────────────────────────────────
 
 const HEALTH_STYLES = {
-  ok:       { ring: "border-green-500/30",  bg: "bg-green-500/10",  text: "text-green-400",  dot: "bg-green-400",  label: "OK" },
-  warning:  { ring: "border-yellow-500/30", bg: "bg-yellow-500/10", text: "text-yellow-400", dot: "bg-yellow-400", label: "Renovar pronto" },
-  critical: { ring: "border-red-500/40",    bg: "bg-red-500/10",    text: "text-red-400",    dot: "bg-red-500 animate-pulse", label: "Urgente" },
-  unknown:  { ring: "border-gray-600/40",   bg: "bg-gray-700/20",   text: "text-gray-400",   dot: "bg-gray-500",  label: "Sin registro" },
+  ok:       { ring: "border-green-500/30",  bg: "bg-green-500/10",  text: "text-green-400",  label: "Conectada" },
+  warning:  { ring: "border-yellow-500/30", bg: "bg-yellow-500/10", text: "text-yellow-400", label: "Stale" },
+  critical: { ring: "border-red-500/40",    bg: "bg-red-500/10",    text: "text-red-400",    label: "Offline" },
+  unknown:  { ring: "border-gray-600/40",   bg: "bg-gray-700/20",   text: "text-gray-400",   label: "Sin registro" },
+  paused:   { ring: "border-blue-500/30",   bg: "bg-blue-500/10",   text: "text-blue-400",   label: "Pausada" },
 }
 
-function CookieHealthCard({ account }: { account: any }) {
-  const health = cookieHealth(account.li_at_cookie_updated_at)
+const WARMUP_LABEL: Record<string, string> = {
+  cold:    "❄️ Cold (cap bajo)",
+  warming: "🌡️ Warming",
+  warm:    "🔥 Warm",
+  hot:     "🚀 Hot",
+}
+
+function ExtensionHealthCard({ account }: { account: any }) {
+  const health = extensionHealth(account.extension_last_seen_at, account.extension_paused)
   const s = HEALTH_STYLES[health.status]
 
   const statusDot: Record<string, string> = {
@@ -724,6 +733,11 @@ function CookieHealthCard({ account }: { account: any }) {
     banned:       "bg-red-500",
     disconnected: "bg-gray-500",
   }
+
+  // Progress bar: 0 min = 0%, 6h = 100% (stale ratio)
+  const stalePct = health.minutes !== null
+    ? Math.min(Math.round((health.minutes / EXT_CRITICAL_MIN) * 100), 100)
+    : 100
 
   return (
     <div className={`bg-gray-900 border ${s.ring} rounded-xl p-4 space-y-3`}>
@@ -738,49 +752,39 @@ function CookieHealthCard({ account }: { account: any }) {
         </span>
       </div>
 
-      {/* Cookie age bar */}
+      {/* Heartbeat row */}
       <div className="space-y-1.5">
         <div className="flex justify-between items-center text-xs">
-          <span className="text-gray-400">Cookie li_at</span>
+          <span className="text-gray-400">Heartbeat extension</span>
           <span className={`font-medium ${s.text}`}>{health.label}</span>
         </div>
 
-        {/* Progress bar — días usados sobre 60 días */}
+        {/* Progress bar inverted: full=stale, empty=fresh */}
         <div className="w-full bg-gray-800 rounded-full h-2">
           <div
             className={`h-2 rounded-full transition-all ${
               health.status === "critical" ? "bg-red-500" :
               health.status === "warning"  ? "bg-yellow-500" :
-              health.status === "unknown"  ? "bg-gray-600" :
+              health.status === "unknown" || health.status === "paused"  ? "bg-gray-600" :
               "bg-green-500"
             }`}
-            style={{ width: `${health.days !== null ? Math.min(Math.round(health.days / COOKIE_CRITICAL_DAYS * 100), 100) : 100}%` }}
+            style={{ width: `${health.status === "ok" ? Math.max(10, 100 - stalePct) : stalePct}%` }}
           />
         </div>
 
         <div className="flex justify-between text-xs text-gray-600">
-          <span>Actualizada hace {health.days !== null ? `${health.days}d` : "?"}</span>
-          {health.status === "ok" && health.daysUntilWarning !== null && (
-            <span>🟡 en ~{health.daysUntilWarning}d</span>
-          )}
-          {health.status === "warning" && health.daysUntilWarning !== null && (
-            <span className="text-yellow-600">🔴 en ~{health.daysUntilWarning}d</span>
-          )}
+          <span>{WARMUP_LABEL[account.warmup_status as string] ?? account.warmup_status ?? "—"}</span>
           {(health.status === "critical" || health.status === "unknown") && (
             <Link href="/dashboard/accounts" className="text-red-400 hover:text-red-300 font-medium">
-              Renovar ahora →
+              Reconectar →
+            </Link>
+          )}
+          {health.status === "paused" && (
+            <Link href="/dashboard/accounts" className="text-blue-400 hover:text-blue-300 font-medium">
+              Configurar →
             </Link>
           )}
         </div>
-      </div>
-
-      {/* Proxy status */}
-      <div className="flex items-center gap-1.5 text-xs">
-        {account.proxy_url ? (
-          <><span className="w-1.5 h-1.5 rounded-full bg-green-400" /><span className="text-gray-500">Proxy configurado</span></>
-        ) : (
-          <><span className="w-1.5 h-1.5 rounded-full bg-red-500" /><span className="text-red-400/80">Sin proxy — riesgo alto</span></>
-        )}
       </div>
     </div>
   )

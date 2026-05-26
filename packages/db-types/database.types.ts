@@ -327,6 +327,7 @@ export type Database = {
           fm2_example_reply: string | null
           fm3_example_reply: string | null
           follow_up_delay_days: number | null
+          follow_up_jitter_hours: number
           follow_up_message: string | null
           follow_up_paused: boolean | null
           follow_up_step2_delay_days: number | null
@@ -386,6 +387,7 @@ export type Database = {
           fm2_example_reply?: string | null
           fm3_example_reply?: string | null
           follow_up_delay_days?: number | null
+          follow_up_jitter_hours?: number
           follow_up_message?: string | null
           follow_up_paused?: boolean | null
           follow_up_step2_delay_days?: number | null
@@ -445,6 +447,7 @@ export type Database = {
           fm2_example_reply?: string | null
           fm3_example_reply?: string | null
           follow_up_delay_days?: number | null
+          follow_up_jitter_hours?: number
           follow_up_message?: string | null
           follow_up_paused?: boolean | null
           follow_up_step2_delay_days?: number | null
@@ -1387,6 +1390,111 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "v_campaign_stats"
             referencedColumns: ["campaign_id"]
+          },
+        ]
+      }
+      ui_pattern_failures: {
+        Row: {
+          account_id: string | null
+          action: string
+          command_id: string | null
+          created_at: string
+          dom_snippet: Json | null
+          error: string
+          ext_version: string | null
+          id: string
+          labeled_at: string | null
+          labeled_by: string | null
+          labeled_notes: string | null
+          labeled_selector: string | null
+          occurrence_count: number
+          reason: string | null
+          related_lead_id: string | null
+          resolved_in_version: string | null
+          screenshot_path: string | null
+          status: string
+          updated_at: string
+          url: string | null
+        }
+        Insert: {
+          account_id?: string | null
+          action: string
+          command_id?: string | null
+          created_at?: string
+          dom_snippet?: Json | null
+          error: string
+          ext_version?: string | null
+          id?: string
+          labeled_at?: string | null
+          labeled_by?: string | null
+          labeled_notes?: string | null
+          labeled_selector?: string | null
+          occurrence_count?: number
+          reason?: string | null
+          related_lead_id?: string | null
+          resolved_in_version?: string | null
+          screenshot_path?: string | null
+          status?: string
+          updated_at?: string
+          url?: string | null
+        }
+        Update: {
+          account_id?: string | null
+          action?: string
+          command_id?: string | null
+          created_at?: string
+          dom_snippet?: Json | null
+          error?: string
+          ext_version?: string | null
+          id?: string
+          labeled_at?: string | null
+          labeled_by?: string | null
+          labeled_notes?: string | null
+          labeled_selector?: string | null
+          occurrence_count?: number
+          reason?: string | null
+          related_lead_id?: string | null
+          resolved_in_version?: string | null
+          screenshot_path?: string | null
+          status?: string
+          updated_at?: string
+          url?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "ui_pattern_failures_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: false
+            referencedRelation: "linkedin_accounts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "ui_pattern_failures_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: false
+            referencedRelation: "v_account_today"
+            referencedColumns: ["account_id"]
+          },
+          {
+            foreignKeyName: "ui_pattern_failures_command_id_fkey"
+            columns: ["command_id"]
+            isOneToOne: false
+            referencedRelation: "extension_commands"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "ui_pattern_failures_related_lead_id_fkey"
+            columns: ["related_lead_id"]
+            isOneToOne: false
+            referencedRelation: "leads"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "ui_pattern_failures_related_lead_id_fkey"
+            columns: ["related_lead_id"]
+            isOneToOne: false
+            referencedRelation: "v_lead_pipeline"
+            referencedColumns: ["id"]
           },
         ]
       }

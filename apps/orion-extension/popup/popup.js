@@ -17,7 +17,15 @@ const $statusDot  = document.getElementById('status-dot')
 const $statusText = document.getElementById('status-text')
 const $updateBanner  = document.getElementById('update-banner')
 const $updateVersion = document.getElementById('update-version')
-const $updateLink    = document.getElementById('update-link')
+const $updateCmd     = document.getElementById('update-cmd')
+const $updateCopy    = document.getElementById('update-copy')
+const $currentInline = document.getElementById('current-version-inline')
+
+// Render current version en el banner cuando aparezca
+try {
+  const cv = chrome.runtime.getManifest().version
+  if ($currentInline) $currentInline.textContent = cv
+} catch {}
 const $errorBanner   = document.getElementById('error-banner')
 const $errorTitle    = document.getElementById('error-title')
 const $errorDetail   = document.getElementById('error-detail')
@@ -88,21 +96,50 @@ async function refreshStatus() {
   }
 }
 
-// ── Update banner ─────────────────────────────────────────────────────────
+// ── Update check + banner ─────────────────────────────────────────────────
+
+// Trigger un update-check inmediato al SW (no esperar 60min de chrome.alarms)
+async function forceUpdateCheck() {
+  try {
+    await chrome.runtime.sendMessage({ type: 'force_update_check' })
+  } catch {
+    // SW puede estar dormido — el alarm de keep-alive lo despertará
+  }
+}
 
 async function checkUpdateBanner() {
   const { update_available } = await chrome.storage.local.get('update_available')
   if (update_available?.version) {
     $updateVersion.textContent = `v${update_available.version}`
     const isWindows = navigator.userAgent.includes('Windows')
-    $updateLink.href = isWindows
+    const url = isWindows
       ? (update_available.installers?.windows ?? update_available.tarballUrl)
       : (update_available.installers?.unix ?? update_available.tarballUrl)
+    // El installer se ejecuta vía PowerShell/bash, NO directo en browser.
+    // Mostramos el comando one-liner para que el usuario lo copie y pegue.
+    const cmd = isWindows
+      ? `irm ${url} | iex`
+      : `curl -fsSL ${url} | bash`
+    $updateCmd.textContent = cmd
     $updateBanner.style.display = 'block'
   } else {
     $updateBanner.style.display = 'none'
   }
 }
+
+// Copy install command al clipboard
+$updateCopy?.addEventListener('click', async () => {
+  const cmd = $updateCmd.textContent
+  if (!cmd) return
+  try {
+    await navigator.clipboard.writeText(cmd)
+    const orig = $updateCopy.textContent
+    $updateCopy.textContent = '✓ Copiado'
+    setTimeout(() => { $updateCopy.textContent = orig }, 1500)
+  } catch (err) {
+    alert('No se pudo copiar. Selecciona el comando manual y Ctrl+C.')
+  }
+})
 
 // ── Error banner ──────────────────────────────────────────────────────────
 
@@ -298,9 +335,13 @@ $disconnect.addEventListener('click', async () => {
 
 loadStored()
   .then(refreshStatus)
+  .then(forceUpdateCheck)      // ★ check de update INMEDIATO al abrir popup
   .then(checkUpdateBanner)
   .then(refreshErrorBanner)
   .then(refreshMonitor)
+
+// Re-check update banner a los 3s para captar el resultado del forceUpdateCheck
+setTimeout(checkUpdateBanner, 3000)
 
 setInterval(refreshStatus, 2_000)
 setInterval(refreshMonitor, 5_000)

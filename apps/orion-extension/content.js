@@ -11,27 +11,46 @@
 // scripts de LinkedIn (ej. para leer Voyager API), usaríamos chrome.scripting.
 // ─────────────────────────────────────────────────────────────────────────────
 
-console.log('[Orion content] v0.5.5 loaded on', window.location.href)
+console.log('[Orion content] v0.6.0 loaded on', window.location.href)
 
 // ── Keep-alive port para que el service worker no se duerma ─────────────────
 // MV3 mata el SW después de 30s idle. Mientras esta página de LinkedIn esté
 // abierta, mantenemos un Port conectado que evita que el SW muera. Cuando
 // cierres la tab, el SW puede dormir (sin actividad).
 let keepAlivePort = null
+let keepAliveDead = false  // true si el extension context fue invalidado — STOP retry
+
 function startKeepAlive() {
+  if (keepAliveDead) return  // contexto muerto — no reintentamos infinitamente
   try {
     keepAlivePort = chrome.runtime.connect({ name: 'keep-alive' })
     keepAlivePort.onDisconnect.addListener(() => {
+      // Si chrome.runtime.lastError dice "Extension context invalidated",
+      // significa que la extension fue recargada / actualizada. El content.js
+      // de esta tab está huérfano. STOP retry — la tab necesita F5.
+      const err = chrome.runtime.lastError?.message ?? ''
+      if (/extension context invalidated|extension context was invalidated/i.test(err)) {
+        console.warn('[Orion content] Extension context invalidated — orphaned. Reload tab (F5) to reconnect.')
+        keepAliveDead = true
+        return
+      }
       console.log('[Orion content] keep-alive port disconnected — reconnecting in 1s')
       keepAlivePort = null
       setTimeout(startKeepAlive, 1000)
     })
     // Ping periódico para mantener actividad
     setInterval(() => {
+      if (keepAliveDead) return
       try { keepAlivePort?.postMessage({ type: 'ping', ts: Date.now() }) } catch {}
     }, 10_000)
     console.log('[Orion content] keep-alive port activo')
   } catch (err) {
+    // chrome.runtime.connect lanza si extension context invalidated
+    if (/extension context invalidated|extension context was invalidated/i.test(err.message ?? '')) {
+      console.warn('[Orion content] Extension context invalidated en startKeepAlive — STOP retry. Reload tab (F5).')
+      keepAliveDead = true
+      return
+    }
     console.warn('[Orion content] keep-alive failed:', err.message)
     setTimeout(startKeepAlive, 2000)
   }
@@ -1090,22 +1109,73 @@ async function humanType(el, text) {
 //   6. !dryRun: click Send (botón regular, no anchor) + esperar confirmation
 
 async function sendFollowup(payload = {}) {
-  const { threadUrl, message, leadName, dryRun } = payload
-  console.log(`[Orion content] sendFollowup: thread=${threadUrl?.slice(0, 60)}, dryRun=${dryRun}`)
+  const { threadUrl, profileUrl, message, leadName, dryRun } = payload
+  console.log(`[Orion content] sendFollowup: thread=${threadUrl?.slice(0, 60)}, profile=${profileUrl?.slice(0, 60)}, dryRun=${dryRun}`)
 
-  // 1. Verificar URL
-  if (!location.href.includes('/messaging/thread/')) {
+  // Sub-Fase 3.8: detectar contexto:
+  // - /in/<vanity>/ → click "Mensaje" → redirige a /messaging/compose/
+  // - /messaging/compose/?recipient=... → composer pantalla completa (write+send)
+  // - /messaging/thread/<id>/ → thread existente (flow original)
+  const isProfilePage = /\/in\//.test(location.pathname) && !/\/messaging\//.test(location.pathname)
+  const isThreadPage  = location.href.includes('/messaging/thread/')
+  const isComposePage = /\/messaging\/compose/.test(location.pathname)
+
+  if (isProfilePage) {
+    return await sendFollowupFromProfile(payload)
+  }
+
+  // 1. Verificar URL: thread o compose page son válidas para escribir
+  if (!isThreadPage && !isComposePage) {
     return {
       action: 'send_followup',
       status: 'error',
-      error:  'not_on_thread_page',
+      error:  'not_on_thread_compose_or_profile_page',
       currentUrl: location.href,
+      pathname: location.pathname,
     }
   }
 
   // 2. Captcha/checkpoint check
   if (/\/checkpoint|\/challenge|\/authwall/.test(location.href)) {
     return { action: 'send_followup', status: 'error', error: 'captcha_or_checkpoint' }
+  }
+
+  // 2a. Profile 404: LinkedIn redirige a /404/ cuando el perfil fue borrado o
+  // está restringido. Marca lead como dead permanente (no más retries).
+  if (/\/404\//.test(location.pathname)) {
+    return {
+      action: 'send_followup',
+      status: 'error',
+      error:  'profile_not_found',
+      reason: 'linkedin_404_page',
+      url:    location.href,
+    }
+  }
+
+  // 2b. Sales Nav / InMail redirect = lead es 2do grado, NO conectado.
+  // LinkedIn redirige a /sales/ cuando intentas msj a alguien que no es 1er grado.
+  // Esto dispara el revert automático en extension-bridge.
+  if (/\/sales\//.test(location.href)) {
+    return {
+      action: 'send_followup',
+      status: 'error',
+      error:  'lead_not_first_degree',
+      reason: 'sales_nav_redirect',
+      url:    location.href,
+    }
+  }
+  // El overlay InMail tiene texto "créditos disponibles" o "Mensaje InMail"
+  const inmailHint = Array.from(document.querySelectorAll('h2, h3, p, span'))
+    .slice(0, 50)
+    .find(el => /créditos disponibles|InMail credits|de \d+ créditos/i.test(el.textContent ?? ''))
+  if (inmailHint) {
+    return {
+      action: 'send_followup',
+      status: 'error',
+      error:  'lead_not_first_degree',
+      reason: 'inmail_required',
+      url:    location.href,
+    }
   }
 
   // 3. Esperar al editor del thread — selectores múltiples + fallback ultra-permissive
@@ -1145,6 +1215,27 @@ async function sendFollowup(payload = {}) {
         classes: (el.className ?? '').slice(0, 80),
         visible: el.offsetParent !== null,
       }))
+
+    // Patrón "compose-page-2nd-degree": estamos en /messaging/compose/, el editor
+    // nunca aparece, y los únicos elementos editables son el search global + el
+    // textarea oculto de recaptcha. LinkedIn esconde el editor cuando es 2do grado
+    // SIN redirigir a /sales/ ni mostrar "créditos disponibles". Auto-revert.
+    if (isComposePage && allEditables.length <= 3) {
+      const hasOnlyNoise = allEditables.every(e =>
+        (e.classes ?? '').includes('search-global-typeahead') ||
+        (e.classes ?? '').includes('g-recaptcha-response')
+      )
+      if (hasOnlyNoise) {
+        return {
+          action: 'send_followup',
+          status: 'error',
+          error:  'lead_not_first_degree',
+          reason: 'compose_no_editor_recaptcha_only',
+          url:    location.href,
+        }
+      }
+    }
+
     return {
       action: 'send_followup',
       status: 'error',
@@ -1194,29 +1285,467 @@ async function sendFollowup(payload = {}) {
     }
   }
 
-  // 7. Click Send button (botón regular del thread footer)
-  const sendBtn = findThreadSendButton()
+  // 7. Click Send button (botón regular del thread footer / compose page)
+  // El send button puede aparecer tardío en compose page — pequeño retry
+  let sendBtn = findThreadSendButton()
+  if (!sendBtn) {
+    await sleep(1200)
+    sendBtn = findThreadSendButton()
+  }
   if (!sendBtn) {
     return {
       action: 'send_followup',
       status: 'error',
       error:  'send_button_not_found',
-      visibleBtns: listVisibleButtons(),
+      path:   isComposePage ? 'compose_page' : 'thread_page',
+      currentUrl: location.href,
+      debugButtons: listAllVisibleButtonsVerbose(),
     }
   }
+  console.log(`[Orion content] Send button: aria="${sendBtn.getAttribute('aria-label')}" cls="${(sendBtn.className ?? '').slice(0, 60)}"`)
   await humanClick(sendBtn)
   await sleep(randInt(2000, 3000))
 
   // 8. Verificar que el mensaje aparece en el thread (último mensaje)
   const confirmed = await verifyFollowupSent(message)
 
+  // Sub-Fase 3.8: si veníamos de /messaging/compose/, capturar thread_id post-send.
+  // LinkedIn redirige a /messaging/thread/<new_id>/ tras enviar.
+  let threadIdCaptured = null
+  if (isComposePage) {
+    // Wait hasta 6s a que URL cambie a /thread/
+    const waitStart = Date.now()
+    while (Date.now() - waitStart < 6000) {
+      if (/\/messaging\/thread\//.test(location.pathname)) break
+      await sleep(300)
+    }
+    const m = location.href.match(/\/messaging\/thread\/([^/?#]+)/)
+    if (m) threadIdCaptured = decodeURIComponent(m[1])
+    // Fallback: scrape DOM por algún anchor al thread recién creado
+    if (!threadIdCaptured) {
+      const a = document.querySelector('a[href*="/messaging/thread/"]')
+      if (a) {
+        const m2 = a.getAttribute('href').match(/\/messaging\/thread\/([^/?#]+)/)
+        if (m2) threadIdCaptured = decodeURIComponent(m2[1])
+      }
+    }
+  }
+
   return {
     action: 'send_followup',
     status: confirmed ? 'sent' : 'sent_unconfirmed',
     editorUsed: true,
     headerName,
+    path: isComposePage ? 'compose_page' : 'thread_page',
+    threadIdCaptured,
     sentAt: new Date().toISOString(),
   }
+}
+
+// ── Sub-Fase 3.8: sendFollowupFromProfile ────────────────────────────────────
+// Cuando el lead aceptó invite sin nota, no hay thread previo. Navegamos a
+// /in/<vanity>/, click botón "Mensaje", esperamos overlay compose, escribimos
+// + enviamos. LinkedIn crea el thread y nos da thread_id en el URL post-send.
+
+async function sendFollowupFromProfile(payload) {
+  const { message, leadName, dryRun } = payload
+  console.log(`[Orion content] sendFollowupFromProfile: lead=${leadName}, dryRun=${dryRun}`)
+
+  // 1. Captcha check
+  if (/\/checkpoint|\/challenge|\/authwall/.test(location.href)) {
+    return { action: 'send_followup', status: 'error', error: 'captcha_or_checkpoint' }
+  }
+
+  // 2. Esperar a que el TOP CARD del perfil aparezca (más confiable que sleep fijo)
+  const topCardSels = [
+    'main section.artdeco-card',
+    'main .pv-top-card',
+    'main [class*="ph5"][class*="pb5"]',
+    'main [class*="top-card"]',
+  ]
+  await waitForSelector(topCardSels, 12000)
+  await sleep(randInt(2000, 3500))  // hidratación React + load buttons
+
+  // ★ Detectar si invite sigue PENDIENTE → revertir false positive de check_sent_invites
+  // No bloqueamos por grado (LinkedIn permite mensajes a 2do con Sales Nav/Premium).
+  // Solo bloqueamos si el invite NO fue aceptado (todavía pending).
+  if (isInvitePending()) {
+    return {
+      action: 'send_followup',
+      status: 'error',
+      error:  'lead_invite_still_pending',
+      note:   'Lead aún en pending — check_sent_invites false positive. Bridge revertirá a invite_sent.',
+      currentUrl: location.href,
+    }
+  }
+
+  let messageBtn = findProfileMessageButton(leadName)
+
+  // Fallback 1: scroll al top y reintentar (a veces hidratación tardía)
+  if (!messageBtn) {
+    window.scrollTo({ top: 0, behavior: 'instant' })
+    await sleep(1500)
+    messageBtn = findProfileMessageButton(leadName)
+  }
+
+  // Fallback 2: si hay botón "Más" en top card, abrir dropdown y buscar dentro
+  if (!messageBtn) {
+    const moreBtn = findProfileMoreButton()
+    if (moreBtn) {
+      console.log('[Orion content] No directo "Mensaje" — probando dropdown "Más"')
+      await humanClick(moreBtn)
+      await sleep(randInt(1200, 2200))
+      messageBtn = findMessageInDropdown()
+    }
+  }
+
+  if (!messageBtn) {
+    // 2do grado detection: si NO hay "Mensaje" pero SÍ "Seguir" o "Conectar"
+    // como botones principales del top card → el lead no es 1er grado.
+    // Dispara el revert automático en extension-bridge.
+    const topBtns = Array.from(document.querySelectorAll('main button, main a[role="button"], .pv-top-card button'))
+      .filter(b => b.offsetParent !== null)
+      .slice(0, 30)
+    const hasFollowBtn = topBtns.some(b => {
+      const t = (b.textContent ?? '').trim().toLowerCase()
+      const aria = (b.getAttribute('aria-label') ?? '').toLowerCase()
+      return t === 'seguir' || t === 'follow' || /^(seguir|follow)\b/.test(aria)
+    })
+    const hasConnectBtn = topBtns.some(b => {
+      const t = (b.textContent ?? '').trim().toLowerCase()
+      const aria = (b.getAttribute('aria-label') ?? '').toLowerCase()
+      return t === 'conectar' || t === 'connect' || /^(invitar|invite|connect|conectar)\b/.test(aria)
+    })
+    // Si vemos "Seguir" o "Conectar" prominente → confirmado 2do grado / no aceptado
+    if (hasFollowBtn || hasConnectBtn) {
+      return {
+        action: 'send_followup',
+        status: 'error',
+        error:  'lead_not_first_degree',
+        reason: hasConnectBtn ? 'profile_shows_connect_btn' : 'profile_shows_follow_only',
+        url:    location.href,
+      }
+    }
+    return {
+      action: 'send_followup',
+      status: 'error',
+      error:  'profile_message_button_not_found',
+      url:    location.href,
+      topCardBtns: dumpTopCardButtons(),
+      visibleBtns: listVisibleButtons().slice(0, 12),
+    }
+  }
+
+  // Inspeccionar el botón antes de actuar
+  const btnTag = messageBtn.tagName
+  const btnHref = messageBtn.getAttribute?.('href') ?? null
+  const btnAria = messageBtn.getAttribute?.('aria-label') ?? ''
+  const btnText = (messageBtn.textContent ?? '').trim().slice(0, 60)
+  console.log(`[Orion content] Botón Mensaje: tag=${btnTag} text="${btnText}" aria="${btnAria}" href="${btnHref}"`)
+
+  // Sub-Fase 2.3 insight: LinkedIn filtra clicks sintéticos en anchors con SPA
+  // route href (isTrusted=false). Si es anchor con href, navegamos directo.
+  const isSpaAnchor = btnTag === 'A' && btnHref && (
+    /\/messaging\//.test(btnHref) || /overlay\/compose/.test(btnHref)
+  )
+
+  if (isSpaAnchor) {
+    // CONTENT.JS NO PUEDE NAVEGAR vía location.href si LinkedIn hace full reload —
+    // content.js muere antes de retornar y bridge ve "message channel closed".
+    // SOLUCIÓN: devolver el href al background.js que navega via chrome.tabs.update
+    // (no destruye content.js de la misma forma) y re-dispatcha el comando.
+    const fullUrl = btnHref.startsWith('http') ? btnHref : `https://www.linkedin.com${btnHref}`
+    console.log(`[Orion content] Anchor SPA — devolviendo needs_redirect a background: ${fullUrl}`)
+    return {
+      action: 'send_followup',
+      status: 'needs_redirect',
+      redirectUrl: fullUrl,
+      btnHref,
+      note: 'Background.js debe navegar via chrome.tabs.update + re-dispatch del comando',
+    }
+  }
+
+  // Botón regular: click normal (humanClick humanizado)
+  console.log('[Orion content] Botón regular — humanClick')
+  await humanClick(messageBtn)
+  await sleep(randInt(2500, 4000))  // espera overlay open + hidratación React
+
+  // 3. Buscar el editor del overlay compose — extended timeout + más selectores
+  const overlayEditorSels = [
+    '.msg-form__contenteditable',
+    'div.msg-form__contenteditable',
+    '[class*="msg-form__contenteditable"]',
+    '[class*="msg-form"] [contenteditable="true"]',
+    '[class*="overlay"] [contenteditable="true"]',
+    '[class*="compose"] [contenteditable="true"]',
+    'div[contenteditable="true"][role="textbox"]',
+    'div[contenteditable="true"][aria-label*="mensaje" i]',
+    'div[contenteditable="true"][aria-label*="message" i]',
+    'div[contenteditable="true"][aria-label*="escribir" i]',
+    'div[contenteditable="true"][aria-label*="write" i]',
+    '.msg-overlay-conversation-bubble [contenteditable="true"]',
+    '.msg-overlay-container [contenteditable="true"]',
+    'textarea[name*="message" i]',
+    'textarea[aria-label*="mensaje" i]',
+  ]
+  // 20s timeout (estaba 10s — overlay puede tardar en hidratarse)
+  const editorSel = await waitForSelector(overlayEditorSels, 20000)
+  let editor = editorSel ? document.querySelector(editorSel) : null
+  if (!editor || editor.offsetParent === null) {
+    // Fallback: cualquier contenteditable o textarea visible >100w
+    await sleep(2500)
+    editor = Array.from(document.querySelectorAll('div[contenteditable="true"], textarea'))
+      .find(el => {
+        if (el.offsetParent === null) return false
+        const r = el.getBoundingClientRect()
+        return r.width > 100 && r.height > 20
+      })
+  }
+  if (!editor) {
+    // Debug exhaustivo: dump del DOM relevante para diagnosticar
+    const allEditables = Array.from(document.querySelectorAll('div[contenteditable], textarea, input[type="text"]'))
+      .slice(0, 20)
+      .map(el => ({
+        tag: el.tagName,
+        editable: el.getAttribute('contenteditable'),
+        type: el.getAttribute('type'),
+        aria: (el.getAttribute('aria-label') ?? '').slice(0, 60),
+        classes: (el.className?.toString() ?? '').slice(0, 100),
+        visible: el.offsetParent !== null,
+        rect: el.offsetParent ? (() => { const r=el.getBoundingClientRect(); return `${Math.round(r.width)}x${Math.round(r.height)}` })() : null,
+      }))
+    // Overlays / modales visibles
+    const overlays = Array.from(document.querySelectorAll('[class*="overlay"], [class*="modal"], [role="dialog"]'))
+      .slice(0, 10)
+      .map(el => ({
+        classes: (el.className?.toString() ?? '').slice(0, 100),
+        visible: el.offsetParent !== null,
+        hasContentEditable: !!el.querySelector('[contenteditable="true"]'),
+      }))
+    // ¿Tenemos iframes? LinkedIn a veces embebe compose en iframe
+    const iframes = Array.from(document.querySelectorAll('iframe')).map(el => ({
+      src: (el.getAttribute('src') ?? '').slice(0, 80),
+      visible: el.offsetParent !== null,
+    }))
+    return {
+      action: 'send_followup',
+      status: 'error',
+      error:  'compose_editor_not_found_in_overlay',
+      currentUrl: location.href,
+      allEditables,
+      overlays,
+      iframes,
+      visibleBtns: listVisibleButtons().slice(0, 10),
+    }
+  }
+
+  // 4. Type humanizado
+  console.log(`[Orion content] Typing en compose overlay (${message.length} chars)`)
+  editor.focus()
+  await sleep(randInt(300, 600))
+  await humanTypeContentEditable(editor, message.slice(0, 8000))
+  await sleep(randInt(500, 1000))
+
+  // 5. dryRun: cerrar overlay sin enviar
+  if (dryRun) {
+    console.log('[Orion content] DRY RUN compose-new — limpiando editor')
+    editor.innerHTML = ''
+    editor.dispatchEvent(new Event('input', { bubbles: true }))
+    // Cerrar overlay si posible
+    const closeBtn = document.querySelector('.msg-overlay-bubble-header button[aria-label*="cerrar" i], .msg-overlay-bubble-header button[aria-label*="close" i]')
+    if (closeBtn) { try { await humanClick(closeBtn) } catch {} }
+    return {
+      action: 'send_followup',
+      status: 'dry_run_ok',
+      editorUsed: true,
+      messageLength: message.length,
+      path: 'profile_compose_new',
+    }
+  }
+
+  // 6. Click Send button del overlay
+  let sendBtn = findThreadSendButton()
+  if (!sendBtn) {
+    await sleep(1200)
+    sendBtn = findThreadSendButton()
+  }
+  if (!sendBtn) {
+    return {
+      action: 'send_followup',
+      status: 'error',
+      error:  'send_button_not_found_in_overlay',
+      currentUrl: location.href,
+      debugButtons: listAllVisibleButtonsVerbose(),
+    }
+  }
+  console.log(`[Orion content] Send button (overlay): aria="${sendBtn.getAttribute('aria-label')}" cls="${(sendBtn.className ?? '').slice(0, 60)}"`)
+  await humanClick(sendBtn)
+  await sleep(randInt(2500, 3500))
+
+  // 7. Capturar thread_id del DOM (LinkedIn crea el thread y agrega el ID a
+  // algún atributo o URL del overlay). Buscamos en hrefs visibles + URL actual.
+  let capturedThreadId = null
+  // En la URL actual
+  const urlMatch = location.href.match(/messaging\/thread\/([^/?#]+)/)
+  if (urlMatch) capturedThreadId = decodeURIComponent(urlMatch[1])
+  // O en cualquier link visible al thread
+  if (!capturedThreadId) {
+    const threadAnchor = document.querySelector('a[href*="/messaging/thread/"]')
+    if (threadAnchor) {
+      const m = threadAnchor.getAttribute('href').match(/\/messaging\/thread\/([^/?#]+)/)
+      if (m) capturedThreadId = decodeURIComponent(m[1])
+    }
+  }
+
+  return {
+    action: 'send_followup',
+    status: 'sent',
+    editorUsed: true,
+    path: 'profile_compose_new',
+    threadIdCaptured: capturedThreadId,
+    sentAt: new Date().toISOString(),
+  }
+}
+
+// Detecta el estado del invite del lead viendo el top card.
+// Returns: 'connected_1st', 'pending', 'not_connected', 'unknown'
+function detectLeadInviteStatus() {
+  // Buscar el indicador de grado cerca del h1 (ej: "• 1er" o "• 2º" o "• 3º")
+  const h1 = Array.from(document.querySelectorAll('main h1')).find(h => h.offsetParent !== null)
+  if (h1) {
+    // El degree indicator suele estar en un span o div cerca al h1
+    const container = h1.closest('section, div') ?? h1.parentElement
+    const text = (container?.textContent ?? '').toLowerCase()
+    if (/•\s*1(er|st)/.test(text)) return 'connected_1st'
+    if (/•\s*2[ºoº]/.test(text)) return 'not_first_degree'
+    if (/•\s*3[ºoº]/.test(text)) return 'not_first_degree'
+  }
+  // Check si el top card tiene botón "+ Seguir" como primario (indica no 1er degree)
+  const topCard = findTopCard() ?? document
+  const buttons = Array.from(topCard.querySelectorAll('button'))
+  const hasFollow = buttons.some(b => {
+    if (b.offsetParent === null) return false
+    const t = (b.textContent ?? '').trim().toLowerCase()
+    return /^(\+ )?seguir$|^(\+ )?follow$/.test(t)
+  })
+  const hasPending = buttons.some(b => {
+    if (b.offsetParent === null) return false
+    const t = (b.textContent ?? '').trim().toLowerCase()
+    return t === 'pendiente' || t === 'pending'
+  })
+  if (hasPending) return 'pending'
+  if (hasFollow) return 'not_first_degree'
+  return 'unknown'
+}
+
+// Detecta si el invite sigue Pendiente (puede estar en dropdown "Más" o como botón directo)
+function isInvitePending() {
+  // Click directo al botón "Pendiente" si existe sin abrir dropdown
+  const topCard = findTopCard() ?? document
+  const allBtns = Array.from(topCard.querySelectorAll('button, [role="menuitem"]'))
+  return allBtns.some(b => {
+    const t = (b.textContent ?? '').trim().toLowerCase()
+    return t === 'pendiente' || t === 'pending'
+  })
+}
+
+// Find botón "Enviar mensaje" / "Mensaje" / "Message" en el top card del LEAD.
+function findProfileMessageButton(expectedLeadName) {
+  const h1 = Array.from(document.querySelectorAll('main h1')).find(h => h.offsetParent !== null)
+  let topCard = h1?.closest('section.artdeco-card, .pv-top-card, [class*="top-card"], [class*="ph5"]') ?? findTopCard() ?? document
+
+  const buttons = Array.from(topCard.querySelectorAll('button, a[role="button"], a[href*="/messaging/"]'))
+  const expectsName = expectedLeadName ? expectedLeadName.toLowerCase().split(/\s+/)[0] : null
+
+  // Prioridad 1: aria-label CON nombre del lead (más específico)
+  if (expectsName) {
+    const byNameAria = buttons.find(b => {
+      if (b.offsetParent === null) return false
+      const aria = (b.getAttribute('aria-label') ?? '').toLowerCase()
+      return aria.includes(expectsName) && /mensaje|message|inmail/i.test(aria)
+    })
+    if (byNameAria) return byNameAria
+  }
+
+  // Prioridad 2: texto exacto (literal del button) — "Enviar mensaje", "Mensaje", etc.
+  const byText = buttons.find(b => {
+    if (b.offsetParent === null) return false
+    const t = (b.textContent ?? '').trim().toLowerCase()
+    return t === 'enviar mensaje' || t === 'mensaje' ||
+           t === 'send message' || t === 'send a message' || t === 'message' ||
+           t === 'enviar inmail' || t === 'send inmail' || t === 'inmail'
+  })
+  if (byText) return byText
+
+  // Prioridad 3: aria-label genérico
+  const byAria = buttons.find(b => {
+    if (b.offsetParent === null) return false
+    const aria = (b.getAttribute('aria-label') ?? '').toLowerCase()
+    return /^enviar mensaje|^send (a )?message|^send inmail|^enviar inmail|^message |^mensaje /i.test(aria)
+  })
+  if (byAria) return byAria
+
+  return null
+}
+
+// Find botón "Más" / "More" del top card (no del nav superior)
+function findProfileMoreButton() {
+  const topCard = findTopCard()
+  if (!topCard) return null
+  const buttons = Array.from(topCard.querySelectorAll('button, [role="button"]'))
+  return buttons.find(b => {
+    if (b.offsetParent === null) return false
+    const t = (b.textContent ?? '').trim().toLowerCase()
+    const aria = (b.getAttribute('aria-label') ?? '').toLowerCase()
+    return t === 'más' || t === 'more' ||
+           /^más acciones|^more actions/i.test(aria) ||
+           /^más opciones|^more options/i.test(aria)
+  }) ?? null
+}
+
+// Find "Mensaje" en dropdown abierto (después de click "Más")
+function findMessageInDropdown() {
+  // Dropdowns LinkedIn usan div con role=menu o artdeco-dropdown__content
+  const dropdownSels = [
+    '.artdeco-dropdown__content--is-open',
+    '[role="menu"]',
+    '.artdeco-dropdown__content',
+  ]
+  for (const sel of dropdownSels) {
+    const dropdowns = Array.from(document.querySelectorAll(sel))
+    for (const dd of dropdowns) {
+      if (dd.offsetParent === null) continue
+      const items = Array.from(dd.querySelectorAll('button, [role="menuitem"], a'))
+      const msgItem = items.find(b => {
+        if (b.offsetParent === null) return false
+        const t = (b.textContent ?? '').trim().toLowerCase()
+        const aria = (b.getAttribute('aria-label') ?? '').toLowerCase()
+        return /mensaje|message|inmail/i.test(t) || /enviar mensaje|send.+message|inmail/i.test(aria)
+      })
+      if (msgItem) return msgItem
+    }
+  }
+  return null
+}
+
+function findTopCard() {
+  return document.querySelector(
+    'main section.artdeco-card, main .pv-top-card, main [class*="ph5"][class*="pb5"], main [class*="top-card"]'
+  )
+}
+
+function dumpTopCardButtons() {
+  const topCard = findTopCard()
+  if (!topCard) return ['NO_TOP_CARD_FOUND']
+  return Array.from(topCard.querySelectorAll('button, a[role="button"]'))
+    .slice(0, 15)
+    .map(b => ({
+      tag: b.tagName,
+      visible: b.offsetParent !== null,
+      text: (b.textContent ?? '').trim().slice(0, 40),
+      aria: (b.getAttribute('aria-label') ?? '').slice(0, 60),
+      href: b.getAttribute('href')?.slice(0, 50) ?? null,
+    }))
 }
 
 // ── Helpers thread page ──────────────────────────────────────────────────────
@@ -1230,7 +1759,7 @@ function readThreadHeader() {
   ]
   for (const sel of sels) {
     const el = document.querySelector(sel)
-    if (el?.offsetParent !== null) {
+    if (el && el.offsetParent !== null) {  // FIX: chequear null PRIMERO
       return (el.textContent ?? '').trim()
     }
   }
@@ -1238,21 +1767,86 @@ function readThreadHeader() {
 }
 
 function findThreadSendButton() {
-  // El botón Enviar del thread editor — en el msg-form footer
-  const formContainer = document.querySelector('.msg-form, [class*="msg-form"]')
-  const root = formContainer ?? document
-  const buttons = Array.from(root.querySelectorAll('button, [role="button"]'))
-  return buttons.find(b => {
-    if (b.offsetParent === null) return false
+  // El botón Enviar puede estar en:
+  // - Thread page: dentro de .msg-form (footer del editor)
+  // - Compose page: dentro de .msg-compose-form / artdeco-modal__content / contenedor padre del editor
+  // Premium compose UI es icon-only paperplane con aria-label="Enviar" o "Send" (sin "mensaje").
+  //
+  // Estrategia:
+  //   1. Localizar el editor focused/visible
+  //   2. Subir al ancestor form-like y buscar dentro
+  //   3. Si nada, buscar globalmente con criterio permisivo
+
+  const isSendCandidate = (b) => {
+    if (!b || b.offsetParent === null) return false
+    if (b.disabled || b.getAttribute('aria-disabled') === 'true') return false
     const t = (b.textContent ?? '').trim().toLowerCase()
     const aria = (b.getAttribute('aria-label') ?? '').toLowerCase()
+    const cls = (b.className ?? '').toLowerCase()
+    const ctrl = (b.getAttribute('data-control-name') ?? '').toLowerCase()
     return (
       t === 'enviar' || t === 'send' ||
-      /^enviar mensaje|send message/i.test(aria) ||
-      b.classList.contains('msg-form__send-button') ||
-      b.getAttribute('data-control-name') === 'send'
+      aria === 'enviar' || aria === 'send' ||
+      aria === 'enviar mensaje' || aria === 'send message' ||
+      /^(enviar|send)( mensaje| message)?\b/.test(aria) ||
+      cls.includes('msg-form__send-btn') ||    // ← clase real de LinkedIn compose
+      cls.includes('msg-form__send-button') || // ← variante thread page
+      cls.includes('send-btn') ||              // ← genérico con guion
+      cls.includes('send-button') ||
+      ctrl === 'send' || ctrl === 'send_button' || ctrl.includes('send')
     )
-  })
+  }
+
+  // 1. Buscar el editor visible — sirve como anchor para localizar el form
+  const editor = Array.from(document.querySelectorAll('div[contenteditable="true"]'))
+    .find(el => el.offsetParent !== null && el.getBoundingClientRect().width > 100)
+
+  // 2. Walk up from editor para encontrar el form-like ancestor
+  if (editor) {
+    let node = editor
+    for (let i = 0; i < 10 && node; i++) {
+      node = node.parentElement
+      if (!node) break
+      const cls = (node.className ?? '').toString().toLowerCase()
+      if (
+        node.tagName === 'FORM' ||
+        cls.includes('msg-form') ||
+        cls.includes('compose-form') ||
+        cls.includes('msg-compose') ||
+        cls.includes('compose-creation') ||
+        cls.includes('messaging-compose')
+      ) {
+        const buttons = Array.from(node.querySelectorAll('button, [role="button"]'))
+        const hit = buttons.find(isSendCandidate)
+        if (hit) return hit
+      }
+    }
+    // Si no encontramos un form ancestor identificable, buscar en el contenedor más amplio
+    // (e.g. artdeco-modal__content, role=main, etc.)
+    const container = editor.closest('[role="main"], main, .artdeco-modal__content, .msg-overlay-bubble') ?? document.body
+    const buttons = Array.from(container.querySelectorAll('button, [role="button"]'))
+    const hit = buttons.find(isSendCandidate)
+    if (hit) return hit
+  }
+
+  // 3. Fallback global — TODO el documento
+  const allButtons = Array.from(document.querySelectorAll('button, [role="button"]'))
+  return allButtons.find(isSendCandidate) ?? null
+}
+
+// Dump TODOS los botones visibles + sus atributos (para debug cuando no encontramos Send).
+// listVisibleButtons solo da los primeros 25; en compose page Send está más profundo.
+function listAllVisibleButtonsVerbose(limit = 80) {
+  return Array.from(document.querySelectorAll('button, [role="button"]'))
+    .filter(b => b.offsetParent !== null)
+    .slice(0, limit)
+    .map(b => ({
+      txt: (b.textContent ?? '').trim().slice(0, 30),
+      aria: (b.getAttribute('aria-label') ?? '').slice(0, 50),
+      cls: (b.className ?? '').toString().slice(0, 60),
+      ctrl: b.getAttribute('data-control-name') ?? '',
+      disabled: b.disabled || b.getAttribute('aria-disabled') === 'true',
+    }))
 }
 
 async function verifyFollowupSent(message) {
@@ -1402,7 +1996,7 @@ async function searchLeads(payload = {}) {
 // Extrae profile cards del DOM en la página de search results.
 // Port directo de search.js extractProfilesFromPage adaptado a content.js.
 function extractProfilesFromPage() {
-  const NOISE_RE = /^[•·]\s*\d|conectar|connect|mensaje|message|seguir|follow|pendiente/i
+  const NOISE_RE = /^[•·]\s*\d|conectar|connect|mensaje|message|seguir|follow|pendiente|contactos? más en común|other mutual connections|mutual connection/i
   const seen = new Set()
   const results = []
 
@@ -1464,16 +2058,41 @@ function extractProfilesFromPage() {
       const looksLikeLocation = (t) => {
         if (!t) return false
         const lower = t.toLowerCase()
-        const geoTerms = ['méxico', 'mexico', 'estado', 'ciudad de', 'área metropolitana',
-                          'metropolitan area', 'spain', 'argentina', 'chile', 'colombia',
-                          'peru', 'usa', 'united states', 'monterrey', 'guadalajara',
-                          'cdmx', 'tabasco', 'jalisco', 'puebla']
+        // Frases que SIEMPRE son ubicación (no requieren comma)
+        const strongGeoPhrases = [
+          'área metropolitana', 'metropolitan area', 'greater ', ' area',
+          'estado de', 'cdmx', 'ciudad de méxico', 'ciudad de mexico',
+          'mexico city', 'buenos aires', 'são paulo', 'sao paulo',
+        ]
+        if (strongGeoPhrases.some(g => lower.includes(g))) return true
+        // Estados/ciudades MX/LATAM frecuentes (suelen aparecer solos)
+        const standalonePlaces = [
+          'méxico', 'mexico', 'argentina', 'chile', 'colombia', 'peru', 'perú',
+          'spain', 'españa', 'usa', 'united states', 'brasil', 'brazil',
+          'monterrey', 'guadalajara', 'tijuana', 'puebla', 'querétaro', 'queretaro',
+          'tabasco', 'jalisco', 'nuevo león', 'nuevo leon', 'tamaulipas',
+          'sonora', 'sinaloa', 'chihuahua', 'veracruz', 'yucatán', 'yucatan',
+          'nayarit', 'oaxaca', 'guerrero', 'michoacán', 'michoacan',
+          'aguascalientes', 'morelos', 'coahuila', 'durango', 'zacatecas',
+          'hidalgo', 'tlaxcala', 'campeche', 'quintana roo', 'baja california',
+          'colima', 'nuevo laredo', 'mérida', 'merida', 'cancún', 'cancun',
+          'cabo san lucas', 'tuxtla', 'culiacán', 'culiacan', 'mexicali',
+          'león', 'leon', 'san luis potosí',
+        ]
         const commas = (t.match(/,/g) || []).length
+        // Si toda la string es una palabra/place geográfico standalone
+        const trimmed = t.trim().toLowerCase()
+        if (trimmed.length < 40 && standalonePlaces.some(p => trimmed === p || trimmed.startsWith(p + ',') || trimmed.endsWith(', ' + p))) return true
         if (commas >= 2) return true
-        if (geoTerms.some(g => lower.includes(g)) && commas >= 1) return true
+        if (standalonePlaces.some(g => lower.includes(g)) && commas >= 1) return true
         // Si toda la string son palabras capitalizadas separadas por comas → ubicación
         if (/^[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+([\s\-]+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)*(,\s*[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)+$/.test(t)) return true
         return false
+      }
+      // Detector de "X contactos más en común" / "X mutual connections"
+      const looksLikeMutualConnections = (t) => {
+        if (!t) return false
+        return /contactos?\s+más\s+en\s+común|mutual connections?|contactos? en común/i.test(t)
       }
 
       const looksLikeTitle = (t) => {
@@ -1488,12 +2107,19 @@ function extractProfilesFromPage() {
         return roleTerms.some(r => lower.includes(r))
       }
 
+      // Filtrar paragraphs ruidosos (mutual connections, location) ANTES de elegir
+      const cleanParas = paras.filter(p => !looksLikeMutualConnections(p))
+
       // Prioridad 1: el primer paragraph que parece un título de trabajo
-      headline = paras.find(p => looksLikeTitle(p) && !looksLikeLocation(p)) ?? null
-      // Prioridad 2: el primer paragraph que NO es location
-      if (!headline) headline = paras.find(p => !looksLikeLocation(p) && p.length > 5) ?? null
-      // Prioridad 3: lo que venga (caso degradado)
-      if (!headline) headline = paras[0] ?? null
+      headline = cleanParas.find(p => looksLikeTitle(p) && !looksLikeLocation(p)) ?? null
+      // Prioridad 2: el primer paragraph que NO es location ni mutual
+      if (!headline) headline = cleanParas.find(p => !looksLikeLocation(p) && p.length > 5) ?? null
+      // Prioridad 3: lo que venga (caso degradado) — pero rechazar si TODO el card es ruido
+      if (!headline) headline = cleanParas[0] ?? null
+      // Si headline sigue siendo location/mutual, mejor null que basura
+      if (headline && (looksLikeLocation(headline) || looksLikeMutualConnections(headline))) {
+        headline = null
+      }
 
       // Location: el primer que parece location, no es el headline
       if (!locationStr) locationStr = paras.find(p => p !== headline && looksLikeLocation(p)) ?? null

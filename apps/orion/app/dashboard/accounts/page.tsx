@@ -2,8 +2,6 @@ import { createClient } from "@/lib/supabase/server"
 import { createAdminClient } from "@/lib/supabase/admin"
 import { redirect } from "next/navigation"
 import type { AccountToday } from "@clawbot/db-types"
-import { ProxyChecker }     from "@/components/proxy-checker"
-import { CookieRefreshBtn } from "@/components/cookie-refresh-btn"
 import { ExtensionPanel }   from "@/components/extension-panel"
 
 async function updateAccount(formData: FormData) {
@@ -115,6 +113,7 @@ export default async function AccountsPage() {
     disconnected: "bg-gray-500/15 text-gray-400 border-gray-500/30",
   }
 
+
   const warmupMeta: Record<string, { icon: string; label: string; cap: string; color: string; bg: string; border: string }> = {
     cold:    { icon: "❄️", label: "Fría",     cap: "máx 5/día",  color: "text-blue-400",   bg: "bg-blue-500/10",   border: "border-blue-500/30" },
     warming: { icon: "🌡️", label: "Tibia",    cap: "máx 12/día", color: "text-yellow-400", bg: "bg-yellow-500/10", border: "border-yellow-500/30" },
@@ -163,10 +162,6 @@ export default async function AccountsPage() {
                   <span className={`text-xs px-2 py-1 rounded-full border font-medium ${ws.bg} ${ws.color} ${ws.border}`}>
                     {ws.icon} {ws.label}
                   </span>
-                  <CookieRefreshBtn
-                    accountId={a.account_id ?? ""}
-                    accountLabel={a.label ?? "cuenta"}
-                  />
                 </div>
               </div>
 
@@ -214,21 +209,6 @@ export default async function AccountsPage() {
                 </div>
               </div>
 
-              {/* Proxy monitor */}
-              <div className="border-t border-gray-700 pt-3 space-y-1.5">
-                <p className="text-xs text-gray-500 font-medium uppercase tracking-wide">Proxy / IP</p>
-                <ProxyChecker
-                  accountId={a.account_id ?? ""}
-                  hasProxy={!!(raw as any)?.proxy_url}
-                  initial={{
-                    ip:          (raw as any)?.proxy_ip ?? null,
-                    countryCode: (raw as any)?.proxy_country_code ?? null,
-                    country:     (raw as any)?.proxy_country_name ?? null,
-                    city:        (raw as any)?.proxy_city ?? null,
-                    checkedAt:   (raw as any)?.proxy_checked_at ?? null,
-                  }}
-                />
-              </div>
 
               {/* Extension panel — Sub-Fase 2.6 */}
               <ExtensionPanel

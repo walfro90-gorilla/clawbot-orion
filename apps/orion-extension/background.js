@@ -276,6 +276,11 @@ async function executeCommand(commandId, action, payload) {
       }
     } else if (action === 'send_followup' && payload?.threadUrl) {
       tab = await navigateTabAndWait(payload.threadUrl)
+    } else if (action === 'send_followup' && payload?.profileUrl) {
+      // Sub-Fase 3.8: lead conectado sin thread (invite sin nota).
+      // Navegamos al perfil; content.js click "Mensaje" + compose-new-thread.
+      console.log(`[Orion] send_followup compose-new via profile: ${payload.profileUrl}`)
+      tab = await navigateTabAndWait(payload.profileUrl)
     } else if (action === 'search') {
       const searchUrl = buildSearchUrl(payload ?? {})
       console.log(`[Orion] search → ${searchUrl}`)
@@ -296,13 +301,44 @@ async function executeCommand(commandId, action, payload) {
     }
 
     console.log(`[Orion] Sending to tab id=${tab.id} url=${tab.url} status=${tab.status}`)
-    const result = await sendMessageWithRetry(tab.id, {
+    let result = await sendMessageWithRetry(tab.id, {
       type:    'orion_command',
       commandId,
       action,
       payload,
     }, 6)  // hasta 6 reintentos con backoff (content.js puede tardar en inyectar)
     console.log(`[Orion] Tab response:`, result)
+
+    // Sub-Fase 3.8 v0.6.5: si content.js devolvió needs_redirect (anchor SPA),
+    // navegar al URL devuelto + re-dispatch (1 sola vez para evitar loops)
+    if (result?.status === 'needs_redirect' && result?.redirectUrl) {
+      const redirectUrl = result.redirectUrl
+      console.log(`[Orion] needs_redirect detected. Original btnHref: ${result.btnHref}`)
+      console.log(`[Orion] Navegando a redirect: ${redirectUrl}`)
+      try {
+        tab = await navigateTabAndWait(redirectUrl, 18000)
+        await sleep(3000)  // hidratación post-nav extra
+        const postNavTab = await chrome.tabs.get(tab.id)
+        console.log(`[Orion] Post-redirect tab url: ${postNavTab.url} (status=${postNavTab.status})`)
+        result = await sendMessageWithRetry(tab.id, {
+          type:    'orion_command',
+          commandId,
+          action,
+          payload,
+        }, 6)
+        console.log(`[Orion] Tab response post-redirect:`, result)
+        // Pasar el btnHref + post-nav URL al result para debug
+        if (result && typeof result === 'object') {
+          result._debugRedirect = { btnHref: redirectUrl, postNavUrl: postNavTab.url }
+        }
+      } catch (err) {
+        console.error(`[Orion] Redirect retry failed: ${err.message}`)
+        result = { ok: false, error: 'redirect_retry_failed: ' + err.message, redirectAttempted: redirectUrl }
+      }
+    }
+
+    // Fire-and-forget capture si error es de selector DOM (no bloquea report)
+    maybeCaptureFailure(commandId, action, result, tab?.id)
     reportResult(commandId, action, result)
   } catch (err) {
     console.error(`[Orion] Command failed:`, err.message ?? err)
@@ -493,6 +529,82 @@ function reportResult(commandId, action, result) {
   }))
 }
 
+// ── Failure capture: screenshot + DOM dump → /api/extension/capture-failure ─
+//
+// Cuando content.js retorna un error de selector DOM no encontrado, capturamos
+// screenshot + metadata para que admin pueda etiquetar el selector correcto.
+// Construye el dataset de auto-healing futuro (sin LLM aún, solo humano-etiquetado).
+const CAPTURE_ERRORS = new Set([
+  'send_button_not_found',
+  'send_button_not_found_in_overlay',
+  'profile_message_button_not_found',
+  'thread_editor_not_found',
+  'compose_editor_not_found_in_overlay',
+  'thread_header_mismatch',
+])
+
+async function maybeCaptureFailure(commandId, action, result, tabId) {
+  try {
+    const err = result?.error
+    if (!err || !CAPTURE_ERRORS.has(err)) return
+
+    // 1. Storage: apiKey + accountId + orionUrl
+    const { orion_url, orion_api_key, active_account_id } = await chrome.storage.local.get([
+      STORAGE_KEYS.ORION_URL,
+      STORAGE_KEYS.API_KEY,
+      STORAGE_KEYS.ACTIVE_ACCOUNT_ID,
+    ])
+    if (!orion_url || !orion_api_key || !active_account_id) return
+
+    // 2. Screenshot (best-effort; si falla, igual mandamos el DOM snippet)
+    let screenshotBase64 = null
+    try {
+      const dataUrl = await chrome.tabs.captureVisibleTab(undefined, { format: 'png' })
+      if (typeof dataUrl === 'string' && dataUrl.startsWith('data:image/')) {
+        screenshotBase64 = dataUrl.split(',')[1] // strip "data:image/png;base64,"
+      }
+    } catch (err) {
+      console.warn('[Orion] captureVisibleTab failed:', err?.message ?? err)
+    }
+
+    // 3. Build payload — incluye lo que result ya tiene para debug
+    const payload = {
+      accountId: active_account_id,
+      apiKey:    orion_api_key,
+      commandId,
+      action,
+      error:     err,
+      reason:    result?.reason ?? null,
+      url:       result?.url ?? result?.currentUrl ?? null,
+      extVersion: chrome.runtime.getManifest().version,
+      domSnippet: {
+        debugButtons:   result?.debugButtons ?? null,
+        debugEditables: result?.debugEditables ?? null,
+        topCardBtns:    result?.topCardBtns ?? null,
+        visibleBtns:    result?.visibleBtns ?? null,
+        path:           result?.path ?? null,
+      },
+      screenshotBase64,
+    }
+
+    // 4. POST fire-and-forget — no bloqueamos reportResult
+    fetch(`${orion_url}/api/extension/capture-failure`, {
+      method: 'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'x-orion-api-key': orion_api_key,
+      },
+      body: JSON.stringify(payload),
+    }).then(r => {
+      if (!r.ok) console.warn('[Orion] capture-failure response:', r.status)
+    }).catch(e => {
+      console.warn('[Orion] capture-failure POST failed:', e?.message ?? e)
+    })
+  } catch (err) {
+    console.warn('[Orion] maybeCaptureFailure outer error:', err?.message ?? err)
+  }
+}
+
 // ── UI ──────────────────────────────────────────────────────────────────────
 
 function updateBadge(text, color) {
@@ -521,6 +633,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   console.log('[Orion bg] onMessage received:', msg.type, 'from', sender.id ?? 'popup')
   if (msg.type === 'reconnect') {
     initIfConfigured().catch(err => console.error('[Orion bg] initIfConfigured failed:', err))
+    sendResponse({ ok: true })
+    return true
+  }
+  if (msg.type === 'force_update_check') {
+    // Popup pidió update check inmediato (en lugar de esperar 60min del alarm)
+    checkForUpdate().catch(err => console.warn('[Orion bg] force update check failed:', err.message))
     sendResponse({ ok: true })
     return true
   }

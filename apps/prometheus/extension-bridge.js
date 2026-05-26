@@ -22,6 +22,7 @@ import http from 'http'
 import { URL } from 'url'
 import { createClient } from '@supabase/supabase-js'
 import dotenv from 'dotenv'
+import { checkAndKillLeadIfStuck, checkAccountHealthAndPause } from './lib/extension-dispatch.js'
 
 dotenv.config()
 
@@ -208,6 +209,18 @@ async function handleCommandResult(msg) {
 
   console.log(`[bridge] Command ${commandId.slice(0,8)} (${action}) → ${isError ? 'ERROR' : 'OK'}`)
 
+  // Capa 2: account-level circuit breaker (debounced 5min/account internamente)
+  // Si error rate > 60% en últimos 30min → auto-pausa + alerta critical
+  try {
+    const { data: cmdAcc } = await supabase
+      .from('extension_commands').select('account_id').eq('id', commandId).single()
+    if (cmdAcc?.account_id) {
+      await checkAccountHealthAndPause(cmdAcc.account_id)
+    }
+  } catch (err) {
+    console.error(`[bridge] account health check error:`, err.message)
+  }
+
   // Ingestion: si fue exitoso y la acción tiene ingest definido, procesamos
   if (!isError && action === 'check_inbox' && result?.conversations) {
     try {
@@ -230,6 +243,73 @@ async function handleCommandResult(msg) {
       await ingestSendFollowup(commandId, result)
     } catch (err) {
       console.error(`[bridge] ingest send_followup failed:`, err.message)
+    }
+  }
+
+  // Lead-level circuit breaker: si lead falla 3x con mismo error en últimas 6h
+  // (que no esté ya manejado por otros handlers), kill automático.
+  if (action === 'send_followup' && result?.error &&
+      !['lead_not_first_degree', 'lead_invite_still_pending', 'profile_not_found'].includes(result.error)) {
+    try {
+      const { data: cmd } = await supabase
+        .from('extension_commands')
+        .select('related_lead_id')
+        .eq('id', commandId)
+        .single()
+      if (cmd?.related_lead_id) {
+        await checkAndKillLeadIfStuck(cmd.related_lead_id, result.error, { threshold: 3, windowHours: 6 })
+      }
+    } catch (err) {
+      console.error(`[bridge] circuit breaker error:`, err.message)
+    }
+  }
+
+  // profile_not_found = LinkedIn devolvió /404/ → lead deleted/private → marcar dead
+  if (action === 'send_followup' && result?.error === 'profile_not_found') {
+    try {
+      const { data: cmd } = await supabase
+        .from('extension_commands')
+        .select('related_lead_id')
+        .eq('id', commandId)
+        .single()
+      if (cmd?.related_lead_id) {
+        await supabase.from('leads').update({
+          status: 'dead',
+          dead_reason: 'profile_404_linkedin',
+        }).eq('id', cmd.related_lead_id)
+        console.log(`[bridge] 💀 Lead ${cmd.related_lead_id.slice(0,8)} marcado dead: profile_404`)
+      }
+    } catch (err) {
+      console.error(`[bridge] mark dead 404 failed:`, err.message)
+    }
+  }
+
+  // Sub-Fase 3.8 fix: send_followup detectó que el lead NO está realmente conectado
+  // (check_sent_invites tuvo false positive). Revertir lead.status a invite_sent.
+  if (action === 'send_followup' &&
+      (result?.error === 'lead_invite_still_pending' || result?.error === 'lead_not_first_degree')) {
+    try {
+      const { data: cmd } = await supabase
+        .from('extension_commands')
+        .select('related_lead_id')
+        .eq('id', commandId)
+        .single()
+      if (cmd?.related_lead_id) {
+        // Ambos errores significan que el lead NO es 1er grado / NO aceptó la invite.
+        // Revertimos a invite_sent para que el lead siga en pipeline (puede aceptar
+        // después). Marcamos dead_reason como FLAG para que check_sent_invites NO
+        // lo vuelva a marcar connected automáticamente — evita ping-pong status.
+        const updates = {
+          status: 'invite_sent',
+          connected_at: null,
+          last_followup_at: null,
+          dead_reason: 'detected_not_first_degree',
+        }
+        await supabase.from('leads').update(updates).eq('id', cmd.related_lead_id)
+        console.log(`[bridge] ⚙️  Lead ${cmd.related_lead_id.slice(0,8)} revertido: ${result.error} → status=invite_sent + flag`)
+      }
+    } catch (err) {
+      console.error(`[bridge] revert lead status failed:`, err.message)
     }
   }
   // search ingest — inserta leads nuevos en DB
@@ -259,12 +339,15 @@ async function ingestCheckSentInvites(commandId, pending) {
     .single()
   if (!cmd?.account_id) return
 
-  // Cargar leads invite_sent de campañas de esta cuenta
+  // Cargar leads invite_sent de campañas de esta cuenta.
+  // Excluimos leads marcados con flag detected_not_first_degree para evitar
+  // ping-pong (un FU detectó 2do grado y revirtió → no re-marcar como connected).
   const { data: invitedLeads } = await supabase
     .from('leads')
-    .select('id, full_name, linkedin_url, sent_at, campaigns!inner(linkedin_account_id)')
+    .select('id, full_name, linkedin_url, sent_at, dead_reason, campaigns!inner(linkedin_account_id)')
     .eq('campaigns.linkedin_account_id', cmd.account_id)
     .eq('status', 'invite_sent')
+    .or('dead_reason.is.null,dead_reason.neq.detected_not_first_degree')
 
   if (!invitedLeads || invitedLeads.length === 0) {
     console.log(`[bridge] check_sent_invites: 0 leads en invite_sent para esta cuenta`)
@@ -430,14 +513,28 @@ async function ingestSendFollowup(commandId, result) {
       .single()
 
     if (conv?.id) {
-      await supabase.from('conversation_events').insert({
+      // Constraint-safe values:
+      //   event_type ∈ {invite_sent, follow_up_sent[_2..5], reply_sent, message_sent, ...}
+      //   sent_via   ∈ {orion, orion_auto, orion_manual, linkedin_*}
+      const eventType = isReply ? 'reply_sent' : statusValue
+      const { error: evErr } = await supabase.from('conversation_events').insert({
         conversation_id: conv.id,
-        event_type:      isReply ? 'auto_reply' : statusValue,
+        event_type:      eventType,
         direction:       'outbound',
         content:         messageText.slice(0, 4000),
         sent_at:         new Date().toISOString(),
-        sent_via:        'orion_extension',
+        sent_via:        'orion_auto',
       })
+      if (evErr) console.error(`[bridge] conversation_events insert failed: ${evErr.message} (event_type=${eventType})`)
+    }
+
+    // Sub-Fase 3.8: si content.js capturó thread_id (caso compose-new desde
+    // perfil), guardarlo para futuros FU/FM.
+    if (result.threadIdCaptured && conv?.id) {
+      await supabase.from('conversations')
+        .update({ linkedin_thread_id: result.threadIdCaptured })
+        .eq('id', conv.id)
+      console.log(`[bridge] ✅ thread_id capturado para lead ${leadId.slice(0,8)}: ${result.threadIdCaptured.slice(0, 30)}...`)
     }
   }
 
@@ -750,4 +847,4 @@ server.listen(PORT, () => {
 
 setInterval(pollAndDispatch, POLL_INTERVAL_MS)
 setInterval(pingAll, 30_000)
-setInterval(cleanupExpired, 60_000)
+setInterval(cleanupExpired, 30_000)  // reap zombies más rápido (antes 60s)

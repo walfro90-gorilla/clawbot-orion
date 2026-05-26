@@ -149,6 +149,180 @@ export async function getPendingLeadsCount(campaignId) {
   return count ?? 0
 }
 
+// ── In-flight command check (lead-level dedup) ───────────────────────────────
+// Evita que el scheduler dispatche un segundo comando para el mismo lead mientras
+// uno previo sigue en flight (pending/dispatched). Sin esto, si la extension
+// no responde rápido, el siguiente tick puede crear otro cmd duplicado.
+export async function hasInFlightCommand(leadId, action = null) {
+  if (!leadId) return false
+  let q = supabase
+    .from('extension_commands')
+    .select('id', { count: 'exact', head: true })
+    .eq('related_lead_id', leadId)
+    .in('status', ['pending', 'dispatched'])
+    .gt('expires_at', new Date().toISOString())
+  if (action) q = q.eq('action', action)
+  const { count } = await q
+  return (count ?? 0) > 0
+}
+
+// ── Account-level circuit breaker (Capa 2) ──────────────────────────────────
+// Si una cuenta acumula > THRESHOLD% errores NO-lead-fault en ventana, auto-pausa.
+// Crea account_alert critical para que humano revise. Protege contra ban masivo
+// cuando algo está globalmente roto (captcha persistente, fingerprint quemado, etc.)
+const ACCOUNT_HEALTH_CHECK_COOLDOWN_MS = 5 * 60 * 1000  // 5 min entre checks por cuenta
+const _lastAccountCheck = new Map()
+
+// Errores que NO cuentan al circuit breaker (son fault del lead, no de la cuenta)
+const LEAD_FAULT_ERRORS = new Set([
+  'lead_not_first_degree',
+  'lead_invite_still_pending',
+  'profile_not_found',
+  'thread_header_mismatch',
+])
+
+export async function checkAccountHealthAndPause(accountId, opts = {}) {
+  const { windowMin = 30, minCommands = 5, errorThresholdPct = 60 } = opts
+  if (!accountId) return { skipped: 'no_account_id' }
+
+  // Debounce: máximo 1 check por cuenta cada 5 min
+  const last = _lastAccountCheck.get(accountId) ?? 0
+  if (Date.now() - last < ACCOUNT_HEALTH_CHECK_COOLDOWN_MS) {
+    return { skipped: 'cooldown' }
+  }
+  _lastAccountCheck.set(accountId, Date.now())
+
+  const cutoff = new Date(Date.now() - windowMin * 60_000).toISOString()
+  const { data: cmds } = await supabase
+    .from('extension_commands')
+    .select('result, status')
+    .eq('account_id', accountId)
+    .gte('created_at', cutoff)
+    .in('status', ['completed', 'error', 'timeout'])
+
+  if (!cmds || cmds.length < minCommands) {
+    return { healthy: true, reason: 'insufficient_data', count: cmds?.length ?? 0 }
+  }
+
+  // Account-fault errors solamente: timeouts, captcha, authwall, msg-channel-closed, etc.
+  const accountFaultErrors = cmds.filter(c => {
+    const err = c.result?.error
+    if (c.status === 'timeout') return true  // timeout = extension no respondió
+    if (!err) return false
+    return !LEAD_FAULT_ERRORS.has(err)
+  })
+
+  const errorPct = (accountFaultErrors.length / cmds.length) * 100
+  if (errorPct < errorThresholdPct) {
+    return { healthy: true, errorPct: Math.round(errorPct), count: cmds.length }
+  }
+
+  // ¿Ya está pausada? si sí, no spamear alertas
+  const { data: acc } = await supabase
+    .from('linkedin_accounts')
+    .select('label, extension_paused')
+    .eq('id', accountId)
+    .single()
+  if (acc?.extension_paused) {
+    return { healthy: false, alreadyPaused: true, errorPct: Math.round(errorPct) }
+  }
+
+  // Pause + insert alert critical
+  await supabase.from('linkedin_accounts').update({
+    extension_paused: true,
+  }).eq('id', accountId)
+
+  await supabase.from('account_alerts').insert({
+    linkedin_account_id: accountId,
+    alert_type: 'error_spike',
+    severity: 'critical',
+    message: `🛑 Cuenta "${acc?.label ?? accountId.slice(0,8)}" auto-pausada por circuit breaker: ${Math.round(errorPct)}% errores en últimos ${windowMin}min (${accountFaultErrors.length}/${cmds.length}). Revisa logs y despausa manualmente en /dashboard/accounts.`,
+    details: {
+      error_rate_pct: errorPct,
+      window_min: windowMin,
+      total_commands: cmds.length,
+      error_count: accountFaultErrors.length,
+      triggered_by: 'capa_2_account_circuit_breaker',
+      sample_errors: accountFaultErrors.slice(0, 5).map(e => e.result?.error ?? 'timeout'),
+    },
+    auto_paused: true,
+  })
+
+  console.log(`[ext-dispatch] 🛑 Account ${accountId.slice(0,8)} (${acc?.label}) AUTO-PAUSED: ${Math.round(errorPct)}% error rate (${accountFaultErrors.length}/${cmds.length})`)
+  return { healthy: false, paused: true, errorPct: Math.round(errorPct), count: cmds.length }
+}
+
+// ── Lead-level circuit breaker ───────────────────────────────────────────────
+// Si un lead falla N veces consecutivas con MISMO error_code en últimas X horas,
+// marca el lead como dead automáticamente. Detiene loops infinitos en errores que
+// no tienen handler específico (ej: not_on_thread_compose_or_profile_page).
+// Returns true si el lead fue killed (caller debe skipear el dispatch).
+export async function checkAndKillLeadIfStuck(leadId, errorCode, opts = {}) {
+  const { threshold = 3, windowHours = 6 } = opts
+  if (!leadId || !errorCode) return false
+
+  const cutoff = new Date(Date.now() - windowHours * 3_600_000).toISOString()
+  // Solo cmds completados o errored — excluye in-flight para no "tapar" los errors históricos
+  const { data: recentErrors } = await supabase
+    .from('extension_commands')
+    .select('result, created_at, status')
+    .eq('related_lead_id', leadId)
+    .eq('action', 'send_followup')
+    .gte('created_at', cutoff)
+    .in('status', ['completed', 'error', 'timeout'])
+    .order('created_at', { ascending: false })
+    .limit(threshold)
+
+  if (!recentErrors || recentErrors.length < threshold) return false
+
+  // Verificar que TODOS los últimos N comandos hayan fallado con el mismo error
+  // (o sean timeout — también cuenta como fallo de este lead)
+  const allSameError = recentErrors.every(r =>
+    r.result?.error === errorCode || (r.status === 'timeout' && errorCode === 'timeout')
+  )
+  if (!allSameError) return false
+
+  // Kill switch: mark dead
+  await supabase.from('leads').update({
+    status: 'dead',
+    dead_reason: `auto_kill_${errorCode}_x${threshold}`,
+  }).eq('id', leadId)
+  console.log(`[ext-dispatch] 💀 Lead ${leadId.slice(0,8)} auto-killed: ${threshold}x ${errorCode}`)
+  return true
+}
+
+// ── Content-based dedup ──────────────────────────────────────────────────────
+// Verifica si un mensaje idéntico/similar fue enviado a este lead en últimas X horas.
+// Defensa contra duplicados que escapan a hasInFlightCommand (e.g., cmd anterior
+// completado pero ingest falló y lead status no avanzó).
+export async function wasMessageRecentlySent(leadId, messageText, withinHours = 4) {
+  if (!leadId || !messageText) return false
+  const cutoff = new Date(Date.now() - withinHours * 3_600_000).toISOString()
+  const fingerprint = messageText.replace(/\s+/g, ' ').trim().slice(0, 120)
+  if (fingerprint.length < 20) return false  // muy corto, no confiable
+
+  const { data: conv } = await supabase
+    .from('conversations')
+    .select('id')
+    .eq('lead_id', leadId)
+    .maybeSingle()
+  if (!conv) return false
+
+  const { data: events } = await supabase
+    .from('conversation_events')
+    .select('content, sent_at')
+    .eq('conversation_id', conv.id)
+    .eq('direction', 'outbound')
+    .gte('sent_at', cutoff)
+    .order('sent_at', { ascending: false })
+    .limit(10)
+
+  return (events ?? []).some(e => {
+    const eFp = (e.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 120)
+    return eFp === fingerprint
+  })
+}
+
 // ── Title whitelist/blacklist filter ─────────────────────────────────────────
 
 export function passesTitleFilters(headline, whitelist = [], blacklist = []) {
@@ -232,9 +406,10 @@ export async function dispatchCheckSentInvites(account) {
   })
 }
 
-export async function dispatchFollowup(account, lead, step, message, threadUrl) {
+export async function dispatchFollowup(account, lead, step, message, threadUrl, profileUrl) {
   return dispatchCommand(account.id, 'send_followup', {
-    threadUrl,
+    threadUrl,        // null si lead no tiene thread (invite sin nota)
+    profileUrl,       // fallback: navegar al perfil + compose
     leadId:   lead.id,
     leadName: lead.full_name,
     message,
