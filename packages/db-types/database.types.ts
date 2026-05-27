@@ -85,6 +85,48 @@ export type Database = {
           },
         ]
       }
+      account_connectivity_log: {
+        Row: {
+          created_at: string
+          details: Json | null
+          event_type: string
+          ext_version: string | null
+          id: number
+          linkedin_account_id: string
+        }
+        Insert: {
+          created_at?: string
+          details?: Json | null
+          event_type: string
+          ext_version?: string | null
+          id?: number
+          linkedin_account_id: string
+        }
+        Update: {
+          created_at?: string
+          details?: Json | null
+          event_type?: string
+          ext_version?: string | null
+          id?: number
+          linkedin_account_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "account_connectivity_log_linkedin_account_id_fkey"
+            columns: ["linkedin_account_id"]
+            isOneToOne: false
+            referencedRelation: "linkedin_accounts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "account_connectivity_log_linkedin_account_id_fkey"
+            columns: ["linkedin_account_id"]
+            isOneToOne: false
+            referencedRelation: "v_account_today"
+            referencedColumns: ["account_id"]
+          },
+        ]
+      }
       activity_log: {
         Row: {
           action: string
@@ -1211,6 +1253,83 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "v_account_today"
             referencedColumns: ["account_id"]
+          },
+        ]
+      }
+      orphan_conversations: {
+        Row: {
+          first_seen_at: string
+          id: string
+          last_activity_label: string | null
+          last_seen_at: string
+          linkedin_account_id: string
+          linkedin_profile_url: string | null
+          linkedin_thread_id: string | null
+          matched_lead_id: string | null
+          occurrence_count: number
+          scraped_name: string
+          snippet: string | null
+          status: string
+          unread_count: number | null
+        }
+        Insert: {
+          first_seen_at?: string
+          id?: string
+          last_activity_label?: string | null
+          last_seen_at?: string
+          linkedin_account_id: string
+          linkedin_profile_url?: string | null
+          linkedin_thread_id?: string | null
+          matched_lead_id?: string | null
+          occurrence_count?: number
+          scraped_name: string
+          snippet?: string | null
+          status?: string
+          unread_count?: number | null
+        }
+        Update: {
+          first_seen_at?: string
+          id?: string
+          last_activity_label?: string | null
+          last_seen_at?: string
+          linkedin_account_id?: string
+          linkedin_profile_url?: string | null
+          linkedin_thread_id?: string | null
+          matched_lead_id?: string | null
+          occurrence_count?: number
+          scraped_name?: string
+          snippet?: string | null
+          status?: string
+          unread_count?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "orphan_conversations_linkedin_account_id_fkey"
+            columns: ["linkedin_account_id"]
+            isOneToOne: false
+            referencedRelation: "linkedin_accounts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "orphan_conversations_linkedin_account_id_fkey"
+            columns: ["linkedin_account_id"]
+            isOneToOne: false
+            referencedRelation: "v_account_today"
+            referencedColumns: ["account_id"]
+          },
+          {
+            foreignKeyName: "orphan_conversations_matched_lead_id_fkey"
+            columns: ["matched_lead_id"]
+            isOneToOne: false
+            referencedRelation: "leads"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "orphan_conversations_matched_lead_id_fkey"
+            columns: ["matched_lead_id"]
+            isOneToOne: false
+            referencedRelation: "v_lead_pipeline"
+            referencedColumns: ["id"]
           },
         ]
       }

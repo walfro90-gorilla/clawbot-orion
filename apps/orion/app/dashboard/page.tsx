@@ -2,8 +2,10 @@ import { createClient } from "@/lib/supabase/server"
 import { createAdminClient } from "@/lib/supabase/admin"
 import { getSessionUser } from "@/lib/auth/role"
 import Link from "next/link"
+import { readFileSync } from "fs"
 import { DashboardFiltersBar } from "@/components/dashboard-filters"
 import { RefreshButton } from "@/components/refresh-button"
+import { InboxSweepBtn } from "@/components/inbox-sweep-btn"
 import type { CampaignStats, AccountToday } from "@clawbot/db-types"
 
 // ── Date range helpers ────────────────────────────────────────────────────────
@@ -474,6 +476,195 @@ export default async function DashboardPage({
 
   const displayTotals = filteredTotals ?? totals
 
+  // ── Activity timeline (14 días) ──────────────────────────────────────────
+  // Eventos agrupados por día y tipo. Scoped al user via convos.linkedin_account_id.
+  const timelineSince = new Date(Date.now() - 14 * 86_400_000).toISOString()
+  let timelineQuery: any = admin.from("conversation_events").select(
+    isRestricted && linkedAccountId
+      ? "event_type, sent_at, conversations!inner(linkedin_account_id)"
+      : "event_type, sent_at",
+  )
+    .gte("sent_at", timelineSince)
+    .order("sent_at", { ascending: true })
+    .limit(2000)
+  if (isRestricted && linkedAccountId) {
+    timelineQuery = timelineQuery.eq("conversations.linkedin_account_id", linkedAccountId)
+  }
+  const { data: timelineRaw } = await timelineQuery
+
+  // Bucketize: invites | fus | auto_replies | replies_in
+  type TimelineDay = { day: string; invites: number; fus: number; autoReplies: number; repliesIn: number }
+  const timelineMap = new Map<string, TimelineDay>()
+  // Seed 14 días vacíos (incluso si no hay actividad)
+  for (let i = 13; i >= 0; i--) {
+    const d = new Date(Date.now() - i * 86_400_000)
+    const key = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/Mexico_City", year: "numeric", month: "2-digit", day: "2-digit",
+    }).format(d)
+    timelineMap.set(key, { day: key, invites: 0, fus: 0, autoReplies: 0, repliesIn: 0 })
+  }
+  for (const ev of (timelineRaw ?? []) as any[]) {
+    const dayKey = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/Mexico_City", year: "numeric", month: "2-digit", day: "2-digit",
+    }).format(new Date(ev.sent_at))
+    const bucket = timelineMap.get(dayKey)
+    if (!bucket) continue
+    const t = ev.event_type as string
+    if (t === "invite_sent") bucket.invites++
+    else if (t?.startsWith("follow_up_sent")) bucket.fus++
+    else if (t === "reply_sent") bucket.autoReplies++
+    else if (t === "reply_received") bucket.repliesIn++
+  }
+  const timeline = Array.from(timelineMap.values())
+
+  // ── Conversion rates (all-time, scoped a user) ──────────────────────────
+  // Defino "ever invited" = leads con sent_at no nulo
+  // "ever accepted" = leads que están en connected, follow_up_*, replied, meeting_booked
+  let convQ: any = admin.from("leads").select("status, sent_at, replied_at, meeting_booked_at")
+  if (isRestricted && linkedAccountId) {
+    const { data: ucIds } = await admin.from("campaigns").select("id").eq("linkedin_account_id", linkedAccountId)
+    const ids = (ucIds ?? []).map((c: any) => c.id)
+    if (ids.length > 0) convQ = convQ.in("campaign_id", ids)
+  }
+  const { data: convLeads } = await convQ
+  const everInvited  = (convLeads ?? []).filter((l: any) => l.sent_at != null).length
+  const everAccepted = (convLeads ?? []).filter((l: any) =>
+    ["connected", "follow_up_sent", "follow_up_sent_2", "follow_up_sent_3",
+      "follow_up_sent_4", "follow_up_sent_5", "replied", "meeting_booked"].includes(l.status ?? "")
+  ).length
+  const everReplied  = (convLeads ?? []).filter((l: any) => l.replied_at != null).length
+  const everMeetings = (convLeads ?? []).filter((l: any) => l.meeting_booked_at != null || l.status === "meeting_booked").length
+
+  const conv = {
+    acceptRate:  everInvited > 0  ? Math.round((everAccepted / everInvited)  * 100) : 0,
+    replyRate:   everAccepted > 0 ? Math.round((everReplied  / everAccepted) * 100) : 0,
+    meetingRate: everReplied > 0  ? Math.round((everMeetings / everReplied)  * 100) : 0,
+    overall:     everInvited > 0  ? Math.round((everMeetings / everInvited)  * 100 * 10) / 10 : 0,
+    everInvited, everAccepted, everReplied, everMeetings,
+  }
+
+  // ── Connectivity timeline 24h (uptime de extensions por cuenta) ─────────
+  const connSince = new Date(Date.now() - 24 * 3600_000).toISOString()
+  let connQ: any = admin.from("account_connectivity_log")
+    .select("linkedin_account_id, event_type, created_at, linkedin_accounts!inner(label)")
+    .gte("created_at", connSince)
+    .order("created_at", { ascending: true })
+    .limit(500)
+  if (isRestricted && linkedAccountId) {
+    connQ = connQ.eq("linkedin_account_id", linkedAccountId)
+  }
+  const { data: connEvents } = await connQ
+
+  // Construir uptime buckets por cuenta
+  type ConnBucket = "up" | "down" | "unknown"
+  const connByAccount: Record<string, { label: string; buckets: ConnBucket[]; lastUp: string | null; lastDown: string | null }> = {}
+  const nowMs = Date.now()
+  for (const ev of (connEvents ?? []) as any[]) {
+    const aid = ev.linkedin_account_id as string
+    const lbl = ev.linkedin_accounts?.label as string ?? aid.slice(0,8)
+    if (!connByAccount[aid]) {
+      connByAccount[aid] = { label: lbl, buckets: Array(24).fill("unknown"), lastUp: null, lastDown: null }
+    }
+  }
+  // Para cada cuenta, fill buckets desde events
+  for (const aid in connByAccount) {
+    const evts = (connEvents ?? []).filter((e: any) => e.linkedin_account_id === aid)
+    let isUp = false
+    let prevTs: number | null = null
+    const b = connByAccount[aid].buckets
+    for (const ev of evts) {
+      const ts = new Date(ev.created_at as string).getTime()
+      if (prevTs !== null) {
+        for (let h = 0; h < 24; h++) {
+          const bs = nowMs - (24 - h) * 3600_000
+          const be = nowMs - (23 - h) * 3600_000
+          if (ts < bs || prevTs > be) continue
+          const ov = Math.min(ts, be) - Math.max(prevTs, bs)
+          if (ov <= 0) continue
+          if (b[h] === "up") continue
+          if (isUp && ov >= 180_000) b[h] = "up"
+          else if (!isUp && b[h] === "unknown") b[h] = "down"
+        }
+      }
+      if (ev.event_type === "connected") {
+        isUp = true
+        connByAccount[aid].lastUp = ev.created_at as string
+      } else if (ev.event_type === "disconnected") {
+        isUp = false
+        connByAccount[aid].lastDown = ev.created_at as string
+      }
+      prevTs = ts
+    }
+    // Hasta now
+    if (prevTs !== null) {
+      for (let h = 0; h < 24; h++) {
+        const bs = nowMs - (24 - h) * 3600_000
+        const be = nowMs - (23 - h) * 3600_000
+        if (nowMs < bs || prevTs > be) continue
+        const ov = Math.min(nowMs, be) - Math.max(prevTs, bs)
+        if (ov <= 0) continue
+        if (b[h] === "up") continue
+        if (isUp && ov >= 180_000) b[h] = "up"
+        else if (!isUp && b[h] === "unknown") b[h] = "down"
+      }
+    }
+  }
+  const connTimelineRows = Object.entries(connByAccount).map(([aid, v]) => {
+    const known = v.buckets.filter(x => x !== "unknown").length
+    const up = v.buckets.filter(x => x === "up").length
+    return {
+      accountId: aid,
+      label: v.label,
+      buckets: v.buckets,
+      uptimePct: known > 0 ? Math.round((up / known) * 100) : null,
+      lastUp: v.lastUp,
+      lastDown: v.lastDown,
+    }
+  })
+
+  // ── Extension version check (latest deployada vs cada cuenta) ──────────
+  let latestExtVersion: string | null = null
+  try {
+    const m = JSON.parse(readFileSync("/opt/orion-public/manifest.json", "utf8"))
+    latestExtVersion = m?.version ?? null
+  } catch {}
+
+  let extVerQ: any = admin.from("linkedin_accounts")
+    .select("id, label, ext_version, extension_last_seen_at")
+  if (isRestricted && linkedAccountId) extVerQ = extVerQ.eq("id", linkedAccountId)
+  const { data: extVerAccounts } = await extVerQ
+
+  const cmpVer = (a: string | null, b: string | null) => {
+    if (!a || !b) return 0
+    const pa = a.split(".").map(Number)
+    const pb = b.split(".").map(Number)
+    for (let i = 0; i < 3; i++) {
+      if ((pa[i] ?? 0) > (pb[i] ?? 0)) return 1
+      if ((pa[i] ?? 0) < (pb[i] ?? 0)) return -1
+    }
+    return 0
+  }
+  const outdatedExtensions = (extVerAccounts ?? [])
+    .filter((a: any) => a.ext_version && latestExtVersion && cmpVer(a.ext_version, latestExtVersion) < 0)
+    .map((a: any) => ({
+      label: a.label as string,
+      current: a.ext_version as string,
+      latest: latestExtVersion as string,
+      lastSeen: a.extension_last_seen_at as string | null,
+    }))
+
+  // ── Orphan conversations (conversaciones NO matcheadas a leads) ─────────
+  let orphansQ: any = admin.from("orphan_conversations")
+    .select("id, scraped_name, snippet, unread_count, linkedin_thread_id, last_activity_label, occurrence_count, last_seen_at, status, linkedin_account_id")
+    .eq("status", "pending")
+    .order("last_seen_at", { ascending: false })
+    .limit(20)
+  if (isRestricted && linkedAccountId) {
+    orphansQ = orphansQ.eq("linkedin_account_id", linkedAccountId)
+  }
+  const { data: orphanRows } = await orphansQ
+  const orphans = (orphanRows ?? []) as any[]
+
   return (
     <div className="p-4 sm:p-8 space-y-8">
       <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
@@ -484,10 +675,38 @@ export default async function DashboardPage({
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          <InboxSweepBtn />
           <RefreshButton />
           <DashboardFiltersBar initialRange={range} initialFrom={spFrom} initialTo={spTo} />
         </div>
       </div>
+
+      {/* ── Banner: extensions con versión vieja ─────────────────────────────── */}
+      {outdatedExtensions.length > 0 && (
+        <section>
+          <div className="bg-amber-950/40 border border-amber-500/40 rounded-xl p-4 flex items-start gap-3">
+            <span className="text-2xl">⬆️</span>
+            <div className="flex-1">
+              <div className="text-amber-300 font-semibold">
+                Nueva versión de Orion Sync disponible (v{latestExtVersion})
+              </div>
+              <ul className="text-amber-200/80 text-sm mt-1 space-y-0.5">
+                {outdatedExtensions.map((o: { label: string; current: string; latest: string; lastSeen: string | null }) => (
+                  <li key={o.label}>
+                    <strong>{o.label}</strong> corriendo v{o.current}
+                    {o.lastSeen && <span className="text-amber-200/50 ml-2 text-xs">
+                      (último heartbeat {new Date(o.lastSeen).toLocaleString("es-MX", { day:"2-digit", month:"short", hour:"2-digit", minute:"2-digit" })})
+                    </span>}
+                  </li>
+                ))}
+              </ul>
+              <p className="text-amber-200/70 text-xs mt-2">
+                Reinstala desde el popup de la extensión (banner amarillo) o copia el comando de actualización.
+              </p>
+            </div>
+          </div>
+        </section>
+      )}
 
       {/* ── Alertas críticas ──────────────────────────────────────────────────── */}
       {activeAlerts.length > 0 && (
@@ -606,6 +825,18 @@ export default async function DashboardPage({
       {(fm1.length + fm2.length + fm3.length) > 0 && (
         <FmPipeline fm1={fm1} fm2={fm2} fm3={fm3} />
       )}
+
+      {/* ── Conversion rates (all-time) ──────────────────────────────────────── */}
+      {conv.everInvited > 0 && <ConversionRates conv={conv} />}
+
+      {/* ── Activity timeline 14 días ────────────────────────────────────────── */}
+      <ActivityTimeline timeline={timeline} />
+
+      {/* ── Connectivity timeline 24h ─────────────────────────────────────── */}
+      {connTimelineRows.length > 0 && <ConnectivityTimeline rows={connTimelineRows} />}
+
+      {/* ── Orphan conversations (no matcheadas a leads) ─────────────────────── */}
+      {orphans.length > 0 && <OrphanConversations orphans={orphans} />}
 
       {/* ── Extension health monitor ───────────────────────────────────────────── */}
       {rawAccs.length > 0 && (
@@ -1372,5 +1603,292 @@ function CampaignRow({ campaign: c }: { campaign: CampaignStats }) {
         ))}
       </div>
     </div>
+  )
+}
+
+// ── ConversionRates panel ──────────────────────────────────────────────────
+function ConversionRates({ conv }: {
+  conv: {
+    acceptRate: number; replyRate: number; meetingRate: number; overall: number
+    everInvited: number; everAccepted: number; everReplied: number; everMeetings: number
+  }
+}) {
+  const cards = [
+    {
+      label: "Accept rate",
+      sub: `${conv.everAccepted} / ${conv.everInvited} invitados`,
+      pct: conv.acceptRate, color: "text-blue-400", ring: "border-blue-500/30", bar: "bg-blue-500",
+      benchmark: "Bench: 25-40%",
+    },
+    {
+      label: "Reply rate",
+      sub: `${conv.everReplied} / ${conv.everAccepted} conectados`,
+      pct: conv.replyRate, color: "text-orange-400", ring: "border-orange-500/30", bar: "bg-orange-500",
+      benchmark: "Bench: 15-30%",
+    },
+    {
+      label: "Meeting rate",
+      sub: `${conv.everMeetings} / ${conv.everReplied} respondieron`,
+      pct: conv.meetingRate, color: "text-green-400", ring: "border-green-500/30", bar: "bg-green-500",
+      benchmark: "Bench: 20-50%",
+    },
+    {
+      label: "Overall conversion",
+      sub: `${conv.everMeetings} reuniones / ${conv.everInvited} invitados`,
+      pct: conv.overall, color: "text-purple-400", ring: "border-purple-500/30", bar: "bg-purple-500",
+      benchmark: "Bench: 1-3%",
+      isDecimal: true,
+    },
+  ]
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">
+          📊 Tasas de conversión <span className="text-xs font-normal normal-case text-gray-500">(all-time)</span>
+        </h2>
+      </div>
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        {cards.map(c => (
+          <div key={c.label} className={`bg-gray-900 border ${c.ring} rounded-xl p-4 space-y-2`}>
+            <div className="flex justify-between items-baseline">
+              <span className="text-xs text-gray-400 font-medium">{c.label}</span>
+              <span className={`text-2xl font-bold ${c.color}`}>
+                {c.isDecimal ? c.pct.toFixed(1) : c.pct}<span className="text-sm">%</span>
+              </span>
+            </div>
+            <div className="w-full bg-gray-800 rounded-full h-1.5">
+              <div className={`h-1.5 rounded-full ${c.bar}`} style={{ width: `${Math.min(c.pct, 100)}%` }} />
+            </div>
+            <div className="flex justify-between text-[10px] text-gray-600">
+              <span>{c.sub}</span>
+              <span className="text-gray-700">{c.benchmark}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+// ── ActivityTimeline (SVG inline, 14 días) ────────────────────────────────
+function ActivityTimeline({ timeline }: {
+  timeline: { day: string; invites: number; fus: number; autoReplies: number; repliesIn: number }[]
+}) {
+  if (!timeline || timeline.length === 0) return null
+  const W = 760
+  const H = 200
+  const padL = 32, padR = 8, padT = 12, padB = 28
+  const innerW = W - padL - padR
+  const innerH = H - padT - padB
+  const barGroupWidth = innerW / timeline.length
+  const barW = Math.max(2, (barGroupWidth - 6) / 4)
+  const maxVal = Math.max(
+    1,
+    ...timeline.flatMap(d => [d.invites, d.fus, d.autoReplies, d.repliesIn]),
+  )
+  const yScale = (v: number) => innerH - (v / maxVal) * innerH
+
+  const series = [
+    { key: "invites" as const,     color: "#6366f1", label: "Invites",     dotColor: "bg-indigo-500" },
+    { key: "fus" as const,         color: "#8b5cf6", label: "Follow-ups",  dotColor: "bg-violet-500" },
+    { key: "autoReplies" as const, color: "#10b981", label: "AI replies",  dotColor: "bg-emerald-500" },
+    { key: "repliesIn" as const,   color: "#f59e0b", label: "Replies in",  dotColor: "bg-amber-500" },
+  ]
+
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">
+          📈 Actividad últimos 14 días
+        </h2>
+        <div className="flex items-center gap-3 text-xs flex-wrap">
+          {series.map(s => (
+            <span key={s.key} className="flex items-center gap-1.5 text-gray-400">
+              <span className={`w-2.5 h-2.5 rounded-sm ${s.dotColor}`} />
+              {s.label}
+            </span>
+          ))}
+        </div>
+      </div>
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-3 overflow-x-auto">
+        <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMid meet" className="w-full min-w-[560px] h-[200px]">
+          {/* Grid lines + Y labels */}
+          {[0, 0.25, 0.5, 0.75, 1].map(t => {
+            const y = padT + innerH * (1 - t)
+            const v = Math.round(maxVal * t)
+            return (
+              <g key={t}>
+                <line x1={padL} y1={y} x2={W - padR} y2={y} stroke="#1f2937" strokeWidth={1} />
+                <text x={padL - 6} y={y + 4} textAnchor="end" fontSize="9" fill="#6b7280">{v}</text>
+              </g>
+            )
+          })}
+          {/* Bars + X labels */}
+          {timeline.map((d, i) => {
+            const groupX = padL + i * barGroupWidth
+            const dayLabel = d.day.slice(5)  // MM-DD
+            return (
+              <g key={d.day}>
+                {series.map((s, si) => {
+                  const v = d[s.key]
+                  const h = innerH - yScale(v)
+                  const x = groupX + 3 + si * barW
+                  return (
+                    <rect
+                      key={s.key}
+                      x={x}
+                      y={padT + yScale(v)}
+                      width={barW - 1}
+                      height={h}
+                      fill={s.color}
+                      opacity={v > 0 ? 0.9 : 0.15}
+                      rx={1}
+                    >
+                      <title>{`${d.day} · ${s.label}: ${v}`}</title>
+                    </rect>
+                  )
+                })}
+                <text
+                  x={groupX + barGroupWidth / 2}
+                  y={H - padB + 14}
+                  textAnchor="middle"
+                  fontSize="9"
+                  fill="#6b7280"
+                >
+                  {dayLabel}
+                </text>
+              </g>
+            )
+          })}
+        </svg>
+        <p className="text-[10px] text-gray-600 text-right mt-1">Pasa el mouse sobre cada barra para ver el detalle</p>
+      </div>
+    </section>
+  )
+}
+
+// ── Orphan conversations panel ─────────────────────────────────────────────
+function OrphanConversations({ orphans }: {
+  orphans: Array<{
+    id: string; scraped_name: string; snippet: string | null; unread_count: number | null
+    linkedin_thread_id: string | null; last_activity_label: string | null
+    occurrence_count: number; last_seen_at: string
+  }>
+}) {
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider flex items-center gap-2">
+          🔍 Conversaciones orphan (no en Orion)
+          <span className="text-xs font-normal normal-case text-gray-500">
+            ({orphans.length})
+          </span>
+        </h2>
+        <span className="text-[10px] text-gray-600">
+          Contactos con quienes chateaste en LinkedIn pero no están en tu pipeline
+        </span>
+      </div>
+      <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+        <table className="w-full text-sm">
+          <thead className="bg-gray-800/50 text-xs text-gray-400 uppercase tracking-wider">
+            <tr>
+              <th className="px-3 py-2 text-left">Contacto</th>
+              <th className="px-3 py-2 text-left">Último mensaje</th>
+              <th className="px-3 py-2 text-right">No leído</th>
+              <th className="px-3 py-2 text-right">Visto</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-800">
+            {orphans.map(o => (
+              <tr key={o.id} className="hover:bg-gray-800/30">
+                <td className="px-3 py-2">
+                  <div className="text-gray-50 font-medium">{o.scraped_name}</div>
+                  {o.last_activity_label && (
+                    <div className="text-[10px] text-gray-500 mt-0.5">{o.last_activity_label}</div>
+                  )}
+                </td>
+                <td className="px-3 py-2 text-gray-400 text-xs truncate max-w-md">
+                  {o.snippet ?? <span className="text-gray-600 italic">sin snippet</span>}
+                </td>
+                <td className="px-3 py-2 text-right">
+                  {(o.unread_count ?? 0) > 0
+                    ? <span className="text-[10px] px-2 py-0.5 rounded-full bg-orange-500/20 text-orange-300 border border-orange-500/30 font-bold">{o.unread_count}</span>
+                    : <span className="text-gray-600">—</span>}
+                </td>
+                <td className="px-3 py-2 text-right text-[10px] text-gray-500">
+                  {new Date(o.last_seen_at).toLocaleString("es-MX", {
+                    timeZone: "America/Mexico_City",
+                    day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit",
+                  })}
+                  {o.occurrence_count > 1 && <span className="ml-2 text-gray-700">×{o.occurrence_count}</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="text-[10px] text-gray-600 text-right">
+        💡 Dispara "Barrer inbox 15 días" arriba para detectar más conversaciones históricas.
+      </p>
+    </section>
+  )
+}
+
+// ── ConnectivityTimeline (24h uptime por cuenta) ─────────────────────────
+function ConnectivityTimeline({ rows }: {
+  rows: Array<{
+    accountId: string; label: string
+    buckets: Array<"up" | "down" | "unknown">
+    uptimePct: number | null
+    lastUp: string | null; lastDown: string | null
+  }>
+}) {
+  const colors = { up: "bg-green-500", down: "bg-red-500", unknown: "bg-gray-700" }
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">
+          📡 Conectividad extensions (24h)
+        </h2>
+        <div className="flex items-center gap-3 text-[10px] text-gray-500">
+          <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm bg-green-500"/> Online</span>
+          <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm bg-red-500"/> Offline</span>
+          <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm bg-gray-700"/> Sin datos</span>
+        </div>
+      </div>
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
+        {rows.map(r => (
+          <div key={r.accountId}>
+            <div className="flex items-center justify-between text-xs mb-1.5">
+              <span className="text-gray-50 font-semibold">{r.label}</span>
+              <div className="flex items-center gap-3 text-gray-500">
+                {r.uptimePct !== null && (
+                  <span className={r.uptimePct >= 70 ? "text-green-400" : r.uptimePct >= 40 ? "text-yellow-400" : "text-red-400"}>
+                    {r.uptimePct}% uptime
+                  </span>
+                )}
+                {r.lastUp && (
+                  <span>↑ {new Date(r.lastUp).toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit" })}</span>
+                )}
+              </div>
+            </div>
+            <div className="flex gap-0.5 h-3 rounded-sm overflow-hidden">
+              {r.buckets.map((b, i) => (
+                <div
+                  key={i}
+                  className={`flex-1 ${colors[b]} hover:opacity-70 transition`}
+                  title={`Hace ${24 - i}h — ${b}`}
+                />
+              ))}
+            </div>
+            <div className="flex justify-between text-[9px] text-gray-600 mt-1">
+              <span>hace 24h</span>
+              <span>hace 12h</span>
+              <span>ahora</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
   )
 }

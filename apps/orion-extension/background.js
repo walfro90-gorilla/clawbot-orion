@@ -27,6 +27,9 @@ let reconnectAttempts = 0
 let heartbeatInterval = null
 let isConnecting = false       // guard contra connect() concurrentes
 let reconnectTimer = null      // timer del setTimeout en scheduleReconnect (cancela duplicados)
+let lastCommandAt = 0          // timestamp del último comando dispatchado a un tab
+let lastCommandAction = null   // acción del último comando (para el indicador visual)
+let boundTabId = null          // tab.id de LinkedIn que recibió el último comando
 
 // ── Lifecycle ────────────────────────────────────────────────────────────────
 
@@ -83,8 +86,24 @@ async function checkForUpdate() {
           checkedAt:  Date.now(),
         },
       })
+      // Badge visual sobre el icono — visible aunque popup esté cerrado
+      try {
+        chrome.action.setBadgeText({ text: '↑' })
+        chrome.action.setBadgeBackgroundColor({ color: '#f59e0b' })  // ámbar
+        chrome.action.setTitle({ title: `Orion Sync — Update v${data.version} disponible` })
+      } catch (err) {
+        console.warn('[Orion] badge update set failed:', err?.message)
+      }
     } else {
       await chrome.storage.local.remove('update_available')
+      // Limpia badge solo si era nuestro (no pisar badges de error/connect status)
+      try {
+        const txt = await chrome.action.getBadgeText({})
+        if (txt === '↑') {
+          chrome.action.setBadgeText({ text: '' })
+          chrome.action.setTitle({ title: 'Orion Sync' })
+        }
+      } catch {}
     }
   } catch (err) {
     console.warn('[Orion] update fetch error:', err.message)
@@ -301,6 +320,14 @@ async function executeCommand(commandId, action, payload) {
     }
 
     console.log(`[Orion] Sending to tab id=${tab.id} url=${tab.url} status=${tab.status}`)
+    // Tracking para el indicador visual "tab casada"
+    lastCommandAt = Date.now()
+    lastCommandAction = action
+    boundTabId = tab.id
+    // Avisar a la tab que está casada con Orion (para el marco/pill)
+    try {
+      chrome.tabs.sendMessage(tab.id, { type: 'orion_bound', action, ts: lastCommandAt }).catch(() => {})
+    } catch {}
     let result = await sendMessageWithRetry(tab.id, {
       type:    'orion_command',
       commandId,
@@ -475,18 +502,26 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
 
 // Envía mensaje al content.js con retries — útil cuando recién navegamos y
 // content.js todavía no se inyectó. Backoff: 1s → 2s → 3s.
-async function sendMessageWithRetry(tabId, message, maxAttempts = 5) {
+async function sendMessageWithRetry(tabId, message, maxAttempts = 6) {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const result = await chrome.tabs.sendMessage(tabId, message)
       return result
     } catch (err) {
-      const isReceiverErr = /receiving end does not exist|message port closed/i.test(err.message ?? '')
-      if (!isReceiverErr || attempt === maxAttempts) {
+      // Errores transitorios MV3: content.js no inyectado, SW dormido, navegación
+      // interrumpió async response. Todos retryables con backoff.
+      const msg = String(err?.message ?? '').toLowerCase()
+      const isTransient =
+        msg.includes('receiving end does not exist') ||
+        msg.includes('message port closed') ||
+        msg.includes('message channel closed') ||
+        msg.includes('extension context invalidated') ||
+        msg.includes('could not establish connection')
+      if (!isTransient || attempt === maxAttempts) {
         throw err
       }
-      const delay = attempt * 1000
-      console.log(`[Orion] sendMessage attempt ${attempt} falló (receiving end no existe) — reintentando en ${delay}ms`)
+      const delay = attempt * 1500  // 1.5s, 3s, 4.5s, 6s, 7.5s — total ~22s antes de fallar
+      console.log(`[Orion] sendMessage attempt ${attempt}/${maxAttempts} transient err (${err.message?.slice(0, 60)}) — retry en ${delay}ms`)
       await sleep(delay)
     }
   }
@@ -646,6 +681,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({
       connected: ws && ws.readyState === WebSocket.OPEN,
       reconnectAttempts,
+    })
+    return true
+  }
+  // content.js consulta su estado de "casamiento" con Orion para el indicador visual
+  if (msg.type === 'get_orion_status') {
+    const wsConnected = !!(ws && ws.readyState === WebSocket.OPEN)
+    const senderTabId = sender?.tab?.id ?? null
+    sendResponse({
+      wsConnected,
+      isBoundTab: senderTabId != null && senderTabId === boundTabId,
+      lastCommandAt,
+      lastCommandAction,
+      secsSinceCommand: lastCommandAt ? Math.round((Date.now() - lastCommandAt) / 1000) : null,
     })
     return true
   }

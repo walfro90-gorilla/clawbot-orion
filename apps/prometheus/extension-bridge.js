@@ -145,10 +145,22 @@ async function handleConnection(ws, accountId) {
       }
       connections.set(accountId, { ws, label: accountLabel, lastSeen: Date.now() })
 
-      // Update DB
+      // Update DB con ext_version reportada (Chrome ext envía msg.version)
+      const extVer = msg.extVersion ?? msg.version ?? null
       await supabase.from('linkedin_accounts')
-        .update({ extension_last_seen_at: new Date().toISOString() })
+        .update({
+          extension_last_seen_at: new Date().toISOString(),
+          ...(extVer ? { ext_version: extVer } : {}),
+        })
         .eq('id', accountId)
+
+      // Log connect event para auditoría de uptime
+      await supabase.from('account_connectivity_log').insert({
+        linkedin_account_id: accountId,
+        event_type:          'connected',
+        ext_version:         extVer,
+        details:             { source: 'ws_auth_ok', userAgent: msg.userAgent ?? null },
+      })
 
       console.log(`[bridge] ✅ Auth OK: ${accountLabel} (${accountId.slice(0,8)})`)
       ws.send(JSON.stringify({
@@ -185,6 +197,14 @@ async function handleConnection(ws, accountId) {
     const current = connections.get(accountId)
     if (current && current.ws === ws) {
       connections.delete(accountId)
+      if (accountId) {
+        // Log disconnect para auditoría
+        supabase.from('account_connectivity_log').insert({
+          linkedin_account_id: accountId,
+          event_type:          'disconnected',
+          details:             { code, reason: String(reason ?? '').slice(0, 100) },
+        }).then(() => {}).catch(err => console.warn('[bridge] disconnect log failed:', err.message))
+      }
     }
   })
 
@@ -209,12 +229,19 @@ async function handleCommandResult(msg) {
 
   console.log(`[bridge] Command ${commandId.slice(0,8)} (${action}) → ${isError ? 'ERROR' : 'OK'}`)
 
-  // Capa 2: account-level circuit breaker (debounced 5min/account internamente)
-  // Si error rate > 60% en últimos 30min → auto-pausa + alerta critical
+  // Capa 3: "No current window" counter (Chrome cerrado detection)
   try {
     const { data: cmdAcc } = await supabase
       .from('extension_commands').select('account_id').eq('id', commandId).single()
     if (cmdAcc?.account_id) {
+      const errMsg = String(result?.error ?? '').toLowerCase()
+      if (errMsg.includes('no current window')) {
+        recordNoWindowError(cmdAcc.account_id)
+      } else if (!isError) {
+        // Cmd exitoso → reset counter (Chrome volvió a estar disponible)
+        resetNoWindowCounter(cmdAcc.account_id)
+      }
+      // Capa 2: account-level circuit breaker (debounced 5min/account internamente)
       await checkAccountHealthAndPause(cmdAcc.account_id)
     }
   } catch (err) {
@@ -648,7 +675,43 @@ async function ingestCheckInbox(commandId, conversations) {
              scrapedLower.includes(leadLower)
     })
 
-    if (!lead) continue
+    if (!lead) {
+      // Conversación que NO matchea ningún lead activo → es ORPHAN. Loguear para
+      // que el usuario decida (crear lead, ignorar, etc.). Upsert por thread_id
+      // o por name (si no hay thread_id) para evitar duplicados en barridos repetidos.
+      try {
+        const orphanKey = convo.threadId
+          ? { linkedin_account_id: cmd.account_id, linkedin_thread_id: convo.threadId }
+          : { linkedin_account_id: cmd.account_id, scraped_name: convo.name }
+        const { data: existing } = await supabase
+          .from('orphan_conversations')
+          .select('id, occurrence_count')
+          .match(orphanKey)
+          .maybeSingle()
+        if (existing) {
+          await supabase.from('orphan_conversations').update({
+            occurrence_count: (existing.occurrence_count ?? 1) + 1,
+            last_seen_at: new Date().toISOString(),
+            snippet: convo.snippet ?? null,
+            unread_count: convo.unread ?? 0,
+            last_activity_label: convo.lastActivity ?? null,
+          }).eq('id', existing.id)
+        } else {
+          await supabase.from('orphan_conversations').insert({
+            linkedin_account_id: cmd.account_id,
+            scraped_name:        convo.name,
+            snippet:             convo.snippet ?? null,
+            unread_count:        convo.unread ?? 0,
+            linkedin_thread_id:  convo.threadId ?? null,
+            linkedin_profile_url: convo.threadUrl ?? null,
+            last_activity_label: convo.lastActivity ?? null,
+          })
+        }
+      } catch (err) {
+        console.warn(`[bridge] orphan upsert failed for "${convo.name}":`, err.message)
+      }
+      continue
+    }
     matches.push({ scrapedName: convo.name, leadName: lead.full_name, status: lead.status, unread: convo.unread })
 
     // Si invite_sent y aparece en inbox → conexión aceptada
@@ -735,6 +798,35 @@ async function ingestCheckInbox(commandId, conversations) {
 
 // ── Poll de comandos pendientes ─────────────────────────────────────────────
 
+// Capa 3 safety net: cooldown por cuenta cuando Chrome cerrado detectado.
+// Si 3+ comandos consecutivos fallan con "No current window" → no dispatchar
+// más durante COOLDOWN_MS. Evita gastar comandos contra Chrome cerrado.
+const NO_WINDOW_COOLDOWN_MS = 5 * 60 * 1000
+const NO_WINDOW_THRESHOLD = 3
+const noWindowCounter = new Map()  // accountId → consecutive count
+const noWindowCooldownUntil = new Map()  // accountId → timestamp
+
+function recordNoWindowError(accountId) {
+  const count = (noWindowCounter.get(accountId) ?? 0) + 1
+  noWindowCounter.set(accountId, count)
+  if (count >= NO_WINDOW_THRESHOLD) {
+    noWindowCooldownUntil.set(accountId, Date.now() + NO_WINDOW_COOLDOWN_MS)
+    console.log(`[bridge] 🛑 Cuenta ${accountId.slice(0,8)} cooldown ${NO_WINDOW_COOLDOWN_MS/60000}min: ${count}x "No current window" — Chrome aparenta cerrado`)
+    noWindowCounter.set(accountId, 0)
+  }
+}
+function resetNoWindowCounter(accountId) {
+  noWindowCounter.set(accountId, 0)
+  noWindowCooldownUntil.delete(accountId)
+}
+function isAccountInNoWindowCooldown(accountId) {
+  const until = noWindowCooldownUntil.get(accountId)
+  if (!until) return false
+  if (Date.now() < until) return true
+  noWindowCooldownUntil.delete(accountId)
+  return false
+}
+
 async function pollAndDispatch() {
   const connectedAccountIds = Array.from(connections.keys())
   if (connectedAccountIds.length === 0) return
@@ -755,7 +847,16 @@ async function pollAndDispatch() {
     console.log(`[bridge] Cuentas con comando en flight (skip dispatch): ${labels.join(', ')}`)
   }
 
-  const availableAccounts = connectedAccountIds.filter(id => !busyAccounts.has(id))
+  // Capa 3: excluir cuentas en cooldown por "No current window" repetidos
+  const cooldownAccounts = connectedAccountIds.filter(id => isAccountInNoWindowCooldown(id))
+  if (cooldownAccounts.length > 0) {
+    const labels = cooldownAccounts.map(id => connections.get(id)?.label ?? id.slice(0,8))
+    console.log(`[bridge] Cuentas en cooldown (Chrome cerrado): ${labels.join(', ')}`)
+  }
+
+  const availableAccounts = connectedAccountIds.filter(id =>
+    !busyAccounts.has(id) && !isAccountInNoWindowCooldown(id)
+  )
   if (availableAccounts.length === 0) return
 
   const { data: commands, error } = await supabase

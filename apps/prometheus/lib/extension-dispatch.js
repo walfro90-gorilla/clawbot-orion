@@ -181,6 +181,22 @@ const LEAD_FAULT_ERRORS = new Set([
   'thread_header_mismatch',
 ])
 
+// Errores TRANSITORIOS de infraestructura (Chrome cerrado, SW dormido, content
+// script no inyectado). NO indican ban/captcha — son problemas de disponibilidad.
+// Filtrar string que empieza con "redirect_retry_failed" o contiene estos patrones.
+function isTransientInfraError(errStr) {
+  if (!errStr) return false
+  const s = String(errStr).toLowerCase()
+  return (
+    s.includes('no current window') ||
+    s.includes('message channel closed') ||
+    s.includes('receiving end does not exist') ||
+    s.includes('extension context invalidated') ||
+    s.includes('content_busy_executing') ||
+    s.startsWith('redirect_retry_failed:')
+  )
+}
+
 export async function checkAccountHealthAndPause(accountId, opts = {}) {
   const { windowMin = 30, minCommands = 5, errorThresholdPct = 60 } = opts
   if (!accountId) return { skipped: 'no_account_id' }
@@ -195,7 +211,7 @@ export async function checkAccountHealthAndPause(accountId, opts = {}) {
   const cutoff = new Date(Date.now() - windowMin * 60_000).toISOString()
   const { data: cmds } = await supabase
     .from('extension_commands')
-    .select('result, status')
+    .select('result, status, related_lead_id')
     .eq('account_id', accountId)
     .gte('created_at', cutoff)
     .in('status', ['completed', 'error', 'timeout'])
@@ -204,13 +220,35 @@ export async function checkAccountHealthAndPause(accountId, opts = {}) {
     return { healthy: true, reason: 'insufficient_data', count: cmds?.length ?? 0 }
   }
 
-  // Account-fault errors solamente: timeouts, captcha, authwall, msg-channel-closed, etc.
+  // Account-fault errors REALES: captcha, authwall, rate_limited, etc.
+  // EXCLUYE: lead-fault (2do grado, 404) Y infra-transitoria (Chrome cerrado, SW dead).
+  // Timeouts SI cuentan.
   const accountFaultErrors = cmds.filter(c => {
     const err = c.result?.error
-    if (c.status === 'timeout') return true  // timeout = extension no respondió
+    if (c.status === 'timeout') return true
     if (!err) return false
-    return !LEAD_FAULT_ERRORS.has(err)
+    if (LEAD_FAULT_ERRORS.has(err)) return false
+    if (isTransientInfraError(err)) return false
+    return true
   })
+
+  // ARQUITECTURA CORRECTA: Capa 2 solo se activa si los errores vienen de MÚLTIPLES
+  // leads distintos. Si todos los errores son de 1-2 leads, es problema específico
+  // del lead (Capa 1 los maneja) — NO pausar cuenta global.
+  // Threshold: necesitas >=3 leads distintos con error account-fault en la ventana.
+  const distinctLeadsWithError = new Set(
+    accountFaultErrors.map(c => c.related_lead_id).filter(Boolean)
+  )
+  const MIN_DISTINCT_LEADS_FOR_PAUSE = 3
+  if (distinctLeadsWithError.size < MIN_DISTINCT_LEADS_FOR_PAUSE) {
+    return {
+      healthy: true,
+      reason: 'errors_concentrated_in_few_leads',
+      distinctLeads: distinctLeadsWithError.size,
+      totalErrors: accountFaultErrors.length,
+      cmds: cmds.length,
+    }
+  }
 
   const errorPct = (accountFaultErrors.length / cmds.length) * 100
   if (errorPct < errorThresholdPct) {

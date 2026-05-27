@@ -20,6 +20,7 @@ import {
   hasInFlightCommand, wasMessageRecentlySent,
   passesTitleFilters,
   dispatchSearch, dispatchInvite, dispatchCheckInbox, dispatchCheckSentInvites, dispatchFollowup,
+  dispatchCommand,
   checkCampaignActiveGates,
 } from './lib/extension-dispatch.js'
 import { generateLinkedInMessage, generateLinkedInReply, personalizeFollowupMessage } from './lib/ai-message.js'
@@ -492,17 +493,19 @@ async function tryAutoReplyForCampaign(campaign, account) {
   const maxAgeDays = campaign.fm_max_age_days ?? parseInt(process.env.FM_MAX_AGE_DAYS ?? '7')
   const tooOldIso = new Date(Date.now() - maxAgeDays * 86_400_000).toISOString()
 
+  // Orden DESC (replies MÁS RECIENTES primero) — antes era ASC limit 5, lo que
+  // procesaba los 5 más viejos (ya respondidos) y nunca llegaba a los nuevos.
+  // Incluimos leads SIN thread_id: content.js hace compose-new desde el perfil.
   const { data: replied } = await supabase
     .from('leads')
-    .select(`id, full_name, replied_at, profile_data,
+    .select(`id, full_name, replied_at, profile_data, linkedin_url,
              conversations!inner(id, linkedin_thread_id, last_message_text, last_message_at, linkedin_account_id)`)
     .eq('campaign_id', campaign.id)
     .eq('conversations.linkedin_account_id', account.id)
     .eq('status', 'replied')
     .gte('replied_at', tooOldIso)  // ★ safety: no procesar replies >7d
-    .not('conversations.linkedin_thread_id', 'is', null)
-    .order('replied_at', { ascending: true })
-    .limit(5)
+    .order('replied_at', { ascending: false })
+    .limit(10)
 
   if (!replied || replied.length === 0) {
     return { skipped: true, reason: 'no_replies_pending' }
@@ -511,7 +514,11 @@ async function tryAutoReplyForCampaign(campaign, account) {
   // Filter: solo leads donde el último outbound es ANTERIOR al último inbound
   // (i.e., todavía no respondimos al último mensaje del lead)
   for (const lead of replied) {
-    const conv = lead.conversations?.[0]
+    // Supabase devuelve conversations como OBJETO (1:1 por UNIQUE lead_id) o
+    // como ARRAY según el shape del join. Normalizamos para soportar ambos.
+    const conv = Array.isArray(lead.conversations)
+      ? lead.conversations[0]
+      : lead.conversations
     if (!conv) continue
 
     const { data: lastOutbound } = await supabase
@@ -542,12 +549,13 @@ async function tryAutoReplyForCampaign(campaign, account) {
       continue
     }
 
-    // Determinar qué FM step usar: cuenta auto_reply events outbound previos
+    // Determinar qué FM step usar: cuenta replies AI previos (event_type='reply_sent')
+    // Acepta 'auto_reply' por backward-compat con events antes del fix de constraint.
     const { count: autoReplyCount } = await supabase
       .from('conversation_events')
       .select('id', { count: 'exact', head: true })
       .eq('conversation_id', conv.id)
-      .eq('event_type', 'auto_reply')
+      .in('event_type', ['reply_sent', 'auto_reply'])
     const fmStep = Math.min((autoReplyCount ?? 0) + 1, 3)  // FM1, FM2, FM3 max
 
     // Fetch conversation history completa (todos los events del thread, cronológico)
@@ -564,12 +572,29 @@ async function tryAutoReplyForCampaign(campaign, account) {
       sent_at:   e.sent_at,
     }))
 
-    // Generar respuesta vía AI con conversation history + cal_url + objetivo agendar
+    // Identificar el ÚLTIMO FU template que se envió a este lead → pasarlo como
+    // "intención previa" para que el AI mantenga coherencia con el mensaje de
+    // seguimiento en el que la conversación está, mientras responde al historial.
+    const lastFuEvent = [...(events ?? [])]
+      .reverse()
+      .find(e => /^follow_up_sent/.test(e.event_type ?? ''))
+    let lastFuStepNum = null
+    if (lastFuEvent) {
+      const m = lastFuEvent.event_type.match(/follow_up_sent(?:_(\d))?/)
+      lastFuStepNum = m ? (m[1] ? parseInt(m[1]) : 1) : null
+    }
+    const lastFuTemplate = lastFuStepNum
+      ? campaign[`follow_up_${lastFuStepNum === 1 ? '' : 'step' + lastFuStepNum + '_'}message`]
+      : null
+
+    // Generar respuesta vía AI con conversation history + cal_url + FU template guía
     const aiType = `fm_reply_${fmStep}`
     const aiRes = await generateLinkedInReply(campaign, lead, {
       conversationHistory,
       calUrl: account.cal_com_url ?? null,
       fmStep,
+      lastFuTemplate,
+      lastFuStepNum,
     })
     if (aiRes.error) {
       console.warn(`[SCH-EXT]   AI reply gen failed: ${aiRes.error}`)
@@ -587,10 +612,20 @@ async function tryAutoReplyForCampaign(campaign, account) {
       continue
     }
 
-    const threadUrl = `https://www.linkedin.com/messaging/thread/${conv.linkedin_thread_id}/`
-    // Dispatch send_followup pero con kind='reply' para que el ingest NO cambie status
+    // Si hay thread_id → thread directo. Si NO (lead respondió a invite sin nota
+    // y nunca capturamos thread) → pasar profileUrl: content.js navega al perfil,
+    // abre compose y responde igual que el flujo FU compose-new.
+    const threadUrl  = conv.linkedin_thread_id
+      ? `https://www.linkedin.com/messaging/thread/${conv.linkedin_thread_id}/`
+      : null
+    const profileUrl = lead.linkedin_url ?? null
+    if (!threadUrl && !profileUrl) {
+      console.warn(`[SCH-EXT]   AI reply skip ${lead.full_name}: sin thread_id ni profileUrl`)
+      continue
+    }
     const cmdId = await dispatchCommand(account.id, 'send_followup', {
       threadUrl,
+      profileUrl,
       leadId:   lead.id,
       leadName: lead.full_name,
       message:  aiRes.message,
@@ -692,6 +727,58 @@ async function tryCheckSentInvitesForAccount(account) {
 
 // ── Main tick ────────────────────────────────────────────────────────────────
 
+// ── Connectivity health check ───────────────────────────────────────────────
+// Cada tick durante business hours: si una cuenta NO está conectada al bridge
+// pero debería estarlo, crea alerta + log. Debounce: 1 alerta por hora por cuenta.
+const _lastHealthAlert = new Map()  // accountId → timestamp
+async function runConnectivityHealthCheck(connectedIds) {
+  try {
+    const { data: accounts } = await supabase
+      .from('linkedin_accounts')
+      .select('id, label, timezone, extension_paused')
+    if (!accounts) return
+
+    for (const acc of accounts) {
+      if (acc.extension_paused) continue
+      // Check business hours en TZ del usuario
+      const tz = acc.timezone ?? 'America/Mexico_City'
+      const inBH = isBusinessHours(9, 19, [1,2,3,4,5], tz)
+      if (!inBH) continue
+
+      const isConnected = connectedIds.has(acc.id)
+      if (isConnected) continue  // todo bien
+
+      // OFFLINE durante business hours. Debounce 60min.
+      const lastAlert = _lastHealthAlert.get(acc.id) ?? 0
+      if (Date.now() - lastAlert < 60 * 60_000) continue
+      _lastHealthAlert.set(acc.id, Date.now())
+
+      // Log + alerta (deduplicada por alert_type+accountId via dashboard filter)
+      await supabase.from('account_connectivity_log').insert({
+        linkedin_account_id: acc.id,
+        event_type:          'health_check_offline',
+        details:             { tz, business_hours: '9-19' },
+      })
+      // Resolve duplicate antes de crear nueva
+      await supabase.from('account_alerts')
+        .update({ resolved_at: new Date().toISOString(), resolved_by: 'auto:superseded' })
+        .eq('linkedin_account_id', acc.id)
+        .eq('alert_type', 'ext_offline_business_hours')
+        .is('resolved_at', null)
+      await supabase.from('account_alerts').insert({
+        linkedin_account_id: acc.id,
+        alert_type: 'ext_offline_business_hours',
+        severity:   'warning',
+        message:    `⚠️ Extension de "${acc.label}" no conectada durante horario laboral (${tz}, 9-19h). Abre Chrome y haz click en la extensión.`,
+        details:    { tz },
+      })
+      console.log(`[SCH-EXT] ⚠️  Health check: ${acc.label} offline durante BH (${tz})`)
+    }
+  } catch (err) {
+    console.warn('[SCH-EXT] runConnectivityHealthCheck error:', err.message)
+  }
+}
+
 async function tick() {
   const { mxDate, mxHour } = mxTime()
   console.log(`\n[SCH-EXT] ════════════════════════════`)
@@ -700,6 +787,9 @@ async function tick() {
   // Pre-fetch connected accounts (cached 5s)
   const connectedIds = await getConnectedAccountIds()
   console.log(`[SCH-EXT] Bridge connected accounts: ${connectedIds.size} [${[...connectedIds].map(id => id.slice(0,8)).join(', ')}]`)
+
+  // Health check (runs every tick, debounced 60min per account)
+  await runConnectivityHealthCheck(connectedIds)
 
   if (connectedIds.size === 0) {
     console.log(`[SCH-EXT] Nadie conectado — skip tick`)

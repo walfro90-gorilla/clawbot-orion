@@ -57,18 +57,169 @@ function startKeepAlive() {
 }
 startKeepAlive()
 
+// ── Indicador visual "tab casada con Orion" ─────────────────────────────────
+// Muestra al usuario que Orion Sync está viendo/usando esta pestaña de LinkedIn:
+//   • Marco de color alrededor de la página (verde=conectado, ámbar=idle, rojo=offline)
+//   • Pill flotante esquina inferior-derecha con estado + última acción
+//   • Punto de color en el favicon (visible en la barra de pestañas)
+//   • Prefijo en el título de la pestaña
+let _orionFrame = null
+let _orionPill = null
+let _origTitle = null
+
+function ensureOrionIndicatorDOM() {
+  if (_orionFrame && document.documentElement.contains(_orionFrame)) return
+  _orionFrame = document.createElement('div')
+  _orionFrame.id = 'orion-sync-frame'
+  _orionFrame.style.cssText = [
+    'position:fixed', 'inset:0', 'pointer-events:none', 'z-index:2147483646',
+    'box-shadow:inset 0 0 0 3px rgba(34,197,94,0)', 'transition:box-shadow 0.4s ease',
+  ].join(';')
+  document.documentElement.appendChild(_orionFrame)
+
+  _orionPill = document.createElement('div')
+  _orionPill.id = 'orion-sync-pill'
+  _orionPill.style.cssText = [
+    'position:fixed', 'bottom:16px', 'right:16px', 'z-index:2147483647',
+    'font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif',
+    'font-size:12px', 'font-weight:600', 'padding:7px 12px', 'border-radius:20px',
+    'display:flex', 'align-items:center', 'gap:7px',
+    'box-shadow:0 4px 14px rgba(0,0,0,0.3)', 'transition:opacity 0.3s ease',
+    'backdrop-filter:blur(8px)', 'user-select:none',
+  ].join(';')
+  _orionPill.addEventListener('mouseenter', () => { _orionPill.style.opacity = '0.3' })
+  _orionPill.addEventListener('mouseleave', () => { _orionPill.style.opacity = '1' })
+  document.documentElement.appendChild(_orionPill)
+
+  if (!document.getElementById('orion-pulse-style')) {
+    const st = document.createElement('style')
+    st.id = 'orion-pulse-style'
+    st.textContent = '@keyframes orionPulse{0%,100%{opacity:1}50%{opacity:0.35}}'
+    document.documentElement.appendChild(st)
+  }
+}
+
+function setOrionFaviconDot(color) {
+  try {
+    const size = 32
+    const canvas = document.createElement('canvas')
+    canvas.width = size; canvas.height = size
+    const ctx = canvas.getContext('2d')
+    ctx.fillStyle = '#0a66c2'
+    ctx.fillRect(0, 0, size, size)
+    ctx.fillStyle = '#fff'
+    ctx.font = 'bold 20px Arial'
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+    ctx.fillText('in', size / 2, size / 2 + 1)
+    ctx.beginPath()
+    ctx.arc(size - 7, 7, 6, 0, 2 * Math.PI)
+    ctx.fillStyle = color; ctx.fill()
+    ctx.lineWidth = 1.5; ctx.strokeStyle = '#0a0e1a'; ctx.stroke()
+    let link = document.querySelector('link#orion-favicon')
+    if (!link) {
+      link = document.createElement('link')
+      link.id = 'orion-favicon'; link.rel = 'icon'
+      document.head.appendChild(link)
+    }
+    link.href = canvas.toDataURL('image/png')
+  } catch {}
+}
+
+function actionShort(a) {
+  return ({
+    send_followup: 'enviando mensaje', send_invite: 'invitando',
+    check_inbox: 'leyendo inbox', check_sent_invites: 'verificando',
+    search: 'buscando leads',
+  })[a] ?? 'trabajando'
+}
+
+function updateOrionIndicator(state) {
+  if (!document.body) return
+  ensureOrionIndicatorDOM()
+  let color, label, frameColor
+  if (!state.wsConnected) {
+    color = '#ef4444'; frameColor = 'rgba(239,68,68,0.55)'; label = 'Orion offline'
+  } else if (state.secsSinceCommand != null && state.secsSinceCommand < 90) {
+    color = '#22c55e'; frameColor = 'rgba(34,197,94,0.85)'; label = `Orion activo · ${actionShort(state.lastCommandAction)}`
+  } else {
+    color = '#22c55e'; frameColor = 'rgba(34,197,94,0.30)'; label = 'Orion conectado'
+  }
+  _orionFrame.style.boxShadow = `inset 0 0 0 3px ${frameColor}`
+  _orionPill.style.background = state.wsConnected ? 'rgba(10,14,26,0.92)' : 'rgba(60,10,10,0.92)'
+  _orionPill.style.color = '#e5e7eb'
+  _orionPill.style.border = `1px solid ${color}66`
+  const pulse = (state.secsSinceCommand != null && state.secsSinceCommand < 90)
+  _orionPill.innerHTML =
+    `<span style="width:8px;height:8px;border-radius:50%;background:${color};box-shadow:0 0 6px ${color};${pulse ? 'animation:orionPulse 1.2s infinite;' : ''}"></span>` +
+    `<span>${label}</span>`
+  setOrionFaviconDot(color)
+  // Título: strip robusto de CUALQUIER prefijo de estado previo (emojis multi-byte
+  // + diamantes/círculos + surrogate halves huérfanos + espacios) usando flag `u`.
+  // Sin esto, la clase [🟢🟡🔴] sin `u` no matchea y los emojis se ACUMULAN.
+  const emoji = state.wsConnected ? '🟢' : '🔴'
+  const cleanTitle = document.title.replace(ORION_TITLE_PREFIX_RE, '')
+  const nextTitle = `${emoji} ${cleanTitle}`
+  if (document.title !== nextTitle) document.title = nextTitle
+}
+
+// Strip: whitespace + 🟢(1F7E2) 🟡(1F7E1) 🔴(1F534) + ◆(25C6) ●(25CF) + replacement(FFFD)
+const ORION_TITLE_PREFIX_RE = /^[\s\u{1F7E2}\u{1F7E1}\u{1F534}◆●�]+/u
+
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.type === 'orion_bound') {
+    updateOrionIndicator({ wsConnected: true, isBoundTab: true, secsSinceCommand: 0, lastCommandAction: msg.action })
+  }
+})
+
+async function pollOrionStatus() {
+  if (keepAliveDead) {
+    try { updateOrionIndicator({ wsConnected: false, isBoundTab: false, secsSinceCommand: null }) } catch {}
+    return
+  }
+  try {
+    const status = await chrome.runtime.sendMessage({ type: 'get_orion_status' })
+    if (status) updateOrionIndicator(status)
+  } catch {}
+}
+function startOrionIndicator() {
+  if (!document.body) { setTimeout(startOrionIndicator, 500); return }
+  pollOrionStatus()
+  setInterval(pollOrionStatus, 5000)
+}
+startOrionIndicator()
+
 // ── Listener de comandos del background ─────────────────────────────────────
+
+// MUTEX: solo UN comando puede ejecutarse a la vez en este tab. Sin esto, si
+// llegan 2 orion_command concurrentes (duplicado, re-dispatch post-redirect),
+// dos loops de humanType escriben en el MISMO editor alternando caracteres →
+// mensaje entrelazado ("HHoollaa"). El segundo comando se rechaza para que el
+// bridge lo reintente limpio cuando el primero termine.
+let _isExecuting = false
+let _executingSince = 0
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type !== 'orion_command') return false
 
   const { commandId, action, payload } = msg
+
+  // Guard: si hay un comando en ejecución, rechazar el nuevo.
+  // Safety: si lleva >3min "ejecutando" asumimos que se colgó y liberamos el lock.
+  if (_isExecuting && (Date.now() - _executingSince) < 180_000) {
+    console.warn(`[Orion content] Command ${action} (${commandId}) RECHAZADO — otro comando en ejecución desde hace ${Math.round((Date.now()-_executingSince)/1000)}s`)
+    sendResponse({ ok: false, error: 'content_busy_executing' })
+    return true
+  }
+
+  _isExecuting = true
+  _executingSince = Date.now()
   console.log(`[Orion content] Command ${action} (${commandId})`, payload)
 
   // Ejecutar de forma asíncrona y responder
   executeAction(action, payload)
     .then(result => sendResponse({ ok: true, ...result }))
     .catch(err => sendResponse({ ok: false, error: err.message ?? String(err) }))
+    .finally(() => { _isExecuting = false })
 
   return true  // mantener canal abierto para sendResponse asíncrono
 })
@@ -141,8 +292,10 @@ function getWebGLInfo() {
 // Retornamos array normalizado: [{name, snippet, unread, threadUrl, threadId, lastActivity}]
 
 async function checkInbox(payload = {}) {
-  const limit = Math.min(payload.limit ?? 30, 50)
-  console.log(`[Orion content] checkInbox: limit=${limit}, currentUrl=${location.href}`)
+  const deepScrape = !!payload.deepScrape
+  const daysWindow = Math.min(payload.daysWindow ?? 15, 90)  // window in days para deepScrape
+  const limit = deepScrape ? 500 : Math.min(payload.limit ?? 30, 50)
+  console.log(`[Orion content] checkInbox: deepScrape=${deepScrape} daysWindow=${daysWindow} limit=${limit}, currentUrl=${location.href}`)
 
   // 1. Verificar que estamos en /messaging/ (si no, error rápido — la auto-navegación
   // mata el content.js antes de responder; navegación se hará en background.js futuro)
@@ -178,16 +331,46 @@ async function checkInbox(payload = {}) {
     '.msg-conversations-container__conversations-list li',
     'ul[class*="conversations-list"] > li',
   ]
-  let items = []
-  for (const sel of itemSelectors) {
-    items = Array.from(document.querySelectorAll(sel))
-    if (items.length > 0) break
+  const getItems = () => {
+    for (const sel of itemSelectors) {
+      const arr = Array.from(document.querySelectorAll(sel))
+      if (arr.length > 0) return arr
+    }
+    return []
   }
+  let items = getItems()
   if (items.length === 0) {
     return { action: 'check_inbox', status: 'empty', conversations: [], url: location.href, note: 'No conversation items found in DOM' }
   }
 
-  console.log(`[Orion content] ${items.length} conversation items detectados`)
+  // 3b. Si deepScrape: scroll el contenedor para cargar conversaciones más viejas
+  // hasta que cubramos daysWindow O no carguen más items (máx 30 scrolls).
+  if (deepScrape) {
+    const scrollContainer = document.querySelector(
+      '.msg-conversations-container__conversations-list, ul[class*="conversations-list"]'
+    ) ?? document.querySelector('.msg-conversations-container')
+    if (scrollContainer) {
+      let prevCount = items.length
+      let stagnant = 0
+      const maxScrolls = 30
+      for (let i = 0; i < maxScrolls; i++) {
+        scrollContainer.scrollTop = scrollContainer.scrollHeight
+        await sleep(randInt(800, 1400))  // espera lazy-load
+        items = getItems()
+        console.log(`[Orion content] deepScrape: scroll ${i+1}/${maxScrolls} → ${items.length} items`)
+        if (items.length === prevCount) {
+          stagnant++
+          if (stagnant >= 3) { console.log('[Orion content] deepScrape: no new items, stop'); break }
+        } else {
+          stagnant = 0
+          prevCount = items.length
+        }
+        if (items.length >= limit) { console.log('[Orion content] deepScrape: limit alcanzado'); break }
+      }
+    }
+  }
+
+  console.log(`[Orion content] ${items.length} conversation items detectados (deepScrape=${deepScrape})`)
 
   // 4. Normalizar cada item
   const conversations = []
@@ -1284,6 +1467,42 @@ async function sendFollowup(payload = {}) {
       headerName,
     }
   }
+
+  // 6.5 VERIFICACIÓN: confirmar que el editor contiene el mensaje completo antes
+  // de clickear Send. Defensa contra typing interrumpido / texto truncado.
+  const editorText = (editor.textContent ?? editor.innerText ?? '').trim()
+  const expectedText = message.slice(0, 8000).trim()
+  const editorLen = editorText.length
+  const expectedLen = expectedText.length
+  const lenRatio = expectedLen > 0 ? editorLen / expectedLen : 0
+  // Comparamos últimos 30 chars (tail) — si typing fue cortado, el tail no coincide
+  const tailExpected = expectedText.slice(-30)
+  const tailEditor = editorText.slice(-30)
+  // Detección de:
+  //  - typing CORTO (ratio < 0.95) → interrumpido/truncado
+  //  - typing DOBLE/entrelazado (ratio > 1.15) → 2 loops concurrentes ("HHoollaa")
+  //  - tail no coincide → contenido corrupto
+  const tooShort = lenRatio < 0.95
+  const tooLong  = lenRatio > 1.15
+  const tailMismatch = !editorText.endsWith(tailExpected.slice(-15))
+  if (tooShort || tooLong || tailMismatch) {
+    const reason = tooLong ? 'garbled_or_doubled' : tooShort ? 'truncated' : 'tail_mismatch'
+    console.warn(`[Orion content] ⚠️  message_typing_invalid (${reason}): editor=${editorLen} expected=${expectedLen} ratio=${lenRatio.toFixed(2)}`)
+    // Limpiar el editor corrupto para no dejar basura visible
+    try { editor.innerHTML = ''; editor.dispatchEvent(new Event('input', { bubbles: true })) } catch {}
+    return {
+      action: 'send_followup',
+      status: 'error',
+      error:  'message_typing_incomplete',
+      reason,
+      editorLen,
+      expectedLen,
+      lenRatio: Number(lenRatio.toFixed(3)),
+      editorTail: tailEditor,
+      expectedTail: tailExpected,
+    }
+  }
+  console.log(`[Orion content] ✅ Editor verified: ${editorLen}/${expectedLen} chars match`)
 
   // 7. Click Send button (botón regular del thread footer / compose page)
   // El send button puede aparecer tardío en compose page — pequeño retry

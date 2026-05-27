@@ -255,6 +255,48 @@ async function refreshMonitor() {
   }
 }
 
+// ── Connectivity panel (24h) ───────────────────────────────────────────────
+
+const $connPanel = document.getElementById('connectivity-panel')
+const $connBar   = document.getElementById('conn-bar')
+const $connPct   = document.getElementById('conn-uptime-pct')
+const $connLast  = document.getElementById('conn-last-up')
+
+async function refreshConnectivity() {
+  const stored = await chrome.storage.local.get([
+    STORAGE_KEYS.ORION_URL, STORAGE_KEYS.API_KEY, STORAGE_KEYS.ACTIVE_ACCOUNT_ID,
+  ])
+  if (!stored.orion_url || !stored.orion_api_key || !stored.active_account_id) {
+    if ($connPanel) $connPanel.style.display = 'none'
+    return
+  }
+  try {
+    const r = await fetch(`${stored.orion_url}/api/extension/connectivity?accountId=${stored.active_account_id}`, {
+      headers: { 'x-orion-api-key': stored.orion_api_key },
+      cache: 'no-store',
+    })
+    if (!r.ok) throw new Error('conn_' + r.status)
+    const data = await r.json()
+    if (!$connPanel) return
+
+    // Render 24 mini-bars
+    const colors = { up: '#22c55e', down: '#ef4444', unknown: '#374151' }
+    $connBar.innerHTML = (data.buckets ?? []).map(b =>
+      `<div title="${b}" style="flex:1; background:${colors[b] ?? '#374151'};"></div>`
+    ).join('')
+
+    $connPct.textContent = data.uptimePct != null ? `${data.uptimePct}% uptime` : 'sin datos'
+    if (data.lastConnect) {
+      $connLast.textContent = timeAgo(data.lastConnect)
+    } else {
+      $connLast.textContent = 'sin registro'
+    }
+    $connPanel.style.display = 'block'
+  } catch (err) {
+    if ($connPanel) $connPanel.style.display = 'none'
+  }
+}
+
 // ── Pause/Resume toggle ──────────────────────────────────────────────────
 
 $pauseBtn.addEventListener('click', async () => {
@@ -345,5 +387,7 @@ setTimeout(checkUpdateBanner, 3000)
 
 setInterval(refreshStatus, 2_000)
 setInterval(refreshMonitor, 5_000)
+setInterval(refreshConnectivity, 60_000)  // cada 1min
+refreshConnectivity()
 setInterval(checkUpdateBanner, 30_000)
 setInterval(refreshErrorBanner, 3_000)

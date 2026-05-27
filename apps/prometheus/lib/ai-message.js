@@ -27,7 +27,7 @@ const TYPE_RULES = {
     ],
   },
   follow_up_1: {
-    maxChars: 500,
+    maxChars: 700,
     description: 'primer mensaje de follow-up después de aceptar la conexión',
     rules: [
       'Esta persona acaba de aceptar tu invitación. Saluda casualmente.',
@@ -37,7 +37,7 @@ const TYPE_RULES = {
     ],
   },
   follow_up_2: {
-    maxChars: 500,
+    maxChars: 700,
     description: 'segundo follow-up — la persona no respondió al primero',
     rules: [
       'Ya enviaste un primer mensaje sin respuesta. No insistas pero recuérdale el contexto.',
@@ -46,7 +46,7 @@ const TYPE_RULES = {
     ],
   },
   follow_up_3: {
-    maxChars: 500,
+    maxChars: 700,
     description: 'tercer follow-up — último intento amistoso',
     rules: [
       'Ya enviaste 2 mensajes sin respuesta. Esta es la última vez que escribes.',
@@ -55,12 +55,12 @@ const TYPE_RULES = {
     ],
   },
   follow_up_4: {
-    maxChars: 500,
+    maxChars: 700,
     description: 'cuarto follow-up — solo si el cliente lo configuró',
     rules: ['Persistencia estratégica. Aporta algo NUEVO y relevante.'],
   },
   follow_up_5: {
-    maxChars: 500,
+    maxChars: 700,
     description: 'quinto y último follow-up',
     rules: ['Cierre formal y educado. "Si no es buen momento, todo bien."'],
   },
@@ -101,13 +101,14 @@ const TYPE_RULES = {
   },
 }
 
-function buildSystemPrompt({ campaignPrompt, type, exampleReply, calUrl }) {
+function buildSystemPrompt({ campaignPrompt, type, exampleReply, calUrl, lastFuTemplate, lastFuStepNum }) {
   const typeConf = TYPE_RULES[type] ?? TYPE_RULES.invite
   const sections = [
     campaignPrompt || 'Eres un SDR experto que envía mensajes en LinkedIn en español.',
     '',
     `TIPO DE MENSAJE: ${typeConf.description}`,
     `LÍMITE: máximo ${typeConf.maxChars} caracteres (cuenta uno por uno).`,
+    `CIERRE OBLIGATORIO: termina SIEMPRE con punto final, signo de interrogación o exclamación cerrados. NUNCA dejes una oración a la mitad — si vas a quedarte sin espacio, acorta el mensaje y deja la oración COMPLETA.`,
     '',
     'REGLAS:',
     ...typeConf.rules.map(r => `- ${r}`),
@@ -115,6 +116,18 @@ function buildSystemPrompt({ campaignPrompt, type, exampleReply, calUrl }) {
   if (calUrl && (type === 'fm_reply_2' || type === 'fm_reply_3')) {
     sections.push('', `LINK DE CALENDARIO PARA AGENDAR: ${calUrl}`)
     sections.push('Inclúyelo en tu respuesta tal cual, sin acortar.')
+  }
+  // Intención previa: si en FM, incluye el ÚLTIMO FU template que se mandó al lead
+  // para mantener coherencia con la "fase del funnel" en la que está la conversación.
+  if (lastFuTemplate && type.startsWith('fm_reply')) {
+    sections.push('',
+      `INTENCIÓN DEL FOLLOW-UP PREVIO (FU${lastFuStepNum ?? '?'}) que ya enviaste a este lead:`,
+      '"""',
+      lastFuTemplate.slice(0, 800),
+      '"""',
+      'Tu respuesta debe MANTENER ESA INTENCIÓN ESTRATÉGICA (oferta, ángulo, valor que ya planteaste),',
+      'pero tomar como punto de partida la respuesta del lead — NO repitas el FU, evoluciónalo.'
+    )
   }
   if (exampleReply) {
     sections.push('', `EJEMPLO DE TONO Y ESTILO QUE FUNCIONA EN ESTA CAMPAÑA:`, `"${exampleReply}"`)
@@ -138,16 +151,31 @@ function buildUserPrompt(lead) {
 }
 
 function buildReplyUserPrompt(lead, conversationHistory, calUrl) {
-  const parts = [buildUserPrompt(lead)]
+  const parts = []
+
+  // 1. HISTORIAL PRIMERO (alta prioridad para que Gemini lo procese antes que el perfil)
   if (conversationHistory?.length) {
-    parts.push('', 'HISTORIAL DE LA CONVERSACIÓN (cronológico, más antiguo arriba):')
+    parts.push('HISTORIAL DE LA CONVERSACIÓN (cronológico, más antiguo arriba):')
     for (const msg of conversationHistory) {
       const speaker = msg.direction === 'outbound' ? 'YO (sender)' : `LEAD (${lead.full_name?.split(' ')[0] ?? 'él/ella'})`
       const content = (msg.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 600)
       parts.push(`[${speaker}]: ${content}`)
     }
-    parts.push('', 'TAREA: Responde DIRECTAMENTE al ÚLTIMO mensaje del LEAD. Considera todo el contexto previo.')
+    // Destacar explícitamente el último mensaje del LEAD (al que respondes)
+    const lastInbound = [...conversationHistory].reverse().find(m => m.direction === 'inbound')
+    if (lastInbound) {
+      const txt = (lastInbound.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 600)
+      parts.push('',
+        `>>> ÚLTIMO MENSAJE DEL LEAD (AL QUE DEBES RESPONDER COHERENTEMENTE):`,
+        `"${txt}"`,
+      )
+    }
+    parts.push('', 'TAREA CRÍTICA: Tu mensaje debe (1) RECONOCER explícitamente lo que dijo el lead arriba, (2) responderle con coherencia conversacional, (3) avanzar la conversación con la INTENCIÓN del FU previo descrita en el system prompt.')
   }
+
+  // 2. PERFIL después (contexto secundario)
+  parts.push('', buildUserPrompt(lead))
+
   if (calUrl) {
     parts.push('', `CAL_URL disponible: ${calUrl}`)
   }
@@ -179,10 +207,44 @@ async function callGemini(systemPrompt, userPrompt, maxChars, opts) {
       }
       if (!text) { lastError = 'empty_response'; continue }
       if (text.length > maxChars) {
+        // Truncación inteligente: SOLO en final de oración completa (. ? ! \n).
+        // Evita cortar a mitad de pregunta como "...invertir 20" sin "minutos?".
         const truncated = text.slice(0, maxChars)
-        const lastSpace = truncated.lastIndexOf(' ')
-        text = lastSpace > maxChars * 0.7 ? truncated.slice(0, lastSpace) : truncated
-        text = text.replace(/[,.;:\-]+$/, '').trim()
+        // Buscar el último cierre de oración dentro del límite
+        const sentenceEnd = Math.max(
+          truncated.lastIndexOf('. '),
+          truncated.lastIndexOf('? '),
+          truncated.lastIndexOf('! '),
+          truncated.lastIndexOf('.\n'),
+          truncated.lastIndexOf('?\n'),
+          truncated.lastIndexOf('!\n'),
+          truncated.lastIndexOf('.'),  // último .recurso
+          truncated.lastIndexOf('?'),
+          truncated.lastIndexOf('!'),
+        )
+        if (sentenceEnd > maxChars * 0.5) {
+          // Cortamos justo después de la puntuación (incluyéndola)
+          text = truncated.slice(0, sentenceEnd + 1).trim()
+        } else {
+          // No hay punto razonable → mensaje muy largo y sin cierre, re-intenta con menos
+          lastError = 'no_sentence_boundary'
+          if (attempt < retries) {
+            await new Promise(r => setTimeout(r, 800))
+            continue
+          }
+          // Último recurso: corta en último espacio y añade signo de interrogación si parece pregunta
+          const lastSpace = truncated.lastIndexOf(' ')
+          text = (lastSpace > maxChars * 0.7 ? truncated.slice(0, lastSpace) : truncated).replace(/[,.;:\-]+$/, '').trim()
+          if (text.toLowerCase().includes('qué') || text.toLowerCase().includes('cómo') || text.toLowerCase().startsWith('¿')) {
+            text = text + '?'
+          } else {
+            text = text + '.'
+          }
+        }
+      }
+      // Última guardia: si termina con número o palabra sin puntuación, agrega cierre
+      if (!/[.?!…]$/.test(text)) {
+        text = text + (text.includes('?') || text.startsWith('¿') ? '?' : '.')
       }
       return { message: text }
     } catch (err) {
@@ -297,6 +359,8 @@ export async function generateLinkedInReply(campaign, lead, ctx = {}, opts = {})
   const systemPrompt = buildSystemPrompt({
     campaignPrompt: campaign.gemini_system_prompt,
     type, exampleReply, calUrl,
+    lastFuTemplate: ctx.lastFuTemplate ?? null,
+    lastFuStepNum:  ctx.lastFuStepNum ?? null,
   })
   const userPrompt = buildReplyUserPrompt(lead, ctx.conversationHistory ?? [], calUrl)
   const maxChars = TYPE_RULES[type]?.maxChars ?? 700
