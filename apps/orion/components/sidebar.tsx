@@ -8,12 +8,15 @@ import { ThemeToggle } from "./theme-toggle"
 const NAV = [
   { href: "/dashboard",                   label: "Dashboard",  icon: "⚡", adminOnly: false },
   { href: "/dashboard/leads",             label: "Leads",      icon: "👥", adminOnly: false },
+  { href: "/dashboard/crm",               label: "CRM Oracle", icon: "👁️", adminOnly: false },
   { href: "/dashboard/conversations",     label: "Mensajes",   icon: "💬", adminOnly: false },
   { href: "/dashboard/meetings",          label: "Reuniones",  icon: "📅", adminOnly: false },
   { href: "/dashboard/campaigns",         label: "Campañas",   icon: "🎯", adminOnly: false },
   { href: "/dashboard/accounts",          label: "Cuentas LI", icon: "🔗", adminOnly: true  },
   { href: "/dashboard/activity",          label: "Actividad",  icon: "📋", adminOnly: false },
   { href: "/dashboard/cerebro",           label: "Cerebro IA", icon: "🧠", adminOnly: true  },
+  { href: "/dashboard/auto-learning",     label: "Auto-Learning", icon: "🧬", adminOnly: true  },
+  { href: "/dashboard/visual-tickets",    label: "Visual Tickets", icon: "🎯", adminOnly: true  },
   { href: "/dashboard/help",               label: "Instructivo", icon: "📖", adminOnly: false },
   { href: "/dashboard/settings",          label: "Ajustes",    icon: "⚙️", adminOnly: false },
   { href: "/dashboard/monitor",           label: "Monitor",    icon: "🖥️", adminOnly: true  },
@@ -32,9 +35,11 @@ interface SidebarProps {
   role?: string
   alertCount?: number
   unreadCount?: number
+  insightsCount?: number
+  ticketsCount?: number
 }
 
-export function Sidebar({ email, role, alertCount = 0, unreadCount = 0 }: SidebarProps) {
+export function Sidebar({ email, role, alertCount = 0, unreadCount = 0, insightsCount = 0, ticketsCount = 0 }: SidebarProps) {
   const path          = usePathname()
   const [menuOpen,    setMenuOpen]    = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -49,6 +54,8 @@ export function Sidebar({ email, role, alertCount = 0, unreadCount = 0 }: Sideba
     const active          = path === href || (href !== "/dashboard" && path.startsWith(href))
     const isMonitor       = href === "/dashboard/monitor"
     const isConversations = href === "/dashboard/conversations"
+    const isAutoLearning  = href === "/dashboard/auto-learning"
+    const isTickets       = href === "/dashboard/visual-tickets"
     return (
       <Link href={href} onClick={() => setSidebarOpen(false)}
         className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
@@ -66,6 +73,18 @@ export function Sidebar({ email, role, alertCount = 0, unreadCount = 0 }: Sideba
         {isConversations && unreadCount > 0 && (
           <span className="ml-auto flex items-center justify-center w-4 h-4 rounded-full bg-green-500 text-white text-[9px] font-bold">
             {unreadCount > 9 ? "9+" : unreadCount}
+          </span>
+        )}
+        {isAutoLearning && insightsCount > 0 && (
+          <span className={`ml-auto flex items-center justify-center min-w-4 h-4 px-1 rounded-full text-white text-[9px] font-bold ${
+            insightsCount > 10 ? "bg-red-500 animate-pulse" : "bg-amber-500"
+          }`}>
+            {insightsCount > 99 ? "99+" : insightsCount}
+          </span>
+        )}
+        {isTickets && ticketsCount > 0 && (
+          <span className="ml-auto flex items-center justify-center min-w-4 h-4 px-1 rounded-full bg-purple-500 text-white text-[9px] font-bold animate-pulse">
+            {ticketsCount > 99 ? "99+" : ticketsCount}
           </span>
         )}
       </Link>

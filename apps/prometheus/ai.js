@@ -664,16 +664,52 @@ REGLAS ABSOLUTAS:
 
 Responde ÚNICAMENTE con el cuerpo del mensaje. Sin comillas, sin prefijos, sin markdown. Sin firma. Sin despedida.`
 
-  const response = await ai.models.generateContent({
-    model: 'gemini-2.5-flash',
-    config: {
-      systemInstruction: `Eres un SDR experto que escribe mensajes de LinkedIn personalizados. Tu trabajo es escribir seguimientos que suenen 100% humanos y naturales, nunca automáticos. Siempre lees el historial antes de escribir para no repetirte.`,
-      temperature: 0.85,
-      maxOutputTokens: 300,
-      thinkingConfig: { thinkingBudget: 0 },
-    },
-    contents: prompt,
-  })
-
-  return response.text.trim()
+  // v0.7.13 P0-2: Gemini puede fallar con 403 PERMISSION_DENIED (quota/billing)
+  // o cualquier transient. Antes esto throw-eaba sin manejar → scheduler skipea
+  // el lead y NUNCA le manda FU. Ahora capturamos + fallback a template literal.
+  let response
+  try {
+    response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      config: {
+        systemInstruction: `Eres un SDR experto que escribe mensajes de LinkedIn personalizados. Tu trabajo es escribir seguimientos que suenen 100% humanos y naturales, nunca automáticos. Siempre lees el historial antes de escribir para no repetirte.`,
+        temperature: 0.85,
+        maxOutputTokens: 300,
+        thinkingConfig: { thinkingBudget: 0 },
+      },
+      contents: prompt,
+    })
+    // v0.7.13: stampar last-known-good para drift detector
+    try {
+      const { createClient } = await import('@supabase/supabase-js')
+      const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
+      await sb.from('runtime_config').upsert({
+        key: 'gemini_last_ok_at',
+        value: new Date().toISOString(),
+        updated_by: 'ai:generateFollowUpMessage',
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'key' })
+    } catch {}
+    return response.text.trim()
+  } catch (err) {
+    // v0.7.13 P0-2 fallback
+    const errMsg = err?.message ?? String(err)
+    console.error(`[ai] generateFollowUpMessage FAILED (${errMsg.slice(0, 200)}) — fallback a template literal`)
+    try {
+      const { createClient } = await import('@supabase/supabase-js')
+      const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
+      await sb.from('phase_insights').insert({
+        category: 'ai_fallback_used',
+        severity: errMsg.includes('403') ? 'critical' : 'warning',
+        phase_name: null,
+        account_id: null,
+        details: { error: errMsg.slice(0, 500), step: followUpStep, lead_name: leadName },
+      })
+    } catch {}
+    // Fallback: usar templateGuide si existe, si no template literal seguro
+    const safeFallback = (templateGuide && typeof templateGuide === 'string' && templateGuide.trim().length > 10)
+      ? templateGuide.replace(/\[Nombre\]/gi, leadName ?? '').trim()
+      : `Hola ${leadName ?? ''}, retomando el hilo — ¿podemos coordinar una llamada breve esta semana?`
+    return safeFallback
+  }
 }

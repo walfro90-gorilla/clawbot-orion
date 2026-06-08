@@ -70,11 +70,17 @@ export async function GET(req: NextRequest) {
   // Último connect timestamp
   const lastConnect = (events ?? []).filter(e => e.event_type === "connected").pop()?.created_at ?? null
 
+  // Desconexiones (indicador de inestabilidad = background mode probablemente off)
+  const disconnects24h = (events ?? []).filter(e => e.event_type === "disconnected").length
+  const unstable = disconnects24h >= 4
+
   return NextResponse.json({
     ok: true,
     buckets,
     uptimePct,
     lastConnect,
+    disconnects24h,
+    unstable,
     eventsCount: events?.length ?? 0,
   }, { headers: { ...CORS, "Cache-Control": "public, max-age=30" } })
 }

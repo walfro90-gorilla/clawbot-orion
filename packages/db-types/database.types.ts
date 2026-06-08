@@ -70,6 +70,13 @@ export type Database = {
             referencedColumns: ["campaign_id"]
           },
           {
+            foreignKeyName: "account_alerts_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "v_crm_lead_list"
+            referencedColumns: ["campaign_id_actual"]
+          },
+          {
             foreignKeyName: "account_alerts_linkedin_account_id_fkey"
             columns: ["linkedin_account_id"]
             isOneToOne: false
@@ -164,6 +171,13 @@ export type Database = {
             columns: ["lead_id"]
             isOneToOne: false
             referencedRelation: "leads"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "activity_log_lead_id_fkey"
+            columns: ["lead_id"]
+            isOneToOne: false
+            referencedRelation: "v_crm_lead_list"
             referencedColumns: ["id"]
           },
           {
@@ -289,10 +303,24 @@ export type Database = {
             referencedColumns: ["id"]
           },
           {
+            foreignKeyName: "appointments_conversation_id_fkey"
+            columns: ["conversation_id"]
+            isOneToOne: false
+            referencedRelation: "v_crm_lead_list"
+            referencedColumns: ["conversation_id"]
+          },
+          {
             foreignKeyName: "appointments_lead_id_fkey"
             columns: ["lead_id"]
             isOneToOne: false
             referencedRelation: "leads"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "appointments_lead_id_fkey"
+            columns: ["lead_id"]
+            isOneToOne: false
+            referencedRelation: "v_crm_lead_list"
             referencedColumns: ["id"]
           },
           {
@@ -347,6 +375,13 @@ export type Database = {
             foreignKeyName: "brain_memory_lead_id_fkey"
             columns: ["lead_id"]
             isOneToOne: true
+            referencedRelation: "v_crm_lead_list"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "brain_memory_lead_id_fkey"
+            columns: ["lead_id"]
+            isOneToOne: true
             referencedRelation: "v_lead_pipeline"
             referencedColumns: ["id"]
           },
@@ -369,6 +404,7 @@ export type Database = {
           fm2_example_reply: string | null
           fm3_example_reply: string | null
           follow_up_delay_days: number | null
+          follow_up_delay_hours: number | null
           follow_up_jitter_hours: number
           follow_up_message: string | null
           follow_up_paused: boolean | null
@@ -392,6 +428,7 @@ export type Database = {
           last_followup3_at: string | null
           last_followup4_at: string | null
           last_followup5_at: string | null
+          last_search_keyword_idx: number | null
           last_searched_at: string | null
           linkedin_account_id: string | null
           min_batch_gap_min: number
@@ -429,6 +466,7 @@ export type Database = {
           fm2_example_reply?: string | null
           fm3_example_reply?: string | null
           follow_up_delay_days?: number | null
+          follow_up_delay_hours?: number | null
           follow_up_jitter_hours?: number
           follow_up_message?: string | null
           follow_up_paused?: boolean | null
@@ -452,6 +490,7 @@ export type Database = {
           last_followup3_at?: string | null
           last_followup4_at?: string | null
           last_followup5_at?: string | null
+          last_search_keyword_idx?: number | null
           last_searched_at?: string | null
           linkedin_account_id?: string | null
           min_batch_gap_min?: number
@@ -489,6 +528,7 @@ export type Database = {
           fm2_example_reply?: string | null
           fm3_example_reply?: string | null
           follow_up_delay_days?: number | null
+          follow_up_delay_hours?: number | null
           follow_up_jitter_hours?: number
           follow_up_message?: string | null
           follow_up_paused?: boolean | null
@@ -512,6 +552,7 @@ export type Database = {
           last_followup3_at?: string | null
           last_followup4_at?: string | null
           last_followup5_at?: string | null
+          last_search_keyword_idx?: number | null
           last_searched_at?: string | null
           linkedin_account_id?: string | null
           min_batch_gap_min?: number
@@ -598,6 +639,13 @@ export type Database = {
             referencedRelation: "conversations"
             referencedColumns: ["id"]
           },
+          {
+            foreignKeyName: "conversation_events_conversation_id_fkey"
+            columns: ["conversation_id"]
+            isOneToOne: false
+            referencedRelation: "v_crm_lead_list"
+            referencedColumns: ["conversation_id"]
+          },
         ]
       }
       conversations: {
@@ -667,6 +715,13 @@ export type Database = {
             foreignKeyName: "conversations_lead_id_fkey"
             columns: ["lead_id"]
             isOneToOne: true
+            referencedRelation: "v_crm_lead_list"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "conversations_lead_id_fkey"
+            columns: ["lead_id"]
+            isOneToOne: true
             referencedRelation: "v_lead_pipeline"
             referencedColumns: ["id"]
           },
@@ -685,6 +740,51 @@ export type Database = {
             referencedColumns: ["account_id"]
           },
         ]
+      }
+      crm_audit_log: {
+        Row: {
+          action: string
+          actor_email: string | null
+          actor_id: string | null
+          created_at: string
+          id: number
+          lead_id: string | null
+          payload_after: Json | null
+          payload_before: Json | null
+          reason: string | null
+          reverted_at: string | null
+          reverted_by: string | null
+          target_table: string
+        }
+        Insert: {
+          action: string
+          actor_email?: string | null
+          actor_id?: string | null
+          created_at?: string
+          id?: number
+          lead_id?: string | null
+          payload_after?: Json | null
+          payload_before?: Json | null
+          reason?: string | null
+          reverted_at?: string | null
+          reverted_by?: string | null
+          target_table?: string
+        }
+        Update: {
+          action?: string
+          actor_email?: string | null
+          actor_id?: string | null
+          created_at?: string
+          id?: number
+          lead_id?: string | null
+          payload_after?: Json | null
+          payload_before?: Json | null
+          reason?: string | null
+          reverted_at?: string | null
+          reverted_by?: string | null
+          target_table?: string
+        }
+        Relationships: []
       }
       daily_activity: {
         Row: {
@@ -743,11 +843,14 @@ export type Database = {
           action: string
           completed_at: string | null
           created_at: string
+          current_phase: string | null
           dispatched_at: string | null
           error: string | null
           expires_at: string
           id: string
+          micro_phase_log: Json | null
           payload: Json
+          phase_log: Json | null
           related_lead_id: string | null
           result: Json | null
           status: string
@@ -757,11 +860,14 @@ export type Database = {
           action: string
           completed_at?: string | null
           created_at?: string
+          current_phase?: string | null
           dispatched_at?: string | null
           error?: string | null
           expires_at?: string
           id?: string
+          micro_phase_log?: Json | null
           payload?: Json
+          phase_log?: Json | null
           related_lead_id?: string | null
           result?: Json | null
           status?: string
@@ -771,11 +877,14 @@ export type Database = {
           action?: string
           completed_at?: string | null
           created_at?: string
+          current_phase?: string | null
           dispatched_at?: string | null
           error?: string | null
           expires_at?: string
           id?: string
+          micro_phase_log?: Json | null
           payload?: Json
+          phase_log?: Json | null
           related_lead_id?: string | null
           result?: Json | null
           status?: string
@@ -800,6 +909,13 @@ export type Database = {
             columns: ["related_lead_id"]
             isOneToOne: false
             referencedRelation: "leads"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "extension_commands_related_lead_id_fkey"
+            columns: ["related_lead_id"]
+            isOneToOne: false
+            referencedRelation: "v_crm_lead_list"
             referencedColumns: ["id"]
           },
           {
@@ -845,6 +961,13 @@ export type Database = {
             columns: ["lead_id"]
             isOneToOne: false
             referencedRelation: "leads"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "lead_notes_lead_id_fkey"
+            columns: ["lead_id"]
+            isOneToOne: false
+            referencedRelation: "v_crm_lead_list"
             referencedColumns: ["id"]
           },
           {
@@ -897,8 +1020,12 @@ export type Database = {
           ai_message: string | null
           ai_qualified: boolean | null
           ai_subject: string | null
+          awaiting_response_reason: string | null
+          awaiting_response_since: string | null
           campaign_id: string | null
           connected_at: string | null
+          consecutive_failures: number
+          cooldown_until: string | null
           created_at: string | null
           dead_reason: string | null
           disqualification_reason: string | null
@@ -906,16 +1033,22 @@ export type Database = {
           id: string
           inbound_message: string | null
           inbound_signal: string | null
+          inmail_revert_count: number | null
+          last_attempt_at: string | null
+          last_failure_at: string | null
+          last_failure_reason: string | null
           last_followup_at: string | null
           last_followup2_at: string | null
           last_followup3_at: string | null
           last_followup4_at: string | null
           last_followup5_at: string | null
           linkedin_url: string
+          lockout_skip_count: number | null
           meeting_at: string | null
           meeting_url: string | null
           next_action_at: string | null
           profile_data: Json | null
+          quarantined_at: string | null
           replied_at: string | null
           retry_count: number
           scraped_at: string | null
@@ -927,8 +1060,12 @@ export type Database = {
           ai_message?: string | null
           ai_qualified?: boolean | null
           ai_subject?: string | null
+          awaiting_response_reason?: string | null
+          awaiting_response_since?: string | null
           campaign_id?: string | null
           connected_at?: string | null
+          consecutive_failures?: number
+          cooldown_until?: string | null
           created_at?: string | null
           dead_reason?: string | null
           disqualification_reason?: string | null
@@ -936,16 +1073,22 @@ export type Database = {
           id?: string
           inbound_message?: string | null
           inbound_signal?: string | null
+          inmail_revert_count?: number | null
+          last_attempt_at?: string | null
+          last_failure_at?: string | null
+          last_failure_reason?: string | null
           last_followup_at?: string | null
           last_followup2_at?: string | null
           last_followup3_at?: string | null
           last_followup4_at?: string | null
           last_followup5_at?: string | null
           linkedin_url: string
+          lockout_skip_count?: number | null
           meeting_at?: string | null
           meeting_url?: string | null
           next_action_at?: string | null
           profile_data?: Json | null
+          quarantined_at?: string | null
           replied_at?: string | null
           retry_count?: number
           scraped_at?: string | null
@@ -957,8 +1100,12 @@ export type Database = {
           ai_message?: string | null
           ai_qualified?: boolean | null
           ai_subject?: string | null
+          awaiting_response_reason?: string | null
+          awaiting_response_since?: string | null
           campaign_id?: string | null
           connected_at?: string | null
+          consecutive_failures?: number
+          cooldown_until?: string | null
           created_at?: string | null
           dead_reason?: string | null
           disqualification_reason?: string | null
@@ -966,16 +1113,22 @@ export type Database = {
           id?: string
           inbound_message?: string | null
           inbound_signal?: string | null
+          inmail_revert_count?: number | null
+          last_attempt_at?: string | null
+          last_failure_at?: string | null
+          last_failure_reason?: string | null
           last_followup_at?: string | null
           last_followup2_at?: string | null
           last_followup3_at?: string | null
           last_followup4_at?: string | null
           last_followup5_at?: string | null
           linkedin_url?: string
+          lockout_skip_count?: number | null
           meeting_at?: string | null
           meeting_url?: string | null
           next_action_at?: string | null
           profile_data?: Json | null
+          quarantined_at?: string | null
           replied_at?: string | null
           retry_count?: number
           scraped_at?: string | null
@@ -998,6 +1151,98 @@ export type Database = {
             referencedRelation: "v_campaign_stats"
             referencedColumns: ["campaign_id"]
           },
+          {
+            foreignKeyName: "leads_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "v_crm_lead_list"
+            referencedColumns: ["campaign_id_actual"]
+          },
+        ]
+      }
+      learned_selectors: {
+        Row: {
+          created_at: string
+          disabled_at: string | null
+          disabled_reason: string | null
+          enabled: boolean
+          hit_count: number
+          id: number
+          label: string
+          last_hit_at: string | null
+          last_miss_at: string | null
+          miss_count: number
+          notes: string | null
+          phase_name: string | null
+          priority: number
+          selector: string
+          selector_alternatives: string[] | null
+          source_pin_id: number | null
+          source_ticket_id: number | null
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          disabled_at?: string | null
+          disabled_reason?: string | null
+          enabled?: boolean
+          hit_count?: number
+          id?: number
+          label: string
+          last_hit_at?: string | null
+          last_miss_at?: string | null
+          miss_count?: number
+          notes?: string | null
+          phase_name?: string | null
+          priority?: number
+          selector: string
+          selector_alternatives?: string[] | null
+          source_pin_id?: number | null
+          source_ticket_id?: number | null
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          disabled_at?: string | null
+          disabled_reason?: string | null
+          enabled?: boolean
+          hit_count?: number
+          id?: number
+          label?: string
+          last_hit_at?: string | null
+          last_miss_at?: string | null
+          miss_count?: number
+          notes?: string | null
+          phase_name?: string | null
+          priority?: number
+          selector?: string
+          selector_alternatives?: string[] | null
+          source_pin_id?: number | null
+          source_ticket_id?: number | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "learned_selectors_source_pin_id_fkey"
+            columns: ["source_pin_id"]
+            isOneToOne: false
+            referencedRelation: "selector_pins"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "learned_selectors_source_ticket_id_fkey"
+            columns: ["source_ticket_id"]
+            isOneToOne: false
+            referencedRelation: "selector_tickets"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "learned_selectors_source_ticket_id_fkey"
+            columns: ["source_ticket_id"]
+            isOneToOne: false
+            referencedRelation: "v_selector_tickets_open"
+            referencedColumns: ["id"]
+          },
         ]
       }
       linkedin_accounts: {
@@ -1005,6 +1250,7 @@ export type Database = {
           cal_com_url: string | null
           created_at: string | null
           daily_connection_limit: number | null
+          ext_version: string | null
           extension_api_key: string | null
           extension_last_seen_at: string | null
           extension_paused: boolean
@@ -1042,6 +1288,7 @@ export type Database = {
           cal_com_url?: string | null
           created_at?: string | null
           daily_connection_limit?: number | null
+          ext_version?: string | null
           extension_api_key?: string | null
           extension_last_seen_at?: string | null
           extension_paused?: boolean
@@ -1079,6 +1326,7 @@ export type Database = {
           cal_com_url?: string | null
           created_at?: string | null
           daily_connection_limit?: number | null
+          ext_version?: string | null
           extension_api_key?: string | null
           extension_last_seen_at?: string | null
           extension_paused?: boolean
@@ -1186,6 +1434,13 @@ export type Database = {
             referencedRelation: "v_campaign_stats"
             referencedColumns: ["campaign_id"]
           },
+          {
+            foreignKeyName: "message_templates_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "v_crm_lead_list"
+            referencedColumns: ["campaign_id_actual"]
+          },
         ]
       }
       messages_queue: {
@@ -1231,6 +1486,13 @@ export type Database = {
             columns: ["lead_id"]
             isOneToOne: false
             referencedRelation: "leads"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "messages_queue_lead_id_fkey"
+            columns: ["lead_id"]
+            isOneToOne: false
+            referencedRelation: "v_crm_lead_list"
             referencedColumns: ["id"]
           },
           {
@@ -1328,8 +1590,99 @@ export type Database = {
             foreignKeyName: "orphan_conversations_matched_lead_id_fkey"
             columns: ["matched_lead_id"]
             isOneToOne: false
+            referencedRelation: "v_crm_lead_list"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "orphan_conversations_matched_lead_id_fkey"
+            columns: ["matched_lead_id"]
+            isOneToOne: false
             referencedRelation: "v_lead_pipeline"
             referencedColumns: ["id"]
+          },
+        ]
+      }
+      phase_insights: {
+        Row: {
+          account_id: string | null
+          acknowledged: boolean | null
+          acknowledged_at: string | null
+          acknowledged_by: string | null
+          applied_at: string | null
+          applied_value: Json | null
+          auto_applied: boolean | null
+          category: string
+          confidence_score: number | null
+          details: Json | null
+          detected_at: string
+          id: number
+          message: string
+          metric_value: number | null
+          phase_name: string | null
+          recommended_action: string | null
+          rollback_value: Json | null
+          sample_size: number | null
+          severity: string
+          window_hours: number | null
+        }
+        Insert: {
+          account_id?: string | null
+          acknowledged?: boolean | null
+          acknowledged_at?: string | null
+          acknowledged_by?: string | null
+          applied_at?: string | null
+          applied_value?: Json | null
+          auto_applied?: boolean | null
+          category: string
+          confidence_score?: number | null
+          details?: Json | null
+          detected_at?: string
+          id?: number
+          message: string
+          metric_value?: number | null
+          phase_name?: string | null
+          recommended_action?: string | null
+          rollback_value?: Json | null
+          sample_size?: number | null
+          severity?: string
+          window_hours?: number | null
+        }
+        Update: {
+          account_id?: string | null
+          acknowledged?: boolean | null
+          acknowledged_at?: string | null
+          acknowledged_by?: string | null
+          applied_at?: string | null
+          applied_value?: Json | null
+          auto_applied?: boolean | null
+          category?: string
+          confidence_score?: number | null
+          details?: Json | null
+          detected_at?: string
+          id?: number
+          message?: string
+          metric_value?: number | null
+          phase_name?: string | null
+          recommended_action?: string | null
+          rollback_value?: Json | null
+          sample_size?: number | null
+          severity?: string
+          window_hours?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "phase_insights_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: false
+            referencedRelation: "linkedin_accounts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "phase_insights_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: false
+            referencedRelation: "v_account_today"
+            referencedColumns: ["account_id"]
           },
         ]
       }
@@ -1373,6 +1726,93 @@ export type Database = {
             foreignKeyName: "profiles_linkedin_account_id_fkey"
             columns: ["linkedin_account_id"]
             isOneToOne: false
+            referencedRelation: "v_account_today"
+            referencedColumns: ["account_id"]
+          },
+        ]
+      }
+      runtime_config: {
+        Row: {
+          insight_id: number | null
+          key: string
+          previous_value: Json | null
+          reason: string | null
+          updated_at: string
+          updated_by: string
+          value: Json
+        }
+        Insert: {
+          insight_id?: number | null
+          key: string
+          previous_value?: Json | null
+          reason?: string | null
+          updated_at?: string
+          updated_by: string
+          value: Json
+        }
+        Update: {
+          insight_id?: number | null
+          key?: string
+          previous_value?: Json | null
+          reason?: string | null
+          updated_at?: string
+          updated_by?: string
+          value?: Json
+        }
+        Relationships: [
+          {
+            foreignKeyName: "runtime_config_insight_id_fkey"
+            columns: ["insight_id"]
+            isOneToOne: false
+            referencedRelation: "phase_insights"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "runtime_config_insight_id_fkey"
+            columns: ["insight_id"]
+            isOneToOne: false
+            referencedRelation: "v_phase_insights_unacknowledged"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      runtime_config_heartbeat: {
+        Row: {
+          account_id: string
+          ext_version: string | null
+          page_errors_extra: Json | null
+          phase_timeouts: Json | null
+          reported_at: string
+          send_method_order: Json | null
+        }
+        Insert: {
+          account_id: string
+          ext_version?: string | null
+          page_errors_extra?: Json | null
+          phase_timeouts?: Json | null
+          reported_at?: string
+          send_method_order?: Json | null
+        }
+        Update: {
+          account_id?: string
+          ext_version?: string | null
+          page_errors_extra?: Json | null
+          phase_timeouts?: Json | null
+          reported_at?: string
+          send_method_order?: Json | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "runtime_config_heartbeat_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: true
+            referencedRelation: "linkedin_accounts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "runtime_config_heartbeat_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: true
             referencedRelation: "v_account_today"
             referencedColumns: ["account_id"]
           },
@@ -1450,6 +1890,13 @@ export type Database = {
             referencedRelation: "v_campaign_stats"
             referencedColumns: ["campaign_id"]
           },
+          {
+            foreignKeyName: "scheduler_log_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "v_crm_lead_list"
+            referencedColumns: ["campaign_id_actual"]
+          },
         ]
       }
       search_jobs: {
@@ -1510,12 +1957,225 @@ export type Database = {
             referencedRelation: "v_campaign_stats"
             referencedColumns: ["campaign_id"]
           },
+          {
+            foreignKeyName: "search_jobs_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "v_crm_lead_list"
+            referencedColumns: ["campaign_id_actual"]
+          },
         ]
+      }
+      selector_pins: {
+        Row: {
+          applied_to_runtime: boolean | null
+          confidence: number | null
+          created_at: string
+          extracted_selector: string | null
+          id: number
+          label: string
+          notes: string | null
+          pin_x: number
+          pin_y: number
+          resolved_element: Json | null
+          selector_candidates: Json | null
+          ticket_id: number
+        }
+        Insert: {
+          applied_to_runtime?: boolean | null
+          confidence?: number | null
+          created_at?: string
+          extracted_selector?: string | null
+          id?: number
+          label: string
+          notes?: string | null
+          pin_x: number
+          pin_y: number
+          resolved_element?: Json | null
+          selector_candidates?: Json | null
+          ticket_id: number
+        }
+        Update: {
+          applied_to_runtime?: boolean | null
+          confidence?: number | null
+          created_at?: string
+          extracted_selector?: string | null
+          id?: number
+          label?: string
+          notes?: string | null
+          pin_x?: number
+          pin_y?: number
+          resolved_element?: Json | null
+          selector_candidates?: Json | null
+          ticket_id?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "selector_pins_ticket_id_fkey"
+            columns: ["ticket_id"]
+            isOneToOne: false
+            referencedRelation: "selector_tickets"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "selector_pins_ticket_id_fkey"
+            columns: ["ticket_id"]
+            isOneToOne: false
+            referencedRelation: "v_selector_tickets_open"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      selector_tickets: {
+        Row: {
+          account_id: string | null
+          command_id: string | null
+          created_at: string
+          dom_snapshot: Json | null
+          id: number
+          insight_id: number | null
+          phase_name: string
+          pinned_count: number
+          resolution_note: string | null
+          resolved_at: string | null
+          resolved_by: string | null
+          screenshot_path: string | null
+          screenshot_url: string | null
+          scroll_y: number | null
+          status: string
+          trigger_source: string
+          url_at_capture: string | null
+          viewport_height: number | null
+          viewport_width: number | null
+        }
+        Insert: {
+          account_id?: string | null
+          command_id?: string | null
+          created_at?: string
+          dom_snapshot?: Json | null
+          id?: number
+          insight_id?: number | null
+          phase_name: string
+          pinned_count?: number
+          resolution_note?: string | null
+          resolved_at?: string | null
+          resolved_by?: string | null
+          screenshot_path?: string | null
+          screenshot_url?: string | null
+          scroll_y?: number | null
+          status?: string
+          trigger_source: string
+          url_at_capture?: string | null
+          viewport_height?: number | null
+          viewport_width?: number | null
+        }
+        Update: {
+          account_id?: string | null
+          command_id?: string | null
+          created_at?: string
+          dom_snapshot?: Json | null
+          id?: number
+          insight_id?: number | null
+          phase_name?: string
+          pinned_count?: number
+          resolution_note?: string | null
+          resolved_at?: string | null
+          resolved_by?: string | null
+          screenshot_path?: string | null
+          screenshot_url?: string | null
+          scroll_y?: number | null
+          status?: string
+          trigger_source?: string
+          url_at_capture?: string | null
+          viewport_height?: number | null
+          viewport_width?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "selector_tickets_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: false
+            referencedRelation: "linkedin_accounts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "selector_tickets_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: false
+            referencedRelation: "v_account_today"
+            referencedColumns: ["account_id"]
+          },
+          {
+            foreignKeyName: "selector_tickets_command_id_fkey"
+            columns: ["command_id"]
+            isOneToOne: false
+            referencedRelation: "extension_commands"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "selector_tickets_insight_id_fkey"
+            columns: ["insight_id"]
+            isOneToOne: false
+            referencedRelation: "phase_insights"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "selector_tickets_insight_id_fkey"
+            columns: ["insight_id"]
+            isOneToOne: false
+            referencedRelation: "v_phase_insights_unacknowledged"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      stress_snapshots: {
+        Row: {
+          account_id: string | null
+          after: Json | null
+          before: Json
+          case_id: string
+          id: number
+          lead_id: string | null
+          notes: string | null
+          pass: boolean | null
+          restored_at: string | null
+          result: Json | null
+          taken_at: string
+        }
+        Insert: {
+          account_id?: string | null
+          after?: Json | null
+          before: Json
+          case_id: string
+          id?: number
+          lead_id?: string | null
+          notes?: string | null
+          pass?: boolean | null
+          restored_at?: string | null
+          result?: Json | null
+          taken_at?: string
+        }
+        Update: {
+          account_id?: string | null
+          after?: Json | null
+          before?: Json
+          case_id?: string
+          id?: number
+          lead_id?: string | null
+          notes?: string | null
+          pass?: boolean | null
+          restored_at?: string | null
+          result?: Json | null
+          taken_at?: string
+        }
+        Relationships: []
       }
       ui_pattern_failures: {
         Row: {
           account_id: string | null
           action: string
+          ai_analyzed_at: string | null
+          ai_diagnosis: Json | null
           command_id: string | null
           created_at: string
           dom_snippet: Json | null
@@ -1538,6 +2198,8 @@ export type Database = {
         Insert: {
           account_id?: string | null
           action: string
+          ai_analyzed_at?: string | null
+          ai_diagnosis?: Json | null
           command_id?: string | null
           created_at?: string
           dom_snippet?: Json | null
@@ -1560,6 +2222,8 @@ export type Database = {
         Update: {
           account_id?: string | null
           action?: string
+          ai_analyzed_at?: string | null
+          ai_diagnosis?: Json | null
           command_id?: string | null
           created_at?: string
           dom_snippet?: Json | null
@@ -1606,6 +2270,13 @@ export type Database = {
             columns: ["related_lead_id"]
             isOneToOne: false
             referencedRelation: "leads"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "ui_pattern_failures_related_lead_id_fkey"
+            columns: ["related_lead_id"]
+            isOneToOne: false
+            referencedRelation: "v_crm_lead_list"
             referencedColumns: ["id"]
           },
           {
@@ -1689,6 +2360,118 @@ export type Database = {
           },
         ]
       }
+      v_crm_lead_list: {
+        Row: {
+          account_label: string | null
+          awaiting_response_since: string | null
+          campaign_id: string | null
+          campaign_id_actual: string | null
+          campaign_name: string | null
+          connected_at: string | null
+          consecutive_failures: number | null
+          conversation_id: string | null
+          cooldown_until: string | null
+          created_at: string | null
+          full_name: string | null
+          health_flags: Json | null
+          health_priority: number | null
+          id: string | null
+          inbound_count: number | null
+          inmail_revert_count: number | null
+          is_overdue: boolean | null
+          last_attempt_at: string | null
+          last_cmd_action: string | null
+          last_cmd_at: string | null
+          last_cmd_error: string | null
+          last_cmd_phase: string | null
+          last_cmd_result_reason: string | null
+          last_cmd_result_status: string | null
+          last_cmd_status: string | null
+          last_failure_reason: string | null
+          last_followup_at: string | null
+          last_followup2_at: string | null
+          last_followup3_at: string | null
+          last_followup4_at: string | null
+          last_followup5_at: string | null
+          last_inbound_at: string | null
+          last_message_at: string | null
+          last_message_text: string | null
+          last_outbound_at: string | null
+          linkedin_account_id: string | null
+          linkedin_url: string | null
+          lockout_skip_count: number | null
+          next_action_at: string | null
+          outbound_count: number | null
+          profile_data: Json | null
+          quarantined_at: string | null
+          recent_error_count_7d: number | null
+          replied_at: string | null
+          sent_at: string | null
+          status: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "campaigns_linkedin_account_id_fkey"
+            columns: ["linkedin_account_id"]
+            isOneToOne: false
+            referencedRelation: "linkedin_accounts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "campaigns_linkedin_account_id_fkey"
+            columns: ["linkedin_account_id"]
+            isOneToOne: false
+            referencedRelation: "v_account_today"
+            referencedColumns: ["account_id"]
+          },
+          {
+            foreignKeyName: "leads_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "campaigns"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "leads_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "v_campaign_stats"
+            referencedColumns: ["campaign_id"]
+          },
+          {
+            foreignKeyName: "leads_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "v_crm_lead_list"
+            referencedColumns: ["campaign_id_actual"]
+          },
+        ]
+      }
+      v_lead_phase_stuck: {
+        Row: {
+          account_id: string | null
+          last_seen: string | null
+          lead_name: string | null
+          occurrences: number | null
+          stuck_at: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "extension_commands_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: false
+            referencedRelation: "linkedin_accounts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "extension_commands_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: false
+            referencedRelation: "v_account_today"
+            referencedColumns: ["account_id"]
+          },
+        ]
+      }
       v_lead_pipeline: {
         Row: {
           account_label: string | null
@@ -1697,14 +2480,18 @@ export type Database = {
           ai_subject: string | null
           campaign_id: string | null
           campaign_name: string | null
+          consecutive_failures: number | null
+          cooldown_until: string | null
           created_at: string | null
           disqualification_reason: string | null
           full_name: string | null
           id: string | null
+          last_failure_reason: string | null
           linkedin_account_id: string | null
           linkedin_url: string | null
           next_action_at: string | null
           profile_data: Json | null
+          quarantined_at: string | null
           replied_at: string | null
           scraped_at: string | null
           sent_at: string | null
@@ -1741,11 +2528,276 @@ export type Database = {
             referencedColumns: ["campaign_id"]
           },
           {
+            foreignKeyName: "leads_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "v_crm_lead_list"
+            referencedColumns: ["campaign_id_actual"]
+          },
+          {
             foreignKeyName: "linkedin_accounts_user_id_fkey"
             columns: ["user_id"]
             isOneToOne: false
             referencedRelation: "profiles"
             referencedColumns: ["id"]
+          },
+        ]
+      }
+      v_learned_selectors_health: {
+        Row: {
+          created_at: string | null
+          disabled_reason: string | null
+          enabled: boolean | null
+          hit_count: number | null
+          hit_rate_pct: number | null
+          id: number | null
+          label: string | null
+          last_hit_at: string | null
+          last_miss_at: string | null
+          miss_count: number | null
+          phase_name: string | null
+          priority: number | null
+          selector: string | null
+          updated_at: string | null
+        }
+        Insert: {
+          created_at?: string | null
+          disabled_reason?: string | null
+          enabled?: boolean | null
+          hit_count?: number | null
+          hit_rate_pct?: never
+          id?: number | null
+          label?: string | null
+          last_hit_at?: string | null
+          last_miss_at?: string | null
+          miss_count?: number | null
+          phase_name?: string | null
+          priority?: number | null
+          selector?: string | null
+          updated_at?: string | null
+        }
+        Update: {
+          created_at?: string | null
+          disabled_reason?: string | null
+          enabled?: boolean | null
+          hit_count?: number | null
+          hit_rate_pct?: never
+          id?: number | null
+          label?: string | null
+          last_hit_at?: string | null
+          last_miss_at?: string | null
+          miss_count?: number | null
+          phase_name?: string | null
+          priority?: number | null
+          selector?: string | null
+          updated_at?: string | null
+        }
+        Relationships: []
+      }
+      v_phase_error_pattern_classification: {
+        Row: {
+          distinct_leads: number | null
+          error_msg: string | null
+          leads_sample: string[] | null
+          occurrences: number | null
+          phase_name: string | null
+        }
+        Relationships: []
+      }
+      v_phase_insights_unacknowledged: {
+        Row: {
+          account_id: string | null
+          account_label: string | null
+          acknowledged: boolean | null
+          acknowledged_at: string | null
+          acknowledged_by: string | null
+          applied_at: string | null
+          auto_applied: boolean | null
+          category: string | null
+          details: Json | null
+          detected_at: string | null
+          id: number | null
+          message: string | null
+          metric_value: number | null
+          phase_name: string | null
+          recommended_action: string | null
+          sample_size: number | null
+          severity: string | null
+          window_hours: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "phase_insights_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: false
+            referencedRelation: "linkedin_accounts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "phase_insights_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: false
+            referencedRelation: "v_account_today"
+            referencedColumns: ["account_id"]
+          },
+        ]
+      }
+      v_phase_reliability_24h: {
+        Row: {
+          account_id: string | null
+          action: string | null
+          avg_ms: number | null
+          avg_polls: number | null
+          distinct_cmds: number | null
+          errors_count: number | null
+          occurrences: number | null
+          p50_ms: number | null
+          p95_ms: number | null
+          p99_ms: number | null
+          phase_name: string | null
+          phase_state: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "extension_commands_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: false
+            referencedRelation: "linkedin_accounts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "extension_commands_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: false
+            referencedRelation: "v_account_today"
+            referencedColumns: ["account_id"]
+          },
+        ]
+      }
+      v_phase_reliability_7d: {
+        Row: {
+          account_id: string | null
+          avg_ms: number | null
+          occurrences: number | null
+          p95_ms: number | null
+          phase_name: string | null
+          phase_state: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "extension_commands_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: false
+            referencedRelation: "linkedin_accounts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "extension_commands_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: false
+            referencedRelation: "v_account_today"
+            referencedColumns: ["account_id"]
+          },
+        ]
+      }
+      v_phase_success_rate_24h: {
+        Row: {
+          account_id: string | null
+          ok_count: number | null
+          phase_name: string | null
+          success_pct: number | null
+          timeout_count: number | null
+          timeout_pct: number | null
+          total: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "extension_commands_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: false
+            referencedRelation: "linkedin_accounts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "extension_commands_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: false
+            referencedRelation: "v_account_today"
+            referencedColumns: ["account_id"]
+          },
+        ]
+      }
+      v_selector_evidence_for_drift: {
+        Row: {
+          evidence: Json | null
+          occurrences: number | null
+          phase_name: string | null
+        }
+        Relationships: []
+      }
+      v_selector_tickets_open: {
+        Row: {
+          account_id: string | null
+          account_label: string | null
+          age_minutes: number | null
+          created_at: string | null
+          dom_elements_count: number | null
+          id: number | null
+          phase_name: string | null
+          pinned_count: number | null
+          screenshot_url: string | null
+          status: string | null
+          trigger_source: string | null
+          url_at_capture: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "selector_tickets_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: false
+            referencedRelation: "linkedin_accounts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "selector_tickets_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: false
+            referencedRelation: "v_account_today"
+            referencedColumns: ["account_id"]
+          },
+        ]
+      }
+      v_send_method_distribution_7d: {
+        Row: {
+          send_method: string | null
+          sent_count: number | null
+          success_pct: number | null
+          total_attempts: number | null
+        }
+        Relationships: []
+      }
+      v_timeout_drift_24h_vs_7d: {
+        Row: {
+          account_id: string | null
+          drift_ratio: number | null
+          p95_24h: number | null
+          p95_7d: number | null
+          phase_name: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "extension_commands_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: false
+            referencedRelation: "linkedin_accounts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "extension_commands_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: false
+            referencedRelation: "v_account_today"
+            referencedColumns: ["account_id"]
           },
         ]
       }
@@ -1779,8 +2831,12 @@ export type Database = {
           ai_message: string | null
           ai_qualified: boolean | null
           ai_subject: string | null
+          awaiting_response_reason: string | null
+          awaiting_response_since: string | null
           campaign_id: string | null
           connected_at: string | null
+          consecutive_failures: number
+          cooldown_until: string | null
           created_at: string | null
           dead_reason: string | null
           disqualification_reason: string | null
@@ -1788,16 +2844,22 @@ export type Database = {
           id: string
           inbound_message: string | null
           inbound_signal: string | null
+          inmail_revert_count: number | null
+          last_attempt_at: string | null
+          last_failure_at: string | null
+          last_failure_reason: string | null
           last_followup_at: string | null
           last_followup2_at: string | null
           last_followup3_at: string | null
           last_followup4_at: string | null
           last_followup5_at: string | null
           linkedin_url: string
+          lockout_skip_count: number | null
           meeting_at: string | null
           meeting_url: string | null
           next_action_at: string | null
           profile_data: Json | null
+          quarantined_at: string | null
           replied_at: string | null
           retry_count: number
           scraped_at: string | null

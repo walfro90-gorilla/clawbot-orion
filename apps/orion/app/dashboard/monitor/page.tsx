@@ -2,6 +2,12 @@ import { createAdminClient } from "@/lib/supabase/admin"
 import { requireRole } from "@/lib/auth/role"
 import { redirect } from "next/navigation"
 import { RunNowBtn } from "@/components/run-now-btn"
+import { ErrorClassBadge } from "@/components/ui/error-class-badge"
+import { classifyCommandError } from "@/lib/error-class"
+import { AutoRefresh } from "@/components/auto-refresh"
+
+// Datos siempre frescos: el monitor es tiempo real, no cachear.
+export const dynamic = "force-dynamic"
 
 // ── Server Actions ─────────────────────────────────────────────────────────────
 
@@ -115,7 +121,7 @@ export default async function MonitorPage() {
     { count: extTimeouts24h },
   ] = await Promise.all([
     db.from("extension_commands")
-      .select("id, account_id, action, status, error, created_at, completed_at, payload")
+      .select("id, account_id, action, status, error, created_at, completed_at, acked_at, payload")
       .in("status", ["error", "timeout"])
       .gt("created_at", new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
       .order("created_at", { ascending: false })
@@ -133,6 +139,13 @@ export default async function MonitorPage() {
       .eq("status", "timeout")
       .gt("created_at", new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()),
   ])
+
+  // Salud por agente (acción) 7d — apunta al cuello de botella real.
+  // `as any`: v_agent_health_7d es una vista nueva aún no en los tipos generados.
+  const { data: agentHealth } = await (db as any)
+    .from("v_agent_health_7d")
+    .select("action, total, success, success_pct, queued, business, failed")
+    .order("total", { ascending: false })
 
   // Bridge /health fetch (puede fallar si bridge caído)
   type BridgeAccount = { accountId: string; label: string; lastSeen: number }
@@ -244,6 +257,8 @@ export default async function MonitorPage() {
           <h1 className="text-2xl font-bold text-gray-50">Monitor del Sistema</h1>
           <p className="text-gray-400 text-sm mt-0.5">Estado en tiempo real de todos los jobs y alertas críticas</p>
         </div>
+        <div className="flex items-center gap-3">
+        <AutoRefresh intervalMs={15000} />
         <div className={`flex items-center gap-2 px-4 py-2 rounded-xl border text-sm font-medium ${
           health === "ok"       ? "bg-green-500/10 border-green-500/30 text-green-400" :
           health === "warning"  ? "bg-yellow-500/10 border-yellow-500/30 text-yellow-400" :
@@ -253,6 +268,7 @@ export default async function MonitorPage() {
             health === "ok" ? "bg-green-400" : health === "warning" ? "bg-yellow-400" : "bg-red-400"
           }`} />
           {health === "ok" ? "Sistema saludable" : health === "warning" ? "Alertas activas" : "Crítico"}
+        </div>
         </div>
       </div>
 
@@ -288,6 +304,41 @@ export default async function MonitorPage() {
           <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse shrink-0" />
           Scheduler activo — último tick hace {tickAgeMins} min
           {!isBusinessHours && <span className="text-gray-500 ml-1">(fuera de horario — solo inbox)</span>}
+        </div>
+      )}
+
+      {/* ── Salud por agente (7d) ──────────────────────────────────────────── */}
+      {agentHealth && agentHealth.length > 0 && (
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wide">🤖 Salud por agente (7 días)</h2>
+            <span className="text-xs text-gray-500">éxito = completados / total · cola y regla LinkedIn no son fallos</span>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+            {(agentHealth as any[]).map((a) => {
+              const pct = a.success_pct ?? 0
+              const color = pct >= 80 ? "#22c55e" : pct >= 65 ? "#eab308" : "#ef4444"
+              const ICONS: Record<string, string> = { search: "🔍", send_invite: "📨", send_followup: "💬", check_inbox: "📬", check_sent_invites: "📥", auto_reply: "↩️" }
+              const realFail = (a.failed ?? 0) - (a.queued ?? 0) - (a.business ?? 0)
+              return (
+                <div key={a.action} className="bg-gray-950/50 border border-gray-800 rounded-lg p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-gray-300 font-medium truncate">{ICONS[a.action] ?? "•"} {a.action}</span>
+                    <span className="text-sm font-bold tabular-nums" style={{ color }}>{pct}%</span>
+                  </div>
+                  <div className="h-1.5 rounded-full bg-gray-800 overflow-hidden">
+                    <div className="h-full rounded-full" style={{ width: `${Math.min(pct, 100)}%`, backgroundColor: color }} />
+                  </div>
+                  <div className="flex items-center justify-between text-[10px] text-gray-500">
+                    <span>{a.total} cmds</span>
+                    <span title="fallos reales (sin cola ni regla LinkedIn)" className={realFail > 0 ? "text-red-400/80" : ""}>
+                      {realFail > 0 ? `${realFail} fallo real` : "0 fallos"}
+                    </span>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
         </div>
       )}
 
@@ -346,10 +397,28 @@ export default async function MonitorPage() {
         )}
 
         {/* Errors table (collapsible) */}
-        {(extErrors && extErrors.length > 0) && (
+        {(extErrors && extErrors.length > 0) && (() => {
+          // Agrupar por clase para el resumen — distingue fallo real de ruido (cola/negocio).
+          const byClass = new Map<string, { label: string; color: string; isFault: boolean; n: number }>()
+          for (const c of extErrors as any[]) {
+            const cl = classifyCommandError(c.error, c.status)
+            const cur = byClass.get(cl.key) ?? { label: cl.label, color: cl.color, isFault: cl.isFault, n: 0 }
+            cur.n++; byClass.set(cl.key, cur)
+          }
+          const classes = [...byClass.values()].sort((a, b) => b.n - a.n)
+          const faults = classes.filter(c => c.isFault).reduce((s, c) => s + c.n, 0)
+          return (
           <details className="border-t border-gray-800 pt-3 group">
-            <summary className="cursor-pointer text-xs text-red-400 hover:text-red-300 select-none">
-              ⚠️ Ver {extErrors.length} comando(s) con error/timeout en últimas 24h
+            <summary className="cursor-pointer text-xs text-gray-300 hover:text-white select-none flex flex-wrap items-center gap-2">
+              <span className={faults > 0 ? "text-red-400" : "text-gray-400"}>
+                {faults > 0 ? `⚠️ ${faults} fallo(s) real(es)` : "✓ Sin fallos reales"} de {extErrors.length} no-éxito (24h)
+              </span>
+              {classes.map(c => (
+                <span key={c.label} className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium"
+                  style={{ backgroundColor: `${c.color}20`, color: c.color, border: `1px solid ${c.color}40` }}>
+                  {c.isFault && <span aria-hidden>●</span>}{c.label} {c.n}
+                </span>
+              ))}
             </summary>
             <div className="mt-3 overflow-x-auto">
               <table className="w-full text-xs">
@@ -358,7 +427,8 @@ export default async function MonitorPage() {
                     <th className="text-left py-2 font-medium">Hora</th>
                     <th className="text-left py-2 font-medium">Cuenta</th>
                     <th className="text-left py-2 font-medium">Acción</th>
-                    <th className="text-left py-2 font-medium">Status</th>
+                    <th className="text-left py-2 font-medium">Tipo</th>
+                    <th className="text-left py-2 font-medium">ACK</th>
                     <th className="text-left py-2 font-medium">Error</th>
                   </tr>
                 </thead>
@@ -367,21 +437,25 @@ export default async function MonitorPage() {
                     const acc = accMap[c.account_id]
                     const hora = new Date(c.created_at).toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit" })
                     const errShort = (c.error ?? "").slice(0, 80)
+                    // ACK solo es señal informativa para comandos post-v0.7.27 (cuando se agregó).
+                    const ackCutoff = new Date("2026-06-06T00:00:00Z").getTime()
+                    const ackKnown = new Date(c.created_at).getTime() >= ackCutoff
                     return (
                       <tr key={c.id} className="border-b border-gray-800/40">
                         <td className="py-1.5 text-gray-400 font-mono">{hora}</td>
                         <td className="py-1.5 text-gray-300">{acc?.label ?? c.account_id.slice(0, 8)}</td>
                         <td className="py-1.5 text-gray-300">{c.action}</td>
+                        <td className="py-1.5"><ErrorClassBadge error={c.error} status={c.status} /></td>
                         <td className="py-1.5">
-                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                            c.status === "timeout"
-                              ? "bg-yellow-500/15 text-yellow-400 border border-yellow-500/30"
-                              : "bg-red-500/15 text-red-400 border border-red-500/30"
-                          }`}>
-                            {c.status}
-                          </span>
+                          {c.acked_at ? (
+                            <span className="text-green-400 text-[11px]" title="content.js confirmó recepción">✓</span>
+                          ) : ackKnown ? (
+                            <span className="text-amber-400/70 text-[11px]" title="Sin ACK: content.js nunca recibió el comando (infra)">✗</span>
+                          ) : (
+                            <span className="text-gray-600 text-[11px]" title="ACK no disponible (comando antiguo)">—</span>
+                          )}
                         </td>
-                        <td className="py-1.5 text-gray-500 truncate max-w-[300px]" title={c.error ?? ""}>{errShort}</td>
+                        <td className="py-1.5 text-gray-500 truncate max-w-[280px]" title={c.error ?? ""}>{errShort}</td>
                       </tr>
                     )
                   })}
@@ -389,7 +463,8 @@ export default async function MonitorPage() {
               </table>
             </div>
           </details>
-        )}
+          )
+        })()}
       </div>
 
       {/* ── Alertas críticas ──────────────────────────────────────────────────── */}

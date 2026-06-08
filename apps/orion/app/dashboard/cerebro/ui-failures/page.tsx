@@ -65,7 +65,7 @@ export default async function UIFailuresPage({
   const db = createAdminClient()
   let q = db
     .from("ui_pattern_failures")
-    .select("id, action, error, reason, url, ext_version, screenshot_path, dom_snippet, status, labeled_selector, labeled_notes, occurrence_count, resolved_in_version, created_at, account_id, related_lead_id")
+    .select("id, action, error, reason, url, ext_version, screenshot_path, dom_snippet, status, labeled_selector, labeled_notes, occurrence_count, resolved_in_version, created_at, account_id, related_lead_id, ai_diagnosis, ai_analyzed_at")
     .order("created_at", { ascending: false })
     .limit(50)
 
@@ -136,6 +136,25 @@ export default async function UIFailuresPage({
           const leadName = r.related_lead_id ? leadMap.get(r.related_lead_id) : null
           const accLabel = r.account_id ? accMap.get(r.account_id) : null
           const screenshotUrl = signed[r.id]
+          const ai = (r.ai_diagnosis ?? null) as null | {
+            source?: "human_label" | "heuristic" | "gemini_vision"
+            element_visible?: boolean
+            location_description?: string
+            likely_cause?: string
+            suggested_css_selector?: string | null
+            page_state?: string
+            confidence?: number
+            recommendation?: string
+            raw?: string
+            parse_error?: boolean
+            error?: string
+          }
+          const aiSourceMeta: Record<string, { label: string; cls: string }> = {
+            human_label:   { label: "👤 Etiqueta humana", cls: "bg-blue-200 text-blue-900" },
+            heuristic:     { label: "⚙️ Heurística (código · $0)", cls: "bg-green-200 text-green-900" },
+            gemini_vision: { label: "🖼️ Gemini Vision", cls: "bg-purple-200 text-purple-900" },
+          }
+          const srcMeta = ai?.source ? aiSourceMeta[ai.source] : null
           return (
             <div key={r.id} className="bg-white rounded-lg border shadow-sm overflow-hidden">
               <div className="p-4 border-b bg-gray-50 flex items-start justify-between">
@@ -160,6 +179,77 @@ export default async function UIFailuresPage({
                   {new Date(r.created_at).toLocaleString("es-MX", { timeZone: "America/Mexico_City" })}
                 </span>
               </div>
+
+              {/* 🧠 Cerebro AI Vision — diagnóstico automático del screenshot */}
+              {ai && (
+                <div className="mx-4 mt-4 rounded-lg border border-purple-200 bg-purple-50 p-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-xs font-bold text-purple-800 flex items-center gap-1.5 flex-wrap">
+                      🧠 Cerebro AI
+                      {srcMeta && (
+                        <span className={`px-1.5 py-0.5 rounded font-semibold ${srcMeta.cls}`}>
+                          {srcMeta.label}
+                        </span>
+                      )}
+                      {typeof ai.confidence === "number" && (
+                        <span className="px-1.5 py-0.5 rounded bg-purple-200 text-purple-900 font-mono">
+                          conf {Math.round(ai.confidence * 100)}%
+                        </span>
+                      )}
+                    </div>
+                    {r.ai_analyzed_at && (
+                      <span className="text-[10px] text-purple-500">
+                        {new Date(r.ai_analyzed_at).toLocaleString("es-MX", { timeZone: "America/Mexico_City" })}
+                      </span>
+                    )}
+                  </div>
+
+                  {ai.error ? (
+                    <div className="text-xs text-red-600">Error analizando: {ai.error}</div>
+                  ) : ai.parse_error ? (
+                    <pre className="text-[10px] bg-white p-2 rounded border overflow-auto max-h-40 whitespace-pre-wrap">{ai.raw}</pre>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
+                      <div>
+                        <span className="font-semibold text-purple-700">Elemento visible:</span>{" "}
+                        {ai.element_visible === true ? (
+                          <span className="text-green-700 font-semibold">Sí ✓</span>
+                        ) : ai.element_visible === false ? (
+                          <span className="text-red-700 font-semibold">No ✗</span>
+                        ) : "—"}
+                      </div>
+                      <div>
+                        <span className="font-semibold text-purple-700">Estado página:</span>{" "}
+                        <code className="bg-white px-1 rounded">{ai.page_state ?? "—"}</code>
+                      </div>
+                      {ai.location_description && (
+                        <div className="sm:col-span-2">
+                          <span className="font-semibold text-purple-700">Ubicación:</span>{" "}
+                          <span className="text-gray-700">{ai.location_description}</span>
+                        </div>
+                      )}
+                      {ai.likely_cause && (
+                        <div className="sm:col-span-2">
+                          <span className="font-semibold text-purple-700">Causa probable:</span>{" "}
+                          <span className="text-gray-700">{ai.likely_cause}</span>
+                        </div>
+                      )}
+                      {ai.suggested_css_selector && (
+                        <div className="sm:col-span-2">
+                          <span className="font-semibold text-purple-700">Selector sugerido:</span>{" "}
+                          <code className="bg-white px-1 py-0.5 rounded text-[11px] break-all">{ai.suggested_css_selector}</code>
+                        </div>
+                      )}
+                      {ai.recommendation && (
+                        <div className="sm:col-span-2 mt-1 p-2 bg-white rounded border border-purple-100">
+                          <span className="font-semibold text-purple-700">💡 Recomendación:</span>{" "}
+                          <span className="text-gray-800">{ai.recommendation}</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
 
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 p-4">
                 {/* Screenshot */}

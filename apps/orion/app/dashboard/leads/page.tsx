@@ -16,6 +16,20 @@ async function bulkUpdateStatus(formData: FormData) {
   await admin.from("leads").update({ status: newStatus }).in("id", ids)
 }
 
+async function bulkReleaseLeads(formData: FormData) {
+  "use server"
+  const admin = createAdminClient()
+  const ids   = formData.getAll("lead_ids") as string[]
+  if (!ids.length) return
+  await admin.from("leads").update({
+    consecutive_failures: 0,
+    cooldown_until:       null,
+    quarantined_at:       null,
+    last_failure_at:      null,
+    last_failure_reason:  null,
+  }).in("id", ids)
+}
+
 export default async function LeadsPage({
   searchParams,
 }: {
@@ -47,6 +61,10 @@ export default async function LeadsPage({
       : supabase.from("campaigns").select("id, name"),
   ])
 
+  // NOTA: v_lead_pipeline fue extendido para exponer consecutive_failures,
+  // cooldown_until, quarantined_at, last_failure_reason (migration
+  // 20260531_lead_fault_tolerance). Sin esto la UI no puede mostrar el badge
+  // de quarantine ni el countdown de cooldown.
   let query = supabase
     .from("v_lead_pipeline")
     .select("*")
@@ -91,15 +109,16 @@ export default async function LeadsPage({
 
   // Message sequence steps per status (which automated messages have been sent)
   const SEQUENCE_STEPS = [
-    { status: "invite_sent",      short: "Inv",  title: "Invitación enviada"     },
-    { status: "connected",        short: "Cnx",  title: "Conexión aceptada"      },
-    { status: "follow_up_sent",   short: "FU1",  title: "Seguimiento 1 enviado"  },
-    { status: "follow_up_sent_2", short: "FU2",  title: "Seguimiento 2 enviado"  },
-    { status: "follow_up_sent_3", short: "FU3",  title: "Seguimiento 3 enviado"  },
-    { status: "follow_up_sent_4", short: "FU4",  title: "Seguimiento 4 enviado"  },
-    { status: "follow_up_sent_5", short: "FU5",  title: "Seguimiento 5 enviado"  },
-    { status: "replied",          short: "Rep",  title: "Respondió"              },
-    { status: "meeting_booked",   short: "Mtg",  title: "Reunión agendada"       },
+    { status: "invite_sent",       short: "Inv",  title: "Invitación enviada"     },
+    { status: "connected",         short: "Cnx",  title: "Conexión aceptada"      },
+    { status: "follow_up_sent",    short: "FU1",  title: "Seguimiento 1 enviado"  },
+    { status: "follow_up_sent_2",  short: "FU2",  title: "Seguimiento 2 enviado"  },
+    { status: "follow_up_sent_3",  short: "FU3",  title: "Seguimiento 3 enviado"  },
+    { status: "follow_up_sent_4",  short: "FU4",  title: "Seguimiento 4 enviado"  },
+    { status: "follow_up_sent_5",  short: "FU5",  title: "Seguimiento 5 enviado"  },
+    { status: "awaiting_response", short: "Esp",  title: "Esperando reply (LinkedIn ban window)" },
+    { status: "replied",           short: "Rep",  title: "Respondió"              },
+    { status: "meeting_booked",    short: "Mtg",  title: "Reunión agendada"       },
   ]
 
   const STATUS_ORDER: Record<string, number> = {
@@ -107,7 +126,8 @@ export default async function LeadsPage({
     invite_sent: 1, connected: 2,
     follow_up_sent: 3, follow_up_sent_2: 4, follow_up_sent_3: 5,
     follow_up_sent_4: 6, follow_up_sent_5: 7,
-    replied: 8, meeting_booked: 9, dead: -1, failed: -1,
+    awaiting_response: 8,
+    replied: 9, meeting_booked: 10, dead: -1, failed: -1,
   }
 
   // "Alert" statuses where lead is stuck long enough to flag
@@ -238,6 +258,7 @@ export default async function LeadsPage({
                 const days    = daysAgo(lead.sent_at)
                 return (
                 <tr key={lead.id} className={`hover:bg-gray-800/50 transition-colors ${
+                  lead.quarantined_at ? "bg-red-950/30" :
                   alert?.level === "danger" ? "bg-red-950/20" : alert?.level === "warn" ? "bg-yellow-950/20" : ""
                 }`}>
                   <td className="px-4 py-3">
@@ -248,7 +269,7 @@ export default async function LeadsPage({
                       {lead.full_name ?? "Sin nombre"}
                     </Link>
                     <div className="text-gray-500 text-xs mt-0.5 truncate max-w-[180px]">
-                      {(lead.profile_data as any)?.headline ?? lead.linkedin_url?.replace("https://www.linkedin.com/in/", "")}
+                      {(lead.profile_data as { headline?: string } | null)?.headline ?? lead.linkedin_url?.replace("https://www.linkedin.com/in/", "")}
                     </div>
                     {alert && (
                       <div className={`text-[10px] mt-0.5 font-medium ${alert.level === "danger" ? "text-red-400" : "text-yellow-400"}`}>
@@ -260,6 +281,22 @@ export default async function LeadsPage({
                     <StatusBadge status={lead.status} configs={statuses} size="sm" />
                     {days !== null && ord > 0 && ord < 5 && (
                       <div className="text-gray-600 text-[10px] mt-1">hace {days}d</div>
+                    )}
+                    {lead.quarantined_at && (
+                      <div
+                        className="mt-1 inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded bg-red-500/20 text-red-300 border border-red-500/40"
+                        title={`Cuarentena desde ${new Date(lead.quarantined_at).toLocaleString("es-MX")}. Fallos: ${lead.consecutive_failures ?? 0}. Razón: ${lead.last_failure_reason ?? "—"}`}
+                      >
+                        🔒 Cuarentena
+                      </div>
+                    )}
+                    {!lead.quarantined_at && lead.cooldown_until && new Date(lead.cooldown_until).getTime() > Date.now() && (
+                      <div
+                        className="mt-1 text-[10px] text-amber-400"
+                        title={`Cooldown hasta ${new Date(lead.cooldown_until).toLocaleString("es-MX")}. Fallos consecutivos: ${lead.consecutive_failures ?? 0}.`}
+                      >
+                        ⏱️ {new Date(lead.cooldown_until).toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit" })}
+                      </div>
                     )}
                   </td>
                   <td className="px-4 py-3">

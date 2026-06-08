@@ -13,6 +13,16 @@ import { GoogleGenAI } from '@google/genai'
 
 const MODEL = 'gemini-2.5-flash'
 
+// Detecta placeholders/variables sin resolver en un mensaje listo para enviar:
+//   - corchetes con contenido: "[menciona algo]", "[Nombre]", "[CAL_URL]"
+//   - llaves con contenido: "{nombre}", "{cal_url}"
+// Un mensaje FINAL nunca debe contener esto (los LinkedIn DMs no usan corchetes).
+export const PLACEHOLDER_RE = /\[[^\]\n]{0,120}\]|\{[^}\n]{0,120}\}/
+
+export function hasLeftoverPlaceholder(text) {
+  return PLACEHOLDER_RE.test(String(text ?? ''))
+}
+
 const TYPE_RULES = {
   invite: {
     maxChars: 150,
@@ -134,6 +144,7 @@ function buildSystemPrompt({ campaignPrompt, type, exampleReply, calUrl, lastFuT
     sections.push('Úsalo como GUÍA de tono y estructura, NO copies literal.')
   }
   sections.push('', 'FORMATO DE RESPUESTA: SOLO el mensaje a enviar, texto plano. Sin comillas envolventes, sin prefijos tipo "Respuesta:", sin firma.')
+  sections.push('', '🚫 PROHIBIDO: corchetes [ ], llaves { } o cualquier placeholder/instrucción de relleno (ej. "[menciona algo de su perfil]", "[Nombre]", "[empresa]"). Si te falta un dato del lead, OMÍTELO de forma natural — escribe la frase completa sin ese dato. El mensaje debe quedar 100% listo para enviarse tal cual, sin nada por rellenar.')
   return sections.join('\n')
 }
 
@@ -188,9 +199,16 @@ async function callGemini(systemPrompt, userPrompt, maxChars, opts) {
   const ai = new GoogleGenAI({ apiKey })
   const retries = opts.retries ?? 2
   let lastError
+  // Timeout duro por llamada — sin esto, si la red a Gemini se estanca, el await
+  // cuelga el tick completo del scheduler → watchdog mata el proceso (297s hang).
+  const GEMINI_TIMEOUT_MS = opts.timeoutMs ?? 30_000
+  const withGeminiTimeout = (p) => Promise.race([
+    p,
+    new Promise((_, rej) => setTimeout(() => rej(new Error(`gemini_timeout_${GEMINI_TIMEOUT_MS}ms`)), GEMINI_TIMEOUT_MS)),
+  ])
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      const response = await ai.models.generateContent({
+      const response = await withGeminiTimeout(ai.models.generateContent({
         model: MODEL,
         config: {
           systemInstruction: systemPrompt,
@@ -199,7 +217,7 @@ async function callGemini(systemPrompt, userPrompt, maxChars, opts) {
           thinkingConfig: { thinkingBudget: 0 },
         },
         contents: userPrompt,
-      })
+      }))
       let text = (response.text ?? '').trim()
       if ((text.startsWith('"') && text.endsWith('"')) ||
           (text.startsWith("'") && text.endsWith("'"))) {
@@ -246,6 +264,16 @@ async function callGemini(systemPrompt, userPrompt, maxChars, opts) {
       if (!/[.?!…]$/.test(text)) {
         text = text + (text.includes('?') || text.startsWith('¿') ? '?' : '.')
       }
+      // 🛡️ GUARD ANTI-PLACEHOLDER: el AI a veces deja instrucciones de relleno
+      // literales ("[menciona algo de su perfil]", "[Nombre]", "{nombre}", "[CAL_URL]")
+      // que se enviaban CRUDAS al lead. NUNCA devolver texto con placeholders sin
+      // resolver. Reintentamos (Gemini es no-determinista); si persiste, error →
+      // el caller cae a template seguro (FU) o salta el envío (auto-reply).
+      if (hasLeftoverPlaceholder(text)) {
+        lastError = `leftover_placeholder: ${text.match(PLACEHOLDER_RE)?.[0]?.slice(0, 40)}`
+        if (attempt < retries) { await new Promise(r => setTimeout(r, 600)); continue }
+        return { error: 'leftover_placeholder' }
+      }
       return { message: text }
     } catch (err) {
       lastError = err.message ?? String(err)
@@ -291,21 +319,30 @@ export async function personalizeFollowupMessage(campaign, lead, template, fuSte
   const typeConf = TYPE_RULES[stepKey] ?? TYPE_RULES.follow_up_1
   const maxChars = typeConf.maxChars
 
+  // El objetivo de los follow-ups es CONSTRUIR RELACIÓN, no vender. El tono lo
+  // dicta el TEMPLATE (intención): si el template es un saludo cálido de relación,
+  // el output debe ser cálido de relación; solo hay pitch/CTA/datos si el template
+  // los tiene explícitamente. Esto se puede tunear por cuenta via runtime_config
+  // 'followup_tone_directive' (default abajo) o por campaña editando los templates.
+  const toneDirective = opts.toneDirective
+    || `Los follow-ups de LinkedIn buscan CONSTRUIR RELACIÓN y mantener el contacto, NO vender. Sé cálido, humano y genuino — en plan de conocer a la persona, no de cerrar una venta.`
   const systemSections = [
-    campaign.gemini_system_prompt || 'Eres un SDR experto B2B en español.',
+    campaign.gemini_system_prompt || 'Eres una persona que escribe mensajes de LinkedIn naturales, cálidos y humanos en español.',
     '',
-    `TAREA: PERSONALIZAR un template de mensaje LinkedIn — manteniendo la INTENCIÓN COMPLETA del template original pero adaptando el wording al lead específico.`,
+    toneDirective,
+    '',
+    `TAREA: PERSONALIZAR un template de mensaje LinkedIn — manteniendo la INTENCIÓN del template original pero adaptando el wording al lead específico.`,
     '',
     `MEJORA QUE QUEREMOS:`,
-    `- Mismo objetivo de venta/conversación que el template original.`,
-    `- Mismas piezas estructurales: pregunta abierta si hay, dato si hay, CTA si hay.`,
+    `- MISMA intención y tono que el template original (si es un saludo cálido de relación, mantenlo así).`,
+    `- Mismas piezas estructurales que el template: pregunta SOLO si el template tiene, dato SOLO si el template tiene, CTA SOLO si el template tiene.`,
     `- Lenguaje adaptado al cargo, empresa, industria y headline del lead.`,
-    `- Ejemplos/casos relevantes para su industria (si en el template hay un caso, busca uno análogo a su sector).`,
-    `- Tono: mismo que el template original (casual, directo, cálido).`,
+    `- Tono: mismo que el template original (natural, cálido, humano).`,
     '',
     `LO QUE NO HAGAS:`,
-    `- NO cambies la intención de venta del template.`,
-    `- NO inventes datos numéricos (porcentajes, cifras) — usa los del template tal cual o más conservadores.`,
+    `- NO conviertas un saludo de relación en un pitch de venta. Si el template NO vende, tú NO vendes.`,
+    `- NO agregues CTA, pregunta de venta, datos ni cifras que el template no tenga explícitamente.`,
+    `- NO inventes datos numéricos (porcentajes, cifras).`,
     `- NO añadas información que no esté en el template o en el perfil del lead.`,
     `- NO uses emojis a menos que el template original los tenga.`,
     `- NO incluyas tu firma o nombre.`,
@@ -317,6 +354,7 @@ export async function personalizeFollowupMessage(campaign, lead, template, fuSte
     systemSections.push('', `LINK CALENDARIO: ${calUrl} — inclúyelo tal cual si el template original tiene CTA de llamada.`)
   }
   systemSections.push('', 'FORMATO: SOLO el mensaje personalizado, texto plano. Sin comillas, sin prefijos, sin firma.')
+  systemSections.push('🚫 PROHIBIDO corchetes [ ], llaves { } o placeholders de relleno ("[menciona algo]", "[Nombre]"). Si te falta un dato, OMÍTELO naturalmente. El mensaje debe quedar listo para enviar tal cual.')
 
   const systemPrompt = systemSections.join('\n')
 

@@ -48,7 +48,7 @@ export async function POST(req: NextRequest) {
   const rows = accountIds.map(accountId => ({
     account_id: accountId,
     action:     "check_inbox" as const,
-    payload:    { deepScrape: true, daysWindow: 15, limit: 500 },
+    payload:    { deepScrape: true, daysWindow: 15, limit: 500, captureThreads: true, maxCaptures: 15 },
     status:     "pending" as const,
     expires_at: expiresAt,
   }))

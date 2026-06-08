@@ -203,6 +203,154 @@ function actionLabel(action) {
   })[action] ?? action
 }
 
+// v0.6.46 — Active process glowing badge config por action + kind
+// Devuelve { icon, label, cssClass } para renderizar el badge en tiempo real.
+function activeProcessConfig(action, kind) {
+  switch (action) {
+    case 'search':
+      return { icon: '🔍', label: 'Buscando contactos nuevos', cssClass: 'act-search' }
+    case 'send_invite':
+      return { icon: '📨', label: 'Enviando invitación', cssClass: 'act-invite' }
+    case 'check_inbox':
+      return { icon: '📥', label: 'Revisando inbox', cssClass: 'act-inbox' }
+    case 'check_sent_invites':
+      return { icon: '🔄', label: 'Verificando invites aceptadas', cssClass: 'act-sent-check' }
+    case 'send_followup':
+      if (kind === 'reply') {
+        return { icon: '💬', label: 'Respondiendo mensaje', cssClass: 'act-reply' }
+      }
+      return { icon: '📤', label: 'Enviando seguimiento', cssClass: 'act-followup' }
+    default:
+      return { icon: '⚡', label: action, cssClass: 'act-other' }
+  }
+}
+
+const $activeProcess = document.getElementById('active-process')
+const $apIcon   = document.getElementById('ap-icon')
+const $apLabel  = document.getElementById('ap-label')
+const $apTarget = document.getElementById('ap-target')
+const $apStatus = document.getElementById('ap-status')
+
+function renderActiveProcess(activeCommand) {
+  if (!activeCommand) {
+    $activeProcess.className = 'active-process'  // hides via .visible removal
+    $activeProcess.classList.remove('visible')
+    return
+  }
+  const { action, status, leadName, kind, dispatchedAt, createdAt } = activeCommand
+  const cfg = activeProcessConfig(action, kind)
+  $apIcon.textContent = cfg.icon
+  $apLabel.textContent = cfg.label
+  $apTarget.textContent = leadName ? `→ ${leadName}` : ''
+  // Status pill: 'dispatched' (corriendo) o 'pending' (en cola)
+  const sinceIso = dispatchedAt ?? createdAt
+  $apStatus.textContent = status === 'dispatched'
+    ? `en vuelo · ${timeAgo(sinceIso).replace('hace ','')}`
+    : 'en cola'
+  // Apply per-action color class + status modifier
+  $activeProcess.className = `active-process visible ${cfg.cssClass} status-${status}`
+}
+
+// ── v0.7.7 — Next Actions panel ────────────────────────────────────────────
+const $nextActions = document.getElementById('next-actions')
+const $naPrimaryIcon = document.getElementById('na-primary-icon')
+const $naPrimaryLabel = document.getElementById('na-primary-label')
+const $naPrimaryCountdown = document.getElementById('na-primary-countdown')
+const $naList = document.getElementById('na-list')
+const $forceTickBtn = document.getElementById('force-tick-btn')
+
+function fmtCountdown(ms) {
+  if (ms <= 0) return 'ahora'
+  const s = Math.floor(ms / 1000)
+  if (s < 60) return `en ${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `en ${m}min`
+  const h = Math.floor(m / 60)
+  const mm = m % 60
+  return `en ${h}h ${mm}min`
+}
+function fmtTime(ts) {
+  return new Date(ts).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', hour12: false })
+}
+
+async function refreshNextActions() {
+  if (!$nextActions) return
+  const stored = await chrome.storage.local.get([
+    STORAGE_KEYS.ORION_URL, STORAGE_KEYS.API_KEY, STORAGE_KEYS.ACTIVE_ACCOUNT_ID,
+  ])
+  if (!stored.orion_url || !stored.orion_api_key || !stored.active_account_id) {
+    $nextActions.style.display = 'none'
+    return
+  }
+  try {
+    const r = await fetch(
+      `${stored.orion_url}/api/extension/next-actions?accountId=${stored.active_account_id}`,
+      { headers: { 'x-orion-api-key': stored.orion_api_key }, cache: 'no-store' }
+    )
+    if (!r.ok) throw new Error('status ' + r.status)
+    const d = await r.json()
+    $nextActions.style.display = 'block'
+
+    if (d.next_any) {
+      const icon = d.next_any.label?.split(' ')[0] ?? '⏳'
+      const labelText = d.next_any.label?.split(' ').slice(1).join(' ') ?? d.next_any.type
+      $naPrimaryIcon.textContent = icon
+      $naPrimaryLabel.textContent = labelText
+      $naPrimaryCountdown.textContent = `${fmtCountdown(d.next_any.at - d.now)} (${fmtTime(d.next_any.at)})`
+    } else {
+      $naPrimaryIcon.textContent = '✅'
+      $naPrimaryLabel.textContent = 'Sin acciones programadas'
+      $naPrimaryCountdown.textContent = '—'
+    }
+    // Lista secundaria
+    $naList.innerHTML = ''
+    for (const upcoming of (d.sorted_upcoming ?? []).slice(1, 4)) {
+      const li = document.createElement('li')
+      li.innerHTML = `<span>${upcoming.label}</span><span class="when">${fmtCountdown(upcoming.at - d.now)}</span>`
+      $naList.appendChild(li)
+    }
+    if (d.pending_replies > 0) {
+      const li = document.createElement('li')
+      li.innerHTML = `<span style="color:#fbbf24">💬 ${d.pending_replies} replies aguardando delay</span><span class="when">~</span>`
+      $naList.appendChild(li)
+    }
+  } catch (err) {
+    // silently hide on error
+  }
+}
+
+if ($forceTickBtn) {
+  $forceTickBtn.addEventListener('click', async () => {
+    const stored = await chrome.storage.local.get([
+      STORAGE_KEYS.ORION_URL, STORAGE_KEYS.API_KEY, STORAGE_KEYS.ACTIVE_ACCOUNT_ID,
+    ])
+    if (!stored.orion_url || !stored.orion_api_key || !stored.active_account_id) return
+    $forceTickBtn.disabled = true
+    $forceTickBtn.textContent = '⚡ Disparando…'
+    try {
+      const r = await fetch(`${stored.orion_url}/api/extension/force-tick`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-orion-api-key': stored.orion_api_key,
+        },
+        body: JSON.stringify({ accountId: stored.active_account_id, action: 'check_inbox' }),
+      })
+      const d = await r.json()
+      $forceTickBtn.textContent = r.ok ? `✓ Dispatched #${(d.cmd_id || '').slice(0,8)}` : `✗ ${d.error}`
+    } catch (e) {
+      $forceTickBtn.textContent = '✗ Error'
+    }
+    setTimeout(() => {
+      $forceTickBtn.disabled = false
+      $forceTickBtn.textContent = '⚡ Forzar inbox check ahora'
+    }, 3000)
+  })
+}
+
+// Initial fetch
+refreshNextActions()
+
 async function refreshMonitor() {
   const stored = await chrome.storage.local.get([
     STORAGE_KEYS.ORION_URL, STORAGE_KEYS.API_KEY, STORAGE_KEYS.ACTIVE_ACCOUNT_ID,
@@ -223,6 +371,9 @@ async function refreshMonitor() {
     $mAccount.textContent = data.account?.label ?? '—'
     $mToday.textContent = `${data.today?.invites ?? 0} invites · ${data.today?.messages ?? 0} msgs`
     $mQueue.textContent = data.pendingCommands ?? 0
+
+    // v0.6.46 — render glowing badge del proceso activo (en vuelo o en cola)
+    renderActiveProcess(data.activeCommand)
 
     const last = data.lastCommand
     if (last) {
@@ -252,6 +403,7 @@ async function refreshMonitor() {
   } catch (err) {
     // No mostrar errores en mini-monitor — solo lo ocultamos si falla
     $monitor.style.display = 'none'
+    renderActiveProcess(null)
   }
 }
 
@@ -261,6 +413,20 @@ const $connPanel = document.getElementById('connectivity-panel')
 const $connBar   = document.getElementById('conn-bar')
 const $connPct   = document.getElementById('conn-uptime-pct')
 const $connLast  = document.getElementById('conn-last-up')
+const $connWarn  = document.getElementById('conn-unstable-warning')
+const $connDisc  = document.getElementById('conn-disc-count')
+const $connBgCopy = document.getElementById('conn-bg-copy')
+
+// Copiar chrome://settings/system al clipboard (no se puede abrir por link, Chrome lo bloquea)
+if ($connBgCopy) {
+  $connBgCopy.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText('chrome://settings/system')
+      $connBgCopy.textContent = '✓ Copiado'
+      setTimeout(() => { $connBgCopy.textContent = 'Copiar' }, 2000)
+    } catch {}
+  })
+}
 
 async function refreshConnectivity() {
   const stored = await chrome.storage.local.get([
@@ -290,6 +456,15 @@ async function refreshConnectivity() {
       $connLast.textContent = timeAgo(data.lastConnect)
     } else {
       $connLast.textContent = 'sin registro'
+    }
+    // Warning de inestabilidad (background mode off probable)
+    if ($connWarn) {
+      if (data.unstable) {
+        if ($connDisc) $connDisc.textContent = data.disconnects24h ?? '?'
+        $connWarn.style.display = 'block'
+      } else {
+        $connWarn.style.display = 'none'
+      }
     }
     $connPanel.style.display = 'block'
   } catch (err) {
@@ -386,7 +561,8 @@ loadStored()
 setTimeout(checkUpdateBanner, 3000)
 
 setInterval(refreshStatus, 2_000)
-setInterval(refreshMonitor, 5_000)
+setInterval(refreshMonitor, 2_500)  // v0.6.46: más rápido para que badge se sienta live
+setInterval(refreshNextActions, 15_000)  // v0.7.7: countdown update cada 15s
 setInterval(refreshConnectivity, 60_000)  // cada 1min
 refreshConnectivity()
 setInterval(checkUpdateBanner, 30_000)

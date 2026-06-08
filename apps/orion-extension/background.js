@@ -45,10 +45,27 @@ self.addEventListener('activate', (event) => {
   initIfConfigured()
 })
 
+// v0.6.50: PERMITIR que content.js (contexto untrusted) acceda a storage.session.
+// Por default storage.session solo es accesible desde SW (trusted). Sin esto,
+// v0.6.49 mutex no funcionaba — content.js escribía pero SW no veía nada.
+// Sin esta línea el typing a María Eugenia se interrumpía porque pre-nav check
+// no detectaba el cmd en flight desde content.js.
+try {
+  chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS' })
+    .then(() => console.log('[Orion] storage.session: untrusted contexts allowed'))
+    .catch(err => console.warn('[Orion] storage.session setAccessLevel fail:', err?.message))
+} catch (err) {
+  console.warn('[Orion] storage.session setAccessLevel sync error:', err?.message)
+}
+
 // Keep-alive via alarm (MV3 sleeps SW después de 30s idle)
 chrome.alarms.create('keep-alive', { periodInMinutes: 0.25 })  // 15s
 // Update check cada 60 min
 chrome.alarms.create('update-check', { periodInMinutes: 60, delayInMinutes: 1 })
+// v0.7.12 P0-1: runtime_config refresh broadcast a content scripts cada 5 min.
+// content.js ya tiene su propio setInterval, pero esto cubre el edge case de
+// tabs viejas que estaban abiertas cuando se hizo bump de config server-side.
+chrome.alarms.create('runtime-config-refresh', { periodInMinutes: 5, delayInMinutes: 1 })
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'keep-alive') {
@@ -61,7 +78,88 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'update-check') {
     checkForUpdate().catch(err => console.warn('[Orion] update check failed:', err.message))
   }
+  if (alarm.name === 'runtime-config-refresh') {
+    broadcastRuntimeConfigRefresh().catch(err => console.warn('[Orion] runtime-config refresh failed:', err.message))
+  }
 })
+
+// v0.7.17 P0-1 fix: SW-side fetch + POST heartbeat DIRECTLY, no depende de tabs.
+// El bug pre-v0.7.17: content.js POST heartbeat solo cuando tab LinkedIn viva.
+// Bridge cierra tabs efímeras tras cada cmd → setInterval muere antes del primer fire.
+// Fix: SW hace fetch GET /api/runtime-config + POST /api/runtime-config/heartbeat
+// con su propio fetch (no requiere tabs). Después broadcast a tabs como bonus.
+async function loadAndPostHeartbeatFromSW() {
+  try {
+    const stored = await chrome.storage.local.get([
+      STORAGE_KEYS.ORION_URL,
+      STORAGE_KEYS.ACTIVE_ACCOUNT_ID,
+      'account_id',  // fallback legacy key usado por content.js
+    ])
+    if (!stored?.orion_url) return { skipped: 'no_orion_url' }
+    const account_id = stored?.active_account_id ?? stored?.account_id
+    if (!account_id) return { skipped: 'no_account_id' }
+
+    // 1. GET /api/runtime-config (latest server-side config)
+    let runtimeConfig = {}
+    try {
+      const r = await fetch(`${stored.orion_url}/api/runtime-config`, { cache: 'no-store' })
+      if (r.ok) {
+        const j = await r.json().catch(() => null)
+        if (j?.config) {
+          runtimeConfig = j.config
+          // Persist to storage for content.js to pick up on next inject
+          await chrome.storage.local.set({ _runtime_config: j })
+        }
+      }
+    } catch (err) {
+      console.warn('[Orion bg] runtime-config fetch failed:', err?.message)
+    }
+
+    // 2. POST /api/runtime-config/heartbeat (always, even if fetch failed — proves SW alive)
+    const ext_version = chrome.runtime.getManifest().version
+    const body = {
+      account_id,
+      ext_version,
+      phase_timeouts: runtimeConfig.phase_timeouts ?? null,
+      send_method_order: runtimeConfig.send_method_order ?? null,
+      page_errors_extra: runtimeConfig.page_errors_extra ?? null,
+    }
+    const hbRes = await fetch(`${stored.orion_url}/api/runtime-config/heartbeat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).catch(err => ({ ok: false, err: err?.message }))
+    if (hbRes?.ok) {
+      console.log(`[Orion bg] P0-1 heartbeat POST ok (v${ext_version})`)
+    } else {
+      console.warn('[Orion bg] P0-1 heartbeat POST failed:', hbRes?.err ?? hbRes?.status)
+    }
+    return { posted: !!hbRes?.ok }
+  } catch (err) {
+    console.warn('[Orion bg] loadAndPostHeartbeatFromSW error:', err?.message)
+    return { error: err?.message }
+  }
+}
+
+// v0.7.12 P0-1 + v0.7.17 fix: SW posts heartbeat itself, then broadcasts to tabs as bonus.
+async function broadcastRuntimeConfigRefresh() {
+  // Primary path: SW does the work (independent of tabs)
+  await loadAndPostHeartbeatFromSW()
+  // Secondary path: broadcast to live tabs so content.js refreshes its in-memory cache
+  try {
+    const tabs = await chrome.tabs.query({ url: ['*://*.linkedin.com/*'] })
+    let ok = 0, fail = 0
+    for (const t of tabs) {
+      try {
+        await chrome.tabs.sendMessage(t.id, { type: 'orion_runtime_config_refresh', ts: Date.now() })
+        ok++
+      } catch { fail++ }
+    }
+    if (ok > 0 || fail > 0) console.log(`[Orion bg] runtime-config refresh broadcast: ${ok} ok, ${fail} fail`)
+  } catch (err) {
+    console.warn('[Orion bg] broadcastRuntimeConfigRefresh error:', err?.message)
+  }
+}
 
 // ── Update check ────────────────────────────────────────────────────────────
 // Consulta /api/extension/version y guarda info de update disponible en storage.
@@ -157,21 +255,39 @@ async function initIfConfigured() {
   }
 
   connect(orion_url, orion_api_key, active_account_id)
+
+  // v0.7.17 P0-1 fix: trigger heartbeat ASAP, no esperar 5min de alarm.
+  // Esto garantiza que cualquier SW restart manda heartbeat al server.
+  loadAndPostHeartbeatFromSW().catch(err => console.warn('[Orion bg] initial heartbeat failed:', err?.message))
 }
 
-function connect(orionUrl, apiKey, accountId) {
+async function connect(orionUrl, apiKey, accountId) {
   // Guard: si ya estamos conectando, no creamos otra conexión paralela
   if (isConnecting) {
     console.log('[Orion] connect() saltado — isConnecting=true')
     return
   }
-  // Guard: si ya hay una WS abierta o conectándose, no creamos otra
-  if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
+  // C2 fix (2026-05-29): guard cubre CLOSING también — antes solo CONNECTING/OPEN
+  // dejaba que un WS en CLOSING permitiera abrir otra paralela = 2 sockets zombie.
+  if (ws && ws.readyState !== WebSocket.CLOSED) {
     console.log('[Orion] connect() saltado — ws state =', ws.readyState)
     return
   }
   // Si había una vieja en estado raro, la cerramos
   if (ws) { try { ws.close() } catch {} ws = null }
+
+  // C1 fix (2026-05-29): auth lockout client-side. Si última auth_error fue hace
+  // <5min, NO intentes reconectar — evita loop infinito de 50+ Auth FAILED que
+  // satura logs del bridge y mata SW por retries excesivos.
+  try {
+    const { auth_lockout_until } = await chrome.storage.local.get('auth_lockout_until')
+    if (auth_lockout_until && Date.now() < auth_lockout_until) {
+      const remainSec = Math.round((auth_lockout_until - Date.now()) / 1000)
+      console.warn(`[Orion] Auth lockout activo — ${remainSec}s restantes. NO reconectar.`)
+      updateBadge('🔒', '#ef4444')
+      return
+    }
+  } catch {}
 
   isConnecting = true
 
@@ -203,6 +319,8 @@ function connect(orionUrl, apiKey, accountId) {
     }))
     chrome.storage.local.set({ [STORAGE_KEYS.CONNECTED]: true })
     updateBadge('●', '#22c55e') // green dot
+    // Opción B: re-enviar resultados que quedaron pendientes por WS caído
+    flushPendingResults().catch(err => console.warn('[Orion] flush on open falló:', err.message))
   })
 
   ws.addEventListener('message', async (event) => {
@@ -254,6 +372,11 @@ async function handleServerMessage(msg) {
       return
     case 'auth_error':
       console.error('[Orion] Auth failed:', msg.error)
+      // C1 fix (2026-05-29): set lockout client-side por 5min para no reciclar
+      // contra el server. Se libera automáticamente o con click manual en popup.
+      chrome.storage.local.set({
+        auth_lockout_until: Date.now() + 5 * 60_000,
+      })
       chrome.storage.local.set({
         [STORAGE_KEYS.CONNECTED]: false,
         last_auth_error: { error: msg.error, ts: Date.now() },
@@ -266,19 +389,137 @@ async function handleServerMessage(msg) {
       // ack del keep-alive
       return
     case 'command':
-      await executeCommand(msg.commandId, msg.action, msg.payload)
+      // v0.6.44: SERIALIZACIÓN — si el bridge despacha 2 cmds en paralelo
+      // (porque el primero ya pasó su expires_at de 3min pero content.js sigue
+      // tipeando), el SW ANTES navegaba la tab para cmd2 mientras cmd1 estaba
+      // typeando → "Leave site?" modal de Chrome y mensaje a medias.
+      // Esta cola fuerza que cmd2 espere a que executeCommand(cmd1) resuelva.
+      // NO usar await: si bloqueamos aquí, no procesamos pings/pongs del WS
+      // y el bridge nos marca stale a los 90s. Fire-and-forget; el resultado
+      // se manda via WS dentro de executeCommand.
+      enqueueCommand(msg.commandId, msg.action, msg.payload)
       return
     default:
       console.warn('[Orion] Unknown msg type:', msg.type)
   }
 }
 
+// ── FSM Phase Guard (v0.7.0) ────────────────────────────────────────────────
+// Lee el phase actual de storage.session y espera hasta que sea seguro navegar.
+// "Safe" phases: idle, send_confirmed, done, error.
+// "Active" phases (bloquean nav): dispatched, navigating, hydrating, thread_opened,
+//   typed, send_clicked.
+// v0.7.21 P2-6: removidos 'navigating' y 'hydrating' (referencias muertas).
+const FSM_ACTIVE = new Set(['dispatched','thread_opened','typing','typed','send_clicked'])
+const FSM_STORAGE_KEY = '_phase_fsm'
+const FSM_PHASE_MAX_AGE_MS = 130_000  // si una phase lleva >130s sin transitar, asumimos stale
+
+async function readPhase() {
+  try {
+    const stored = await chrome.storage.session.get(FSM_STORAGE_KEY)
+    return stored?.[FSM_STORAGE_KEY] ?? null
+  } catch { return null }
+}
+
+async function waitForSafePhase(currentCommandId, maxWaitMs = 130_000) {
+  const startWait = Date.now()
+  while (Date.now() - startWait < maxWaitMs) {
+    const phase = await readPhase()
+    if (!phase) return  // no FSM active = idle
+    const { state, commandId, transitionedAt } = phase
+    const elapsed = Date.now() - (transitionedAt ?? 0)
+    // Mismo cmd ya en vuelo: NO renavegar, retornar al caller que termine flujo.
+    if (commandId === currentCommandId && FSM_ACTIVE.has(state)) {
+      console.log(`[Orion FSM] ⏸️  cmd ${currentCommandId?.slice(0,8)} ya en phase '${state}' (${elapsed}ms) — abort dispatch`)
+      throw new Error('phase_guard_same_command_active')
+    }
+    // Phase no activa O stale: safe to navigate
+    if (!FSM_ACTIVE.has(state) || elapsed > FSM_PHASE_MAX_AGE_MS) {
+      if (elapsed > FSM_PHASE_MAX_AGE_MS) {
+        console.warn(`[Orion FSM] phase '${state}' stale (${elapsed}ms) — force release`)
+        try { await chrome.storage.session.remove(FSM_STORAGE_KEY) } catch {}
+      }
+      return
+    }
+    // Phase activa de OTRO cmd → esperar
+    console.log(`[Orion FSM] ⏳  esperando phase '${state}' (cmd ${commandId?.slice(0,8)}, ${elapsed}ms)`)
+    await sleep(1500)
+  }
+  // Timeout esperando: force-release y proceder (defensive)
+  console.warn(`[Orion FSM] timeout esperando safe phase (${maxWaitMs}ms) — force-release y proceder`)
+  try { await chrome.storage.session.remove(FSM_STORAGE_KEY) } catch {}
+}
+
+// ── Command queue (v0.6.44) ────────────────────────────────────────────────
+// Serializa todos los comandos para evitar que un nuevo navigateTabAndWait
+// interrumpa el typing/send del comando anterior. Si bridge expira cmd1 a 3min
+// y despacha cmd2, cmd2 espera aquí hasta que cmd1 termine COMPLETAMENTE.
+let commandChain = Promise.resolve()
+
+function enqueueCommand(commandId, action, payload) {
+  const queued = commandChain.then(
+    () => executeCommand(commandId, action, payload),
+    () => executeCommand(commandId, action, payload),  // recover from prev errors
+  )
+  // Mantener la cadena pero swallow errors para no atorar comandos futuros
+  commandChain = queued.catch(() => {})
+  return queued
+}
+
 // ── Command dispatcher ──────────────────────────────────────────────────────
+
+// v0.7.9: BACKUP guard al FSM. Pingea al content.js de cualquier tab LinkedIn
+// activa y, si responde con `isExecuting` + currentPhase en estado typing-like,
+// espera y reintenta hasta 30s antes de proceder. Esto cubre el caso edge en
+// que el SW fue evicted mid-typing y `commandChain` se resetea (FSM session
+// storage cubre la mayoría, pero ping es defensa-en-profundidad).
+async function pingContentForTypingPhase(currentCommandId, maxWaitMs = 30000) {
+  // v0.7.21 P2-6: removidos 'navigating' y 'hydrating' (referencias muertas).
+  const TYPING_PHASES = new Set(['dispatched','thread_opened','typing','typed','send_clicked'])
+  const startWait = Date.now()
+  while (Date.now() - startWait < maxWaitMs) {
+    const tabs = await chrome.tabs.query({ url: '*://*.linkedin.com/*' })
+    if (!tabs || tabs.length === 0) return  // sin tab, no hay nada que esperar
+    let busy = false
+    for (const t of tabs) {
+      try {
+        const resp = await Promise.race([
+          chrome.tabs.sendMessage(t.id, { type: 'orion_status_ping' }),
+          new Promise(r => setTimeout(() => r(null), 500)),
+        ])
+        if (resp && resp.isExecuting && resp.currentCommandId !== currentCommandId) {
+          // Si lleva >130s sin transitar, lo damos por stale (alineado con FSM).
+          if ((resp.elapsedMs ?? 0) > 130_000) {
+            console.warn(`[Orion v0.7.9] content.js stale (${resp.elapsedMs}ms) — proceder pese a isExecuting`)
+            continue
+          }
+          console.log(`[Orion v0.7.9] content.js busy (cmd ${resp.currentCommandId?.slice(0,8)}, ${resp.elapsedMs}ms) — esperar 2s`)
+          busy = true
+          break
+        }
+      } catch { /* tab sin content.js o muerta; ignorar */ }
+    }
+    if (!busy) return
+    await sleep(2000)
+  }
+  console.warn(`[Orion v0.7.9] pingContentForTypingPhase timeout ${maxWaitMs}ms — proceder defensive`)
+}
 
 async function executeCommand(commandId, action, payload) {
   console.log(`[Orion] Executing ${action} (cmd ${commandId})`, payload)
 
   try {
+    // v0.7.0 FSM PHASE GUARD: el SW NO debe navegar la tab si content.js está
+    // en una fase activa (dispatched/navigating/hydrating/thread_opened/typed/send_clicked).
+    // Reemplaza el storage._executing mutex de v0.6.49 con una FSM completa.
+    // El guard espera hasta que la fase pase a 'send_confirmed', 'done', 'error',
+    // o el fase se vuelva stale (>130s).
+    await waitForSafePhase(commandId)
+
+    // v0.7.9 BACKUP GUARD: aún si el FSM dice safe, pingeamos al content.js
+    // como defensa-en-profundidad para el caso SW respawn / commandChain perdida.
+    await pingContentForTypingPhase(commandId, 30_000)
+
     let tab
     // send_invite: navegar DIRECTO al SPA route /preload/custom-invite/?vanityName=
     // — LinkedIn abre el modal automáticamente. Evitamos el click problemático
@@ -294,7 +535,12 @@ async function executeCommand(commandId, action, payload) {
         tab = await navigateTabAndWait(payload.profileUrl)
       }
     } else if (action === 'send_followup' && payload?.threadUrl) {
-      tab = await navigateTabAndWait(payload.threadUrl)
+      // P1: NO navegar directo al thread URL — esa navegación deja la página de
+      // thread a medias (solo nav bar, sin composer). En su lugar navegamos al
+      // INBOX (/messaging/ carga confiablemente) y content.js CLICKEA la
+      // conversación desde la lista (SPA in-app) → el composer monta bien.
+      // El threadId va en payload para que content.js encuentre el item.
+      tab = await navigateTabAndWait('https://www.linkedin.com/messaging/', 15000)
     } else if (action === 'send_followup' && payload?.profileUrl) {
       // Sub-Fase 3.8: lead conectado sin thread (invite sin nota).
       // Navegamos al perfil; content.js click "Mensaje" + compose-new-thread.
@@ -317,6 +563,22 @@ async function executeCommand(commandId, action, payload) {
       tab = await navigateTabAndWait('https://www.linkedin.com/mynetwork/invitation-manager/sent/', 15000)
     } else {
       tab = await findOrCreateLinkedInTab(action)
+    }
+
+    // v0.7.42 ANTI-THROTTLE (la cura de raíz del background-throttle): enfocar la
+    // tab durante la ejecución. Chrome throttlea setTimeout a ~1s (y a 1/min tras
+    // 5min oculta = "intensive throttling") en tabs background → typing y wait-loops
+    // se alargaban catastróficamente (FU typing 23s→125s, hangs, timeouts). En el
+    // Chrome dedicado del VPS no hay usuario que molestar, y una tab enfocada
+    // mientras "escribimos" es MÁS humana. Best-effort: si falla, el chunking sigue
+    // como defensa secundaria.
+    try {
+      await chrome.tabs.update(tab.id, { active: true })
+      if (tab.windowId != null) {
+        await chrome.windows.update(tab.windowId, { focused: true })
+      }
+    } catch (e) {
+      console.warn(`[Orion] anti-throttle focus falló (sigo igual): ${e?.message}`)
     }
 
     console.log(`[Orion] Sending to tab id=${tab.id} url=${tab.url} status=${tab.status}`)
@@ -375,18 +637,69 @@ async function executeCommand(commandId, action, payload) {
 
 // Construye el URL de LinkedIn search results desde payload search.
 // Payload: { keywords, location, secondDegreeOnly, minEmployees }
+// Mapeo de strings de ubicación → geoUrn IDs de LinkedIn (fix 29-may-2026).
+// LinkedIn no acepta texto libre de location; requiere IDs numéricos. Hardcodeamos
+// las ciudades/países más comunes en campañas latam-hispano. Si la string no matchea,
+// se descarta del URL (content.js hace post-filter por substring del location del perfil).
+const GEO_URN_MAP = {
+  // Países
+  'mexico':    '103323778', 'méxico': '103323778',
+  'colombia':  '100876405',
+  'chile':     '104621616',
+  'peru':      '102927786', 'perú': '102927786',
+  'espana':    '105646813', 'españa': '105646813', 'spain': '105646813',
+  'usa':       '103644278', 'united states': '103644278', 'estados unidos': '103644278',
+  'argentina': '100446943',
+  'brasil':    '106057199', 'brazil': '106057199',
+  // Ciudades MX
+  'mexico city':      '101463827', 'cdmx': '101463827', 'ciudad de mexico': '101463827', 'ciudad de méxico': '101463827',
+  'monterrey':        '103642308',
+  'guadalajara':      '102013974',
+  'queretaro':        '105748037', 'querétaro': '105748037',
+  'puebla':           '105394236',
+  // Ciudades CO
+  'bogota':           '101920260', 'bogotá': '101920260',
+  'medellin':         '101732879', 'medellín': '101732879',
+  // Ciudades CL
+  'santiago':         '102408799',
+  // Ciudades PE
+  'lima':             '102495956',
+  // Ciudades ES
+  'madrid':           '105776773',
+  'barcelona':        '100469829',
+}
+
+function locationsToGeoUrns(locs) {
+  if (!Array.isArray(locs)) return []
+  const ids = new Set()
+  for (const raw of locs) {
+    const key = (raw ?? '').toLowerCase().trim().replace(/\s+/g, ' ')
+    const id = GEO_URN_MAP[key]
+    if (id) ids.add(id)
+  }
+  return [...ids]
+}
+
 function buildSearchUrl(payload) {
   const base = 'https://www.linkedin.com/search/results/people/'
   const params = new URLSearchParams()
-  const kw = [payload.keywords, payload.location].filter(Boolean).join(' ')
-  if (kw) params.set('keywords', kw)
+  if (payload.keywords) params.set('keywords', payload.keywords)
   params.set('origin', 'GLOBAL_SEARCH_HEADER')
+  // 2do grado
   if (payload.secondDegreeOnly !== false) params.set('network', '["S"]')
+  // Company size buckets
   const minE = payload.minEmployees
   if (minE && minE > 1) {
     const buckets = mapMinEmployeesToBuckets(minE)
     if (buckets?.length) params.set('companySize', JSON.stringify(buckets))
   }
+  // geoUrn array (fix 29-may-2026): mapea locations conocidas → IDs LinkedIn.
+  // Si user pone "Mexico City, Monterrey, Chile" → params.geoUrn=["101463827","103642308","104621616"]
+  // → LinkedIn filtra resultados a esas 3 ubicaciones server-side (eficiente).
+  // Si ninguna location matchea (ej. "Mi pueblo"), no se pasa geoUrn → búsqueda global +
+  // content.js post-filter por substring (menos eficiente pero universal).
+  const geoUrns = locationsToGeoUrns(payload.locations)
+  if (geoUrns.length) params.set('geoUrn', JSON.stringify(geoUrns))
   return `${base}?${params.toString()}`
 }
 
@@ -424,7 +737,24 @@ async function findOrCreateLinkedInTab(action) {
   console.log(`[Orion] Tabs linkedin disponibles: ${tabs.length}`)
   if (tabs.length > 0) return await reviveTabIfDiscarded(tabs[0])
   console.log(`[Orion] Sin tabs LinkedIn — creando nueva`)
-  const newTab = await chrome.tabs.create({ url: 'https://www.linkedin.com/feed/', active: false })
+  // v0.7.22 BUG-B: chrome.tabs.create lanza "No current window" cuando NO hay
+  // ninguna ventana Chrome abierta (todas cerradas en el VPS Xvfb). Era el 60%
+  // failure rate de check_sent_invites. Fix: si tabs.create falla, crear ventana
+  // primero con chrome.windows.create y reusar su primera tab.
+  let newTab
+  try {
+    newTab = await chrome.tabs.create({ url: 'https://www.linkedin.com/feed/', active: false })
+  } catch (err) {
+    const msg = String(err?.message ?? err).toLowerCase()
+    if (msg.includes('no current window') || msg.includes('no window')) {
+      console.warn('[Orion] BUG-B: sin ventana Chrome — creando window nueva')
+      const win = await chrome.windows.create({ url: 'https://www.linkedin.com/feed/', focused: false })
+      newTab = win?.tabs?.[0]
+      if (!newTab) throw new Error('chrome_windows_create_no_tab')
+    } else {
+      throw err
+    }
+  }
   await waitForTabComplete(newTab.id, 15000)
   await sleep(2000)
   await markNonDiscardable(newTab.id)
@@ -469,7 +799,21 @@ async function navigateTabAndWait(targetUrl, timeoutMs = 15000) {
   let tab = tabs[0]
   if (!tab) {
     console.log(`[Orion] Sin tab LinkedIn — creando con ${targetUrl}`)
-    tab = await chrome.tabs.create({ url: targetUrl, active: false })
+    // v0.7.26 BUG-B completar: chrome.tabs.create lanza "No current window" si NO
+    // hay ninguna ventana Chrome abierta. Antes el fallback window-create solo
+    // estaba en findOrCreateLinkedInTab → search/send_invite/check_sent_invites
+    // (que usan navigateTabAndWait) seguían fallando con "No current window".
+    try {
+      tab = await chrome.tabs.create({ url: targetUrl, active: false })
+    } catch (err) {
+      const m = String(err?.message ?? err).toLowerCase()
+      if (m.includes('no current window') || m.includes('no window')) {
+        console.warn('[Orion] BUG-B navigateTabAndWait: sin ventana Chrome — creando window')
+        const win = await chrome.windows.create({ url: targetUrl, focused: false })
+        tab = win?.tabs?.[0]
+        if (!tab) throw new Error('chrome_windows_create_no_tab')
+      } else { throw err }
+    }
     await waitForTabComplete(tab.id, timeoutMs)
     await sleep(2500)
     await markNonDiscardable(tab.id)
@@ -499,6 +843,63 @@ async function navigateTabAndWait(targetUrl, timeoutMs = 15000) {
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
+
+// ── v0.7.4 VISUAL LEARNING — Screenshot capture + upload ────────────────────
+async function handleVisualCapture(msg, sender) {
+  const tabId = sender?.tab?.id
+  if (!tabId) {
+    console.warn('[Orion VL] no tab.id en sender')
+    return
+  }
+  // 1. captureVisibleTab del active window de la tab del sender
+  let dataUrl
+  try {
+    const tab = await chrome.tabs.get(tabId)
+    dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png', quality: 80 })
+  } catch (err) {
+    console.warn('[Orion VL] captureVisibleTab fail:', err.message)
+    return
+  }
+  if (!dataUrl) return
+  console.log(`[Orion VL] screenshot capturada (${Math.round(dataUrl.length/1024)}KB), uploading...`)
+
+  // 2. Recuperar config
+  const stored = await chrome.storage.local.get(['orion_url', 'orion_api_key', 'active_account_id'])
+  if (!stored.orion_url || !stored.orion_api_key || !stored.active_account_id) {
+    console.warn('[Orion VL] sin config para upload')
+    return
+  }
+
+  // 3. POST al bridge endpoint
+  try {
+    const r = await fetch(`${stored.orion_url}/api/visual-learning/capture`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-orion-api-key': stored.orion_api_key,
+      },
+      body: JSON.stringify({
+        accountId: stored.active_account_id,
+        phaseName: msg.phaseName,
+        source: msg.source,
+        commandId: msg.commandId,
+        urlAtCapture: msg.url,
+        viewport: msg.viewport,
+        domSnapshot: msg.domSnapshot,
+        capturedAt: msg.capturedAt,
+        screenshotDataUrl: dataUrl,
+      }),
+    })
+    const j = await r.json().catch(() => ({}))
+    if (r.ok) {
+      console.log(`[Orion VL] ✅ ticket #${j.ticketId} creado para phase "${msg.phaseName}"`)
+    } else {
+      console.warn(`[Orion VL] upload error:`, j?.error ?? r.status)
+    }
+  } catch (err) {
+    console.warn('[Orion VL] POST fail:', err.message)
+  }
+}
 
 // Envía mensaje al content.js con retries — útil cuando recién navegamos y
 // content.js todavía no se inyectó. Backoff: 1s → 2s → 3s.
@@ -553,15 +954,59 @@ async function waitForTabComplete(tabId, timeoutMs) {
   console.warn('[Orion] waitForTabComplete timeout — continuing anyway')
 }
 
-function reportResult(commandId, action, result) {
+// Opción B — REPORTE DURABLE: antes, si el WS estaba caído al terminar el comando,
+// el resultado se DESCARTABA en silencio (return temprano) → el bridge nunca se
+// enteraba → cleanupExpired lo marcaba extension_did_not_respond aunque el comando
+// SÍ se ejecutó (a veces enviando el mensaje al lead = fantasma). Ahora persistimos
+// el resultado en chrome.storage.local y lo re-enviamos al reconectar (flushPendingResults).
+const PENDING_RESULTS_KEY = 'orion_pending_results'
+
+async function reportResult(commandId, action, result) {
+  const payload = { type: 'command_result', commandId, action, result, ts: Date.now() }
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    try {
+      ws.send(JSON.stringify(payload))
+      return
+    } catch (err) {
+      console.warn(`[Orion] reportResult send falló, persistiendo: ${err.message}`)
+    }
+  }
+  await enqueuePendingResult(payload)
+}
+
+async function enqueuePendingResult(payload) {
+  try {
+    const store = await chrome.storage.local.get(PENDING_RESULTS_KEY)
+    const arr = Array.isArray(store[PENDING_RESULTS_KEY]) ? store[PENDING_RESULTS_KEY] : []
+    arr.push(payload)
+    const capped = arr.slice(-50)  // cap defensivo si el WS muere largo rato
+    await chrome.storage.local.set({ [PENDING_RESULTS_KEY]: capped })
+    console.log(`[Orion] reportResult persistido (WS down) — ${capped.length} en cola`)
+  } catch (err) {
+    console.warn(`[Orion] enqueuePendingResult falló: ${err.message}`)
+  }
+}
+
+async function flushPendingResults() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return
-  ws.send(JSON.stringify({
-    type:      'command_result',
-    commandId,
-    action,
-    result,
-    ts:        Date.now(),
-  }))
+  try {
+    const store = await chrome.storage.local.get(PENDING_RESULTS_KEY)
+    const arr = Array.isArray(store[PENDING_RESULTS_KEY]) ? store[PENDING_RESULTS_KEY] : []
+    if (!arr.length) return
+    console.log(`[Orion] Flushing ${arr.length} resultado(s) pendiente(s) tras reconnect`)
+    const remaining = []
+    for (const payload of arr) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) { remaining.push(payload); continue }
+      try {
+        ws.send(JSON.stringify({ ...payload, flushed: true }))
+      } catch {
+        remaining.push(payload)  // reintento en el próximo reconnect (bridge es idempotente)
+      }
+    }
+    await chrome.storage.local.set({ [PENDING_RESULTS_KEY]: remaining })
+  } catch (err) {
+    console.warn(`[Orion] flushPendingResults falló: ${err.message}`)
+  }
 }
 
 // ── Failure capture: screenshot + DOM dump → /api/extension/capture-failure ─
@@ -591,12 +1036,25 @@ async function maybeCaptureFailure(commandId, action, result, tabId) {
     ])
     if (!orion_url || !orion_api_key || !active_account_id) return
 
-    // 2. Screenshot (best-effort; si falla, igual mandamos el DOM snippet)
+    // 2. Screenshot (best-effort). FIX: captureVisibleTab necesita el windowId
+    // del tab de trabajo — sin él captura el tab activo de la ventana equivocada
+    // y falla. JPEG q60 reduce el payload (~70% vs PNG) para Gemini Vision.
     let screenshotBase64 = null
     try {
-      const dataUrl = await chrome.tabs.captureVisibleTab(undefined, { format: 'png' })
+      let windowId
+      if (tabId != null) {
+        const t = await chrome.tabs.get(tabId).catch(() => null)
+        windowId = t?.windowId
+        // Asegurar que nuestro tab sea el activo en su ventana (captureVisibleTab
+        // siempre captura el ACTIVO). Activar es momentáneo y necesario para el shot.
+        if (windowId != null && t && !t.active) {
+          try { await chrome.tabs.update(tabId, { active: true }) } catch {}
+          await sleep(300)
+        }
+      }
+      const dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: 'jpeg', quality: 60 })
       if (typeof dataUrl === 'string' && dataUrl.startsWith('data:image/')) {
-        screenshotBase64 = dataUrl.split(',')[1] // strip "data:image/png;base64,"
+        screenshotBase64 = dataUrl.split(',')[1]
       }
     } catch (err) {
       console.warn('[Orion] captureVisibleTab failed:', err?.message ?? err)
@@ -666,6 +1124,53 @@ chrome.runtime.onConnect.addListener((port) => {
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   console.log('[Orion bg] onMessage received:', msg.type, 'from', sender.id ?? 'popup')
+  // Opción B: content.js confirma RECEPCIÓN del comando (pre-ejecución).
+  // Forward al bridge como command_ack → sella acked_at. Best-effort: si el WS
+  // está caído el ack se pierde y el comando (si expira) quedará como
+  // content_unreachable, que es la clasificación correcta en ese caso.
+  if (msg.type === 'orion_cmd_ack') {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(JSON.stringify({ type: 'command_ack', commandId: msg.commandId, ts: msg.ts ?? Date.now() }))
+      } catch {}
+    }
+    return false
+  }
+  // v0.7.0 FSM: forward phase updates al bridge para audit + resume
+  if (msg.type === 'orion_phase_update') {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(JSON.stringify({
+          type: 'phase_update',
+          commandId: msg.commandId,
+          phase: msg.phase,
+          ts: msg.ts,
+          extra: msg.extra,
+        }))
+      } catch {}
+    }
+    return false  // no sendResponse necesario
+  }
+  // v0.7.4 VISUAL LEARNING: content.js pide screenshot del viewport + upload
+  if (msg.type === 'orion_visual_capture') {
+    handleVisualCapture(msg, sender).catch(err =>
+      console.warn('[Orion] visual_capture error:', err?.message))
+    return false  // async, no sendResponse
+  }
+  // v0.7.2 µ-PHASE: forward micro-phase updates al bridge (más granular que phase_update)
+  if (msg.type === 'orion_micro_phase') {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(JSON.stringify({
+          type: 'micro_phase',
+          commandId: msg.commandId,
+          action: msg.action,
+          entry: msg.entry,
+        }))
+      } catch {}
+    }
+    return false
+  }
   if (msg.type === 'reconnect') {
     initIfConfigured().catch(err => console.error('[Orion bg] initIfConfigured failed:', err))
     sendResponse({ ok: true })

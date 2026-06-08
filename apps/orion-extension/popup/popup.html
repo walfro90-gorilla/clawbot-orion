@@ -29,6 +29,75 @@
     .status-paused       { background: #f59e0b; }
     @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.4 } }
 
+    /* v0.6.46 — Active process glowing badge */
+    .active-process {
+      display: none;
+      position: relative;
+      border-radius: 10px;
+      padding: 10px 12px;
+      margin-bottom: 10px;
+      font-size: 12px;
+      font-weight: 600;
+      color: #fff;
+      overflow: hidden;
+      transition: opacity 0.3s;
+    }
+    .active-process.visible { display: block; }
+    .active-process .ap-row {
+      display: flex; align-items: center; gap: 8px;
+      position: relative; z-index: 2;
+    }
+    .active-process .ap-icon {
+      font-size: 18px; line-height: 1;
+      animation: ap-bounce 1.2s ease-in-out infinite;
+    }
+    .active-process .ap-text { flex: 1; line-height: 1.3; }
+    .active-process .ap-label { font-size: 11px; opacity: 0.95; letter-spacing: 0.02em; }
+    .active-process .ap-target {
+      font-size: 10px; font-weight: 500; opacity: 0.8;
+      margin-top: 1px; max-width: 220px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .active-process .ap-status {
+      font-size: 9px; padding: 2px 6px; border-radius: 10px;
+      background: rgba(255,255,255,0.18); white-space: nowrap;
+      backdrop-filter: blur(4px);
+    }
+    /* Glow background — capa absoluta animada */
+    .active-process::before {
+      content: '';
+      position: absolute; inset: 0;
+      background: var(--ap-glow, linear-gradient(135deg, #4f46e5, #06b6d4));
+      animation: ap-glow 2s ease-in-out infinite alternate;
+      z-index: 0;
+    }
+    .active-process::after {
+      content: '';
+      position: absolute; inset: 1px;
+      border-radius: 9px;
+      background: linear-gradient(135deg, rgba(15,23,42,0.15), rgba(15,23,42,0.35));
+      z-index: 1;
+    }
+    @keyframes ap-glow {
+      0%   { filter: brightness(0.95) saturate(1.0); box-shadow: 0 0 0 0 var(--ap-shadow, rgba(99,102,241,0.5)); }
+      100% { filter: brightness(1.15) saturate(1.3); box-shadow: 0 0 16px 2px var(--ap-shadow, rgba(99,102,241,0.7)); }
+    }
+    @keyframes ap-bounce {
+      0%,100% { transform: translateY(0); }
+      50%     { transform: translateY(-2px); }
+    }
+
+    /* Per-action color schemes (CSS custom props set via JS) */
+    .active-process.act-search       { --ap-glow: linear-gradient(135deg,#6366f1,#06b6d4); --ap-shadow: rgba(99,102,241,0.65); }
+    .active-process.act-invite       { --ap-glow: linear-gradient(135deg,#10b981,#0ea5e9); --ap-shadow: rgba(16,185,129,0.6); }
+    .active-process.act-inbox        { --ap-glow: linear-gradient(135deg,#0ea5e9,#3b82f6); --ap-shadow: rgba(14,165,233,0.6); }
+    .active-process.act-followup     { --ap-glow: linear-gradient(135deg,#a855f7,#ec4899); --ap-shadow: rgba(168,85,247,0.6); }
+    .active-process.act-reply        { --ap-glow: linear-gradient(135deg,#ec4899,#f43f5e); --ap-shadow: rgba(236,72,153,0.6); }
+    .active-process.act-sent-check   { --ap-glow: linear-gradient(135deg,#f59e0b,#f97316); --ap-shadow: rgba(245,158,11,0.55); }
+    .active-process.act-other        { --ap-glow: linear-gradient(135deg,#64748b,#475569); --ap-shadow: rgba(100,116,139,0.5); }
+    .active-process.status-pending   { opacity: 0.82; }
+    .active-process.status-pending .ap-icon { animation-duration: 1.8s; }
+
     .status-row { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #9ca3af; margin-bottom: 8px; }
 
     .monitor {
@@ -107,6 +176,38 @@
     .info { font-size: 10px; color: #6b7280; margin-top: 6px; line-height: 1.4; }
 
     hr { border: none; border-top: 1px solid #1f2937; margin: 10px 0; }
+
+    /* v0.7.7 — Next Action panel */
+    .next-actions {
+      background: #0f172a; border: 1px solid #1f2937; border-radius: 8px;
+      padding: 10px; margin-bottom: 10px;
+    }
+    .next-actions h4 {
+      margin: 0 0 6px 0; font-size: 11px; color: #9ca3af;
+      text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;
+    }
+    .na-primary {
+      display: flex; align-items: center; gap: 8px; padding: 8px;
+      background: linear-gradient(135deg, #1e293b, #0f172a);
+      border: 1px solid #334155; border-radius: 6px; margin-bottom: 6px;
+    }
+    .na-primary .na-icon { font-size: 18px; }
+    .na-primary .na-text { flex: 1; }
+    .na-primary .na-label { font-size: 12px; color: #e5e7eb; font-weight: 600; }
+    .na-primary .na-countdown { font-size: 11px; color: #06b6d4; font-family: monospace; }
+    .na-list { list-style: none; padding: 0; margin: 0; }
+    .na-list li {
+      display: flex; justify-content: space-between; align-items: center;
+      font-size: 10px; padding: 3px 6px; color: #94a3b8;
+    }
+    .na-list li .when { color: #6b7280; font-family: monospace; }
+    .force-tick-btn {
+      width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #4f46e5;
+      background: #4f46e520; color: #a5b4fc; font-size: 11px; font-weight: 600;
+      cursor: pointer; margin-top: 6px; transition: all 0.15s;
+    }
+    .force-tick-btn:hover { background: #4f46e540; }
+    .force-tick-btn:disabled { opacity: 0.5; cursor: not-allowed; }
   </style>
 </head>
 <body>
@@ -151,6 +252,32 @@
     <div id="error-detail" style="margin-top: 3px;"></div>
   </div>
 
+  <!-- v0.7.7 — Next Actions panel -->
+  <div class="next-actions" id="next-actions" style="display: none;">
+    <h4>🎯 Próximas acciones</h4>
+    <div class="na-primary" id="na-primary">
+      <span class="na-icon" id="na-primary-icon">⏳</span>
+      <div class="na-text">
+        <div class="na-label" id="na-primary-label">—</div>
+        <div class="na-countdown" id="na-primary-countdown">—</div>
+      </div>
+    </div>
+    <ul class="na-list" id="na-list"></ul>
+    <button class="force-tick-btn" id="force-tick-btn" type="button">⚡ Forzar inbox check ahora</button>
+  </div>
+
+  <!-- v0.6.46 — Active process glowing badge (visible mientras hay cmd en flight) -->
+  <div class="active-process" id="active-process">
+    <div class="ap-row">
+      <span class="ap-icon" id="ap-icon">⚡</span>
+      <div class="ap-text">
+        <div class="ap-label" id="ap-label">Orion trabajando…</div>
+        <div class="ap-target" id="ap-target"></div>
+      </div>
+      <span class="ap-status" id="ap-status">en vuelo</span>
+    </div>
+  </div>
+
   <!-- Mini-monitor (visible cuando hay conexión + datos cargados) -->
   <div class="monitor" id="monitor" style="display: none;">
     <div class="monitor-row">
@@ -190,6 +317,15 @@
     <div class="monitor-row" style="margin-top: 6px; font-size: 11px;">
       <span class="monitor-label">Último connect</span>
       <span class="monitor-value muted" id="conn-last-up">—</span>
+    </div>
+    <!-- Warning de inestabilidad (background mode off) -->
+    <div id="conn-unstable-warning" style="display: none; margin-top: 8px; padding: 8px 10px; border-radius: 6px; background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.4); font-size: 11px; line-height: 1.4; color: #fbbf24;">
+      🔌 <strong>Conexión inestable</strong> (<span id="conn-disc-count">—</span> desconexiones/24h).<br>
+      Activa <strong>"Continuar en segundo plano"</strong> para conexión 24/7:
+      <div style="margin-top: 4px; display: flex; align-items: center; gap: 6px;">
+        <code id="conn-bg-url" style="background: #0f172a; padding: 2px 6px; border-radius: 4px; font-size: 10px; color: #cbd5e1; flex: 1;">chrome://settings/system</code>
+        <button id="conn-bg-copy" style="font-size: 10px; padding: 3px 8px; border-radius: 4px; border: 1px solid #f59e0b66; background: #f59e0b22; color: #fbbf24; cursor: pointer;">Copiar</button>
+      </div>
     </div>
   </div>
 

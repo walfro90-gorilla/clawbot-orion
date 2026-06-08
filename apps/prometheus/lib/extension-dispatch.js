@@ -6,6 +6,7 @@
 // usuario. Las gates duplicadas con scheduler.js se reusan acá.
 
 import { supabase } from './supabase.js'
+import { stampLastAttempt } from './lead-failure.js'
 
 // ── Time helpers (timezone-aware per account) ────────────────────────────────
 
@@ -155,12 +156,18 @@ export async function getPendingLeadsCount(campaignId) {
 // no responde rápido, el siguiente tick puede crear otro cmd duplicado.
 export async function hasInFlightCommand(leadId, action = null) {
   if (!leadId) return false
+  // Zombie cleanup (2026-05-29 fix): si un command lleva >10min en 'dispatched'
+  // sin completar, la extensión murió mid-execution. NO lo consideramos in-flight,
+  // permitiendo retry. Antes el lead quedaba bloqueado hasta expires_at (15min).
+  const tenMinAgo = new Date(Date.now() - 10 * 60_000).toISOString()
   let q = supabase
     .from('extension_commands')
     .select('id', { count: 'exact', head: true })
     .eq('related_lead_id', leadId)
     .in('status', ['pending', 'dispatched'])
     .gt('expires_at', new Date().toISOString())
+    // Excluir zombies: dispatched hace >10min sin completar
+    .or(`status.eq.pending,dispatched_at.gt.${tenMinAgo}`)
   if (action) q = q.eq('action', action)
   const { count } = await q
   return (count ?? 0) > 0
@@ -181,6 +188,61 @@ const LEAD_FAULT_ERRORS = new Set([
   'thread_header_mismatch',
 ])
 
+// Errores de PÁGINA/RENDER que NO son culpa de la cuenta. Estos errores indican
+// problemas de timing/SPA/race-conditions de LinkedIn UI, no del lead ni de la
+// cuenta. NO deben contar para el account-level circuit breaker (Capa 2) porque
+// si no, una racha de errores de UI auto-pausa la cuenta sin razón real.
+// 29-may-2026: añadidos tras observar Wal pausada 4× hoy por estos errores.
+const PAGE_RENDER_ERRORS = new Set([
+  'thread_editor_not_found',
+  'thread_not_found_in_inbox',
+  'not_on_thread_compose_or_profile_page',
+  'conversations_container_not_found',
+  'compose_editor_not_found_in_overlay',
+  'message_typing_incomplete',
+  'lead_not_messageable',  // v0.7.6: LinkedIn cerró el thread, no es page error pero tampoco lead fault
+])
+
+// v0.7.3 L5: extra PAGE_ERRORS auto-classificados por phase-analyzer.
+// Refrescado cada 5min desde runtime_config.
+let _pageErrorsExtra = new Set()
+let _pageErrorsExtraLastFetch = 0
+async function refreshPageErrorsExtra() {
+  if (Date.now() - _pageErrorsExtraLastFetch < 5 * 60_000) return
+  _pageErrorsExtraLastFetch = Date.now()
+  try {
+    const { data } = await supabase
+      .from('runtime_config')
+      .select('value')
+      .eq('key', 'page_errors_extra')
+      .maybeSingle()
+    if (Array.isArray(data?.value)) {
+      _pageErrorsExtra = new Set(data.value)
+      if (_pageErrorsExtra.size > 0) {
+        console.log(`[ext-dispatch] L5: page_errors_extra cargado (${_pageErrorsExtra.size} entries)`)
+      }
+    }
+  } catch {}
+}
+refreshPageErrorsExtra()
+setInterval(refreshPageErrorsExtra, 5 * 60_000)
+
+function isExtraPageError(errStr) {
+  if (!errStr) return false
+  const s = String(errStr).toLowerCase()
+  for (const pattern of _pageErrorsExtra) {
+    // pattern puede tener wildcards (e.g., 'micro_phase_X_timeout_*ms')
+    if (pattern.includes('*')) {
+      // Convertir wildcard a regex simple
+      const regex = new RegExp('^' + pattern.replace(/\*/g, '.*') + '$')
+      if (regex.test(s)) return true
+    } else if (s === pattern || s.includes(pattern)) {
+      return true
+    }
+  }
+  return false
+}
+
 // Errores TRANSITORIOS de infraestructura (Chrome cerrado, SW dormido, content
 // script no inyectado). NO indican ban/captcha — son problemas de disponibilidad.
 // Filtrar string que empieza con "redirect_retry_failed" o contiene estos patrones.
@@ -193,7 +255,11 @@ function isTransientInfraError(errStr) {
     s.includes('receiving end does not exist') ||
     s.includes('extension context invalidated') ||
     s.includes('content_busy_executing') ||
-    s.startsWith('redirect_retry_failed:')
+    s.startsWith('redirect_retry_failed:') ||
+    // v0.6.45: estos son race conditions del SW/content.js, no de la cuenta.
+    s.startsWith('exec_hard_timeout_') ||
+    s.startsWith('navigation_during_typing_') ||
+    s.startsWith('editor_detached_')
   )
 }
 
@@ -208,6 +274,38 @@ export async function checkAccountHealthAndPause(accountId, opts = {}) {
   }
   _lastAccountCheck.set(accountId, Date.now())
 
+  // v0.6.46 fix: si el SW está muriendo seguido (extension_last_seen_at stale),
+  // los timeouts son por WS instability, NO por account-fault real (captcha/ban).
+  // Pausar no ayuda — el SW no responde ni para verificar. Mejor mantener active
+  // y dejar que el usuario active Background Mode en Chrome.
+  const { data: accCheck } = await supabase
+    .from('linkedin_accounts')
+    .select('extension_last_seen_at')
+    .eq('id', accountId)
+    .single()
+  const lastSeenAgoSec = accCheck?.extension_last_seen_at
+    ? (Date.now() - new Date(accCheck.extension_last_seen_at).getTime()) / 1000
+    : Infinity
+  if (lastSeenAgoSec > 90) {
+    return {
+      healthy: true,
+      reason: 'sw_unstable_skip_autopause',
+      lastSeenAgoSec: Math.round(lastSeenAgoSec),
+    }
+  }
+  // Adicional: si hubo connection_unstable alert reciente, también skip
+  const { data: unstableAlert } = await supabase
+    .from('account_alerts')
+    .select('id')
+    .eq('linkedin_account_id', accountId)
+    .eq('alert_type', 'connection_unstable')
+    .gte('created_at', new Date(Date.now() - 30 * 60_000).toISOString())
+    .limit(1)
+    .maybeSingle()
+  if (unstableAlert?.id) {
+    return { healthy: true, reason: 'connection_unstable_skip_autopause' }
+  }
+
   const cutoff = new Date(Date.now() - windowMin * 60_000).toISOString()
   const { data: cmds } = await supabase
     .from('extension_commands')
@@ -221,13 +319,17 @@ export async function checkAccountHealthAndPause(accountId, opts = {}) {
   }
 
   // Account-fault errors REALES: captcha, authwall, rate_limited, etc.
-  // EXCLUYE: lead-fault (2do grado, 404) Y infra-transitoria (Chrome cerrado, SW dead).
-  // Timeouts SI cuentan.
+  // EXCLUYE: lead-fault (2do grado, 404), page-render (UI race), Y infra-transitoria.
+  // Timeouts SI cuentan PERO solo si no hay error específico que los explica
+  // como page-render (porque cleanupExpired marca todos como timeout sin error).
   const accountFaultErrors = cmds.filter(c => {
     const err = c.result?.error
-    if (c.status === 'timeout') return true
-    if (!err) return false
+    if (!err) {
+      if (c.status === 'timeout') return true  // timeout puro sin contexto = account-fault
+      return false
+    }
     if (LEAD_FAULT_ERRORS.has(err)) return false
+    if (PAGE_RENDER_ERRORS.has(err)) return false
     if (isTransientInfraError(err)) return false
     return true
   })
@@ -299,6 +401,48 @@ export async function checkAndKillLeadIfStuck(leadId, errorCode, opts = {}) {
   const { threshold = 3, windowHours = 6 } = opts
   if (!leadId || !errorCode) return false
 
+  // CRÍTICO: NUNCA matar un lead por errores de infra transitoria (Chrome cerrado,
+  // SW muerto, message channel closed, redirect_retry_failed). Esos NO son culpa
+  // del lead — son fallos de disponibilidad. Matar leads buenos por esto = bug.
+  if (isTransientInfraError(errorCode)) {
+    return false
+  }
+
+  // Tampoco matar por errores de PÁGINA/render (no culpa del lead):
+  //  - thread_editor_not_found: el panel del thread no carga (issue de nav/hidratación,
+  //    ya mitigado por P1 thread-via-inbox-click). El 2do-grado real se detecta aparte
+  //    como compose_no_editor_recaptcha_only → lead_not_first_degree.
+  //  - not_on_thread_compose_or_profile_page: navegación SPA imperfecta.
+  //  - thread_not_found_in_inbox / conversations_container_not_found: lista no cargó.
+  //  - thread_header_mismatch: LinkedIn navegó a thread incorrecto (anterior quedó
+  //    "pegado") — NO es culpa del lead, es race condition de SPA. v0.6.42+.
+  //  - message_typing_incomplete: typing fue interrumpido (notif/render/focus).
+  //  - exec_hard_timeout_send_followup_*: SW colgó (auto-heal v0.6.40).
+  //  - navigation_during_typing_at_char_*: URL cambió mid-type (v0.6.41 guard).
+  const PAGE_ERRORS = new Set([
+    'thread_editor_not_found',
+    'not_on_thread_compose_or_profile_page',
+    'thread_not_found_in_inbox',
+    'conversations_container_not_found',
+    'compose_editor_not_found_in_overlay',
+    'thread_header_mismatch',
+    'message_typing_incomplete',
+  ])
+  if (PAGE_ERRORS.has(errorCode)) {
+    return false
+  }
+  // Errores con sufijo dinámico (timestamps/char counts) — match por prefijo
+  if (errorCode.startsWith('exec_hard_timeout_') ||
+      errorCode.startsWith('navigation_during_typing_') ||
+      errorCode.startsWith('editor_detached_') ||
+      errorCode.startsWith('micro_phase_')) {
+    return false
+  }
+  // L5: extra PAGE_ERRORS aprendidos por phase-analyzer
+  if (isExtraPageError(errorCode)) {
+    return false
+  }
+
   const cutoff = new Date(Date.now() - windowHours * 3_600_000).toISOString()
   // Solo cmds completados o errored — excluye in-flight para no "tapar" los errors históricos
   const { data: recentErrors } = await supabase
@@ -369,6 +513,11 @@ export function passesTitleFilters(headline, whitelist = [], blacklist = []) {
     if (blacklist.some(b => h.includes(b.toLowerCase()))) return false
   }
   if (whitelist?.length) {
+    // v0.7.7: si headline está vacío (search no scrapeó headline), PASS.
+    // El search query ya filtró por los keywords correctos del campaign — no es
+    // necesario refilter aquí cuando no tenemos headline data. Esto desbloquea
+    // pools donde el scrape no captura headlines (~80% de leads tienen null).
+    if (h.length === 0) return true
     if (!whitelist.some(w => h.includes(w.toLowerCase()))) return false
   }
   return true
@@ -403,20 +552,60 @@ export async function dispatchCommand(accountId, action, payload, opts = {}) {
     console.error(`[ext-dispatch] insert ${action} failed: ${error.message}`)
     return null
   }
-  console.log(`[ext-dispatch] queued ${action} ${data.id.slice(0,8)} for ${accountId.slice(0,8)}`)
+  // FIFO fairness: stamp last_attempt_at AL MOMENTO de dispatch (no al result).
+  // Sin esto, un lead que falla y queda en cooldown mantiene last_attempt_at
+  // viejo y compite contra leads sanos no atendidos. Lo hacemos fire-and-forget
+  // para no bloquear el dispatch — el error solo se loggea.
+  // v0.7.13: si payload.is_stress_test, NO contamines counters de producción.
+  const isStressTest = !!payload?.is_stress_test
+  if (relatedLeadId && !isStressTest) {
+    stampLastAttempt(relatedLeadId).catch(err =>
+      console.error(`[ext-dispatch] stampLastAttempt failed: ${err.message}`))
+  }
+  const tag = isStressTest ? '[stress]' : '[ext-dispatch]'
+  console.log(`${tag} queued ${action} ${data.id.slice(0,8)} for ${accountId.slice(0,8)}`)
   return data.id
 }
 
 // ── Convenience wrappers ─────────────────────────────────────────────────────
 
 export async function dispatchSearch(account, campaign, keywords) {
+  // Convertir location single-string ("Mexico City, Monterrey, Guadalajara, ...")
+  // a array de strings para que content.js pueda hacer post-filter por substring
+  // y background.js mapeé a geoUrn IDs en URL.
+  const locationStr = campaign.search_location ?? ''
+  const locationArr = locationStr
+    .split(',').map(s => s.trim()).filter(Boolean)
+
+  // v0.7.26 BUSCAR POR EMPRESA (opción C): si la campaña tiene search_company_names,
+  // la empresa va DENTRO de los keywords ("Director General Softtek"). LinkedIn
+  // full-text search indexa la empresa actual aunque NO esté en el headline, así
+  // que esto SÍ surface gente de esa empresa — sin el bug del post-filter por
+  // headline (que mataba todo) ni necesidad de company URN lookup.
+  //   - company_names vacío → búsqueda por title (comportamiento normal).
+  //   - company_names con valores → keyword = "${title} ${empresa_rotada}", y NO
+  //     se pasa companyNames al post-filter (content.js no filtra — deja que la
+  //     relevancia de LinkedIn decida).
+  const companies = Array.isArray(campaign.search_company_names) ? campaign.search_company_names.filter(Boolean) : []
+  let finalKeywords = keywords ?? campaign.search_keywords?.[0] ?? 'Director'
+  let postFilterCompanies = null
+  if (companies.length > 0) {
+    // Rotar empresa con el mismo idx que la keyword (cubre combinaciones title×empresa)
+    const compIdx = (campaign.last_search_keyword_idx ?? 0) % companies.length
+    finalKeywords = `${finalKeywords} ${companies[compIdx]}`
+    // postFilterCompanies queda null → content.js NO post-filtra por headline
+  }
+
   return dispatchCommand(account.id, 'search', {
     campaignId:       campaign.id,
-    keywords:         keywords ?? campaign.search_keywords?.[0] ?? 'Director',
-    location:         campaign.search_location ?? null,
+    keywords:         finalKeywords,
+    locations:        locationArr.length ? locationArr : null,  // ARRAY para post-filter + geoUrn lookup
+    location:         locationStr || null,                       // legacy single-string (ignorado en URL builder)
     secondDegreeOnly: campaign.search_2nd_degree_only !== false,
     minEmployees:     campaign.search_min_employees ?? null,
-    companyNames:     campaign.search_company_names ?? null,
+    companyNames:     postFilterCompanies,  // v0.7.26: null cuando buscamos por empresa en keyword
+    titleWhitelist:   campaign.title_whitelist ?? null,
+    titleBlacklist:   campaign.title_blacklist ?? null,
     targetCount:      Math.min(campaign.search_count ?? 25, 50),
     maxPages:         4,
   }, { expiresInMinutes: 15 })
@@ -433,8 +622,17 @@ export async function dispatchInvite(account, lead, opts = {}) {
 }
 
 export async function dispatchCheckInbox(account) {
-  return dispatchCommand(account.id, 'check_inbox', { limit: 30 }, {
-    expiresInMinutes: 10,
+  // Plan B RE-HABILITADO 2026-05-28: ambas cuentas Wal y Josh en v0.6.35+, que tiene
+  // el fix del bug click-URL-race (verifica que la URL CAMBIE tras el click antes de
+  // asignar threadId). Ahora seguro capturar thread_ids siempre — necesario para que
+  // auto-promote orphan→lead funcione y Orion responda mensajes inbound de prospects
+  // no invitados.
+  return dispatchCommand(account.id, 'check_inbox', {
+    limit: 30,
+    captureThreads: true,
+    maxCaptures: 15,
+  }, {
+    expiresInMinutes: 15,
   })
 }
 
@@ -445,6 +643,16 @@ export async function dispatchCheckSentInvites(account) {
 }
 
 export async function dispatchFollowup(account, lead, step, message, threadUrl, profileUrl) {
+  // v0.7.26 BUG extension_did_not_respond fix B3: expiry DINÁMICO alineado con
+  // el hard timeout de content.js (calcHardTimeout = msgLen*550 + 120s, cap 480s).
+  // Antes era 3min (180s) FIJO, pero content.js puede tardar legítimamente hasta
+  // 200-480s con humanType en horas pesadas CDMX → el bridge expiraba el cmd
+  // MIENTRAS content.js seguía tipeando → marcado extension_did_not_respond aunque
+  // el mensaje SÍ se enviaba. 35+ timeouts 120ms y parte de los did_not_respond.
+  // Expiry = hard_timeout + 45s margen (SW→bridge report roundtrip), clamp [4,9]min.
+  const msgLen = message?.length ?? 0
+  const hardMs = msgLen > 0 ? Math.min(480_000, msgLen * 550 + 120_000) : 90_000
+  const expiresInMinutes = Math.max(4, Math.min(9, Math.ceil((hardMs + 45_000) / 60_000)))
   return dispatchCommand(account.id, 'send_followup', {
     threadUrl,        // null si lead no tiene thread (invite sin nota)
     profileUrl,       // fallback: navegar al perfil + compose
@@ -452,7 +660,7 @@ export async function dispatchFollowup(account, lead, step, message, threadUrl, 
     leadName: lead.full_name,
     message,
     step,
-  }, { relatedLeadId: lead.id, expiresInMinutes: 10 })
+  }, { relatedLeadId: lead.id, expiresInMinutes })
 }
 
 // ── Campaign-level gate composites ───────────────────────────────────────────

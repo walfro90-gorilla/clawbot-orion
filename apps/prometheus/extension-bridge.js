@@ -23,12 +23,24 @@ import { URL } from 'url'
 import { createClient } from '@supabase/supabase-js'
 import dotenv from 'dotenv'
 import { checkAndKillLeadIfStuck, checkAccountHealthAndPause } from './lib/extension-dispatch.js'
+import { isSystemLinkedInAccount } from './lib/system-accounts.js'
+import { applyLeadAttemptOutcome, isNonFaultError } from './lib/lead-failure.js'
 
 dotenv.config()
 
 const PORT = parseInt(process.env.EXTENSION_BRIDGE_PORT ?? '4002')
 const POLL_INTERVAL_MS = parseInt(process.env.EXTENSION_POLL_INTERVAL_MS ?? '3000')
-const HEARTBEAT_TIMEOUT_MS = 5 * 60 * 1000  // 5 min sin heartbeat → marcar desconectado
+// Reduced from 5min to 90s (2026-05-29 "Reloj Suizo" plan) — antes el server
+// creía conectado mientras el SW dormía, dejando un gap de hasta 5min antes
+// de detectar disconnect. 90s = 6× margen sobre alarm keep-alive cada 15s.
+const HEARTBEAT_TIMEOUT_MS = 90 * 1000
+
+// Auth lockout server-side: si una mismo accountId falla auth >5 veces en 2min,
+// lo bloqueamos 5min para evitar 50+ Auth FAILED en logs por loop infinito del cliente.
+const AUTH_FAILURES = new Map() // accountId → { count, firstFailAt, lockedUntil }
+const AUTH_FAIL_WINDOW_MS = 2 * 60 * 1000
+const AUTH_FAIL_THRESHOLD = 5
+const AUTH_LOCKOUT_MS = 5 * 60 * 1000
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -77,6 +89,21 @@ server.on('upgrade', (req, socket, head) => {
   })
 })
 
+// v0.7.13 stress test harness — readStressTestLockBridge: si activo y no expirado,
+// retorna account_id afectado. pollAndDispatch usa esto para dejar pasar SOLO
+// commands con payload.is_stress_test=true para esa cuenta.
+async function readStressTestLockBridge() {
+  const { data } = await supabase
+    .from('runtime_config')
+    .select('value')
+    .eq('key', 'stress_test_lock')
+    .maybeSingle()
+  const v = data?.value
+  if (!v?.active) return null
+  if (v.expires_at && new Date(v.expires_at).getTime() < Date.now()) return null
+  return v.account_id ?? null
+}
+
 // ── Manejo de conexión ─────────────────────────────────────────────────────
 
 async function handleConnection(ws, accountId) {
@@ -114,7 +141,29 @@ async function handleConnection(ws, accountId) {
         const sent = msg.apiKey ?? ''
         const db = account?.extension_api_key ?? ''
         const fmt = (s) => s ? `${s.slice(0, 12)}…${s.slice(-6)} (len=${s.length})` : '<empty>'
-        console.warn(`[bridge] Auth FAILED for ${accountId}`)
+
+        // Auth lockout: tracker de fallos por accountId
+        const now = Date.now()
+        let tracker = AUTH_FAILURES.get(accountId)
+        if (!tracker || now - tracker.firstFailAt > AUTH_FAIL_WINDOW_MS) {
+          tracker = { count: 0, firstFailAt: now, lockedUntil: 0 }
+        }
+        tracker.count++
+        AUTH_FAILURES.set(accountId, tracker)
+
+        if (tracker.count >= AUTH_FAIL_THRESHOLD && tracker.lockedUntil < now) {
+          tracker.lockedUntil = now + AUTH_LOCKOUT_MS
+          console.warn(`[bridge] 🔒 AUTH LOCKOUT for ${accountId} — ${tracker.count} failures in ${Math.round((now - tracker.firstFailAt)/1000)}s, blocked for 5min`)
+        }
+
+        // Si está locked, rechazar sin logear los detalles repetidos
+        if (tracker.lockedUntil > now) {
+          try { ws.send(JSON.stringify({ type: 'auth_error', error: 'too_many_auth_failures_locked', retryAfter: tracker.lockedUntil })) } catch {}
+          try { ws.close(4002, 'auth_locked_5min') } catch {}
+          return
+        }
+
+        console.warn(`[bridge] Auth FAILED for ${accountId} (${tracker.count}/${AUTH_FAIL_THRESHOLD})`)
         console.warn(`[bridge]   sent: ${fmt(sent)}`)
         console.warn(`[bridge]   db:   ${fmt(db)}`)
         console.warn(`[bridge]   match=${sent === db} | account_found=${!!account}`)
@@ -122,6 +171,8 @@ async function handleConnection(ws, accountId) {
         try { ws.close(4002, 'invalid_api_key') } catch {}
         return
       }
+      // Auth OK: reset tracker
+      AUTH_FAILURES.delete(accountId)
 
       authenticated = true
       accountLabel = account.label
@@ -176,6 +227,20 @@ async function handleConnection(ws, accountId) {
     const conn = connections.get(accountId)
     if (conn) conn.lastSeen = Date.now()
 
+    // Persistir extension_last_seen_at en cada ping (throttled a 2min/cuenta) para
+    // que la métrica refleje liveness REAL — no solo el momento de auth. Permite
+    // distinguir "SW vivo conectado" de "SW muerto hace rato" en dashboard/popup.
+    if ((msg.type === 'ping' || msg.type === 'pong') && conn) {
+      const lastPersist = conn.lastSeenPersisted ?? 0
+      if (Date.now() - lastPersist > 120_000) {
+        conn.lastSeenPersisted = Date.now()
+        supabase.from('linkedin_accounts')
+          .update({ extension_last_seen_at: new Date().toISOString() })
+          .eq('id', accountId)
+          .then(() => {}).catch(() => {})
+      }
+    }
+
     switch (msg.type) {
       case 'pong':
         // ack del ping del server
@@ -185,6 +250,19 @@ async function handleConnection(ws, accountId) {
         return
       case 'command_result':
         await handleCommandResult(msg)
+        return
+      case 'command_ack':
+        // Opción B telemetría: content.js confirmó RECEPCIÓN (pre-ejecución).
+        // Sella acked_at para clasificar el residuo si luego expira sin resultado.
+        await handleCommandAck(msg)
+        return
+      case 'phase_update':
+        // v0.7.0 FSM: persistir el phase + log de timeline para auditing/resume
+        await handlePhaseUpdate(msg)
+        return
+      case 'micro_phase':
+        // v0.7.2 µ-PHASE: append a micro_phase_log JSONB (más granular que phase_log)
+        await handleMicroPhase(msg)
         return
       default:
         console.log(`[bridge] Unhandled msg type from ${accountLabel}: ${msg.type}`)
@@ -213,21 +291,129 @@ async function handleConnection(ws, accountId) {
   })
 }
 
+// ── v0.7.2 µ-PHASE handler ─────────────────────────────────────────────────
+async function handleMicroPhase(msg) {
+  const { commandId, action, entry } = msg
+  if (!commandId || !entry) return
+  try {
+    const { data: cmd } = await supabase
+      .from('extension_commands')
+      .select('micro_phase_log')
+      .eq('id', commandId)
+      .maybeSingle()
+    const prev = Array.isArray(cmd?.micro_phase_log) ? cmd.micro_phase_log : []
+    const next = [...prev, entry].slice(-100)  // cap a 100 transitions
+    const { error: upErr } = await supabase
+      .from('extension_commands')
+      .update({ micro_phase_log: next })
+      .eq('id', commandId)
+    if (upErr) console.warn(`[bridge] micro_phase persist failed: ${upErr.message}`)
+  } catch (err) {
+    console.warn(`[bridge] handleMicroPhase error:`, err.message)
+  }
+}
+
+// ── v0.7.0 FSM: handler de phase updates ────────────────────────────────────
+async function handlePhaseUpdate(msg) {
+  const { commandId, phase, ts, extra } = msg
+  if (!commandId || !phase) return
+  try {
+    // Append a phase_log y update current_phase. Usa fetch-modify-update porque
+    // Supabase no soporta jsonb_append nativo via REST.
+    const { data: cmd } = await supabase
+      .from('extension_commands')
+      .select('phase_log')
+      .eq('id', commandId)
+      .maybeSingle()
+    const prevLog = Array.isArray(cmd?.phase_log) ? cmd.phase_log : []
+    const newEntry = { phase, ts, extra: extra ?? null }
+    const newLog = [...prevLog, newEntry].slice(-30)  // cap a 30 transitions
+    const { error: upErr } = await supabase
+      .from('extension_commands')
+      .update({ phase_log: newLog, current_phase: phase })
+      .eq('id', commandId)
+    if (upErr) console.warn(`[bridge] phase_update persist failed: ${upErr.message}`)
+  } catch (err) {
+    console.warn(`[bridge] handlePhaseUpdate error:`, err.message)
+  }
+}
+
+// ── Opción B: ACK de recepción ──────────────────────────────────────────────
+// content.js manda orion_cmd_ack al recibir el comando (antes de ejecutar). El SW
+// lo reenvía como command_ack. Sólo sellamos acked_at si aún no estaba (idempotente)
+// y el comando sigue dispatched (no pisar uno ya completado).
+async function handleCommandAck(msg) {
+  const { commandId } = msg
+  if (!commandId) return
+  try {
+    const { error } = await supabase
+      .from('extension_commands')
+      .update({ acked_at: new Date().toISOString() })
+      .eq('id', commandId)
+      .eq('status', 'dispatched')
+      .is('acked_at', null)
+    if (error) console.warn(`[bridge] command_ack persist failed: ${error.message}`)
+  } catch (err) {
+    console.warn(`[bridge] handleCommandAck error:`, err.message)
+  }
+}
+
 // ── Procesar resultados de comandos ─────────────────────────────────────────
 
 async function handleCommandResult(msg) {
   const { commandId, action, result } = msg
   if (!commandId) return
 
-  const isError = result?.ok === false
+  // v0.7.10 fantasma fix: la extensión emite {status:'error', error:'<code>'}
+  // sin tocar ok. Antes sólo mirábamos result?.ok===false → 96% de los fallos
+  // se persistían como 'completed' con error=null, generando métricas fantasma.
+  // Ahora cualquier de los dos shapes cuenta como error.
+  const isError = result?.ok === false || result?.status === 'error'
   await supabase.from('extension_commands').update({
     status:       isError ? 'error' : 'completed',
     result:       result ?? null,
-    error:        isError ? (result?.error ?? 'unknown') : null,
+    error:        isError ? (result?.error ?? result?.reason ?? 'unknown') : null,
     completed_at: new Date().toISOString(),
   }).eq('id', commandId)
 
-  console.log(`[bridge] Command ${commandId.slice(0,8)} (${action}) → ${isError ? 'ERROR' : 'OK'}`)
+  console.log(`[bridge] Command ${commandId.slice(0,8)} (${action}) → ${isError ? `ERROR (${result?.error ?? result?.status ?? 'unknown'})` : 'OK'}`)
+
+  // ── Lead fault-tolerance tracking (FIFO + cooldown + quarantine) ──────────
+  // Solo para acciones lead-scoped (invite/followup/reply). check_inbox/search
+  // no tienen related_lead_id. awaiting_response NO cuenta como fault — el
+  // helper isNonFaultError lo filtra. NO depende del fallback FSM de abajo:
+  // si fue ok-success o ok-status-tolerable, contamos como success aquí.
+  if (action === 'send_followup' || action === 'send_invite') {
+    try {
+      // BUG-H fix 2026-06-04: añadir payload al select y gate is_stress_test
+      // para que stress dryRun NO contamine counters del lead real.
+      // Asimetría histórica: dispatch-time YA tenía el gate (extension-dispatch.js:561)
+      // pero handleCommandResult lo había omitido.
+      const { data: cmdLead } = await supabase
+        .from('extension_commands')
+        .select('related_lead_id, payload')
+        .eq('id', commandId)
+        .maybeSingle()
+      const isStressTest = !!cmdLead?.payload?.is_stress_test
+      if (cmdLead?.related_lead_id && !isStressTest) {
+        const errCode = isError ? (result?.error ?? 'unknown') : null
+        const outcome = isError ? 'failure' : 'success'
+        // awaiting_response llega como result.status (no ok=false). Si llega así,
+        // tratamos como non-fault explicitamente para no resetear failures.
+        if (!isError && result?.status === 'awaiting_response') {
+          // skip — handler dedicado más abajo se encarga; failures intact.
+        } else if (outcome === 'failure' && isNonFaultError(errCode)) {
+          // no-op: errors manejados por handlers especiales no cuentan
+        } else {
+          await applyLeadAttemptOutcome(cmdLead.related_lead_id, outcome, errCode)
+        }
+      } else if (isStressTest) {
+        console.log(`[bridge] [stress] applyLeadAttemptOutcome skipped (is_stress_test=true, lead=${cmdLead?.related_lead_id?.slice(0,8)})`)
+      }
+    } catch (err) {
+      console.error(`[bridge] applyLeadAttemptOutcome failed: ${err.message}`)
+    }
+  }
 
   // Capa 3: "No current window" counter (Chrome cerrado detection)
   try {
@@ -248,6 +434,60 @@ async function handleCommandResult(msg) {
     console.error(`[bridge] account health check error:`, err.message)
   }
 
+  // v0.7.16 — LinkedIn security banner handler.
+  // content.js retorna {error:'linkedin_security_check', bannerCode, bannerSeverity}.
+  // critical → pause account 12-24h + alert critical; warning → cooldown 30min + alert.
+  if (result?.error === 'linkedin_security_check') {
+    try {
+      const { data: cmdRow } = await supabase
+        .from('extension_commands').select('account_id, related_lead_id').eq('id', commandId).single()
+      const acctId = cmdRow?.account_id
+      const code = result.bannerCode || 'unknown_banner'
+      const sev = result.bannerSeverity || 'warning'
+      console.warn(`[bridge] LinkedIn security banner detected: ${code} (${sev}) account=${acctId?.slice?.(0,8)}`)
+
+      if (acctId && sev === 'critical') {
+        const pauseHrs = code === 'captcha_checkpoint' ? 24 : code === 'account_locked' ? 12 : 1
+        const pauseUntil = new Date(Date.now() + pauseHrs * 3_600_000).toISOString()
+        // v0.7.21 P1-4: capturar error explícitamente (anti silent-fail)
+        const { error: upErr } = await supabase.from('linkedin_accounts').update({
+          extension_paused: true,
+          extension_paused_until: pauseUntil,
+          extension_paused_reason: `banner_${code}`,
+        }).eq('id', acctId)
+        if (upErr) console.error(`[bridge] banner critical update failed: ${upErr.message}`)
+        const { error: alErr } = await supabase.from('account_alerts').insert({
+          account_id: acctId,
+          severity: 'critical',
+          code: `banner_${code}`,
+          message: `LinkedIn security checkpoint (${code}). Account paused ${pauseHrs}h until ${pauseUntil}.`,
+          metadata: { textSignal: result.textSignal, selectorSignal: result.selectorSignal, commandId },
+        })
+        if (alErr) console.error(`[bridge] banner critical alert insert failed: ${alErr.message}`)
+      } else if (acctId && sev === 'warning') {
+        const cooldownUntil = new Date(Date.now() + 30 * 60_000).toISOString()
+        // v0.7.21 P1-4: capturar error explícitamente + log consistente con critical
+        const { error: upErr } = await supabase.from('linkedin_accounts').update({
+          extension_paused_until: cooldownUntil,
+          extension_paused_reason: `banner_${code}`,
+        }).eq('id', acctId)
+        if (upErr) console.error(`[bridge] banner warning update failed: ${upErr.message}`)
+        const { error: alErr } = await supabase.from('account_alerts').insert({
+          account_id: acctId,
+          severity: 'warning',
+          code: `banner_${code}`,
+          message: `LinkedIn rate/limit warning (${code}). Cooldown 30min until ${cooldownUntil}.`,
+          metadata: { textSignal: result.textSignal, selectorSignal: result.selectorSignal, commandId },
+        })
+        if (alErr) console.error(`[bridge] banner warning alert insert failed: ${alErr.message}`)
+      }
+      // No contar como lead-fault: el lead no falló por sí mismo.
+      // (isNonFaultError no incluye este código — añadir a NON_FAULT_ERRORS)
+    } catch (err) {
+      console.error(`[bridge] banner handler failed:`, err.message)
+    }
+  }
+
   // Ingestion: si fue exitoso y la acción tiene ingest definido, procesamos
   if (!isError && action === 'check_inbox' && result?.conversations) {
     try {
@@ -265,9 +505,47 @@ async function handleCommandResult(msg) {
     }
   }
   // send_followup ingest — actualiza lead.last_followup_at + daily_activity
-  if (!isError && action === 'send_followup' && ['sent', 'sent_unconfirmed', 'dry_run_ok'].includes(result?.status)) {
+  // v0.6.45: 'already_responded' = pre-send guard detectó que ya respondimos
+  // v0.7.0: 'sent_confirmed' = FSM confirmó por DOM fingerprint que el msg está visible
+  // v0.7.0: si error pero phase >= send_clicked → ingest como sent_unconfirmed
+  //         (Send fue presionado, asumir que LinkedIn lo procesó, no reintentar).
+  const okStatuses = ['sent', 'sent_unconfirmed', 'sent_confirmed', 'dry_run_ok', 'already_responded']
+  let shouldIngest = !isError && action === 'send_followup' && okStatuses.includes(result?.status)
+  if (!shouldIngest && action === 'send_followup') {
+    // v0.7.0 fallback: si el cmd entró a phase 'send_clicked' o 'send_confirmed'
+    // y luego falló por timeout/error, igual ingestamos como sent_unconfirmed.
+    // v0.7.14 (caso Rodrigo Centeno 01-jun): EXTENDIDO también a phase='typed'
+    // cuando el error es POST-typing (selector_drift en confirm DOM o LinkedIn
+    // truncó la captura). Si llegó a typed con result.reason='truncated' o
+    // result.error matches message_in_dom_*/send_button_*/confirm_*, asumimos
+    // que el mensaje sí salió a LinkedIn (lo visual confirma en screenshot del
+    // usuario) y los fallos son del verify DOM, no del send real.
+    try {
+      const { data: cmd } = await supabase
+        .from('extension_commands')
+        .select('current_phase, payload')
+        .eq('id', commandId).maybeSingle()
+      const ph = cmd?.current_phase
+      const reason = String(result?.reason ?? result?.error ?? '').toLowerCase()
+      const isPostTypingFailure = /truncated|message_in_dom|send_button_(?:not_found|enabled_timeout)|confirm_(?:timeout|failed)/.test(reason)
+      if (ph === 'send_confirmed' || ph === 'send_clicked' || (ph === 'typed' && isPostTypingFailure)) {
+        const fallbackStatus = ph === 'send_confirmed' ? 'sent_confirmed' : 'sent_unconfirmed'
+        console.log(`[bridge] 🔁 FSM fallback v0.7.14: cmd ${commandId.slice(0,8)} phase=${ph} reason="${reason.slice(0,40)}" → ingest as ${fallbackStatus}`)
+        result = { ...result, status: fallbackStatus, message: cmd.payload?.message }
+        shouldIngest = true
+      }
+    } catch (err) {
+      console.warn(`[bridge] FSM fallback check failed:`, err.message)
+    }
+  }
+  if (shouldIngest) {
     try {
       await ingestSendFollowup(commandId, result)
+      if (result.status === 'already_responded') {
+        console.log(`[bridge] ↻ already_responded: ${result.lastOutboundPreview?.slice(0,60)}…`)
+      } else if (result.status === 'sent_confirmed') {
+        console.log(`[bridge] ✅✅ sent_confirmed (FSM DOM polling matched fingerprint)`)
+      }
     } catch (err) {
       console.error(`[bridge] ingest send_followup failed:`, err.message)
     }
@@ -275,8 +553,11 @@ async function handleCommandResult(msg) {
 
   // Lead-level circuit breaker: si lead falla 3x con mismo error en últimas 6h
   // (que no esté ya manejado por otros handlers), kill automático.
+  // v0.7.8: awaiting_response NO es error — el detector reporta status, no error;
+  //         pero excluimos lead_not_messageable y awaiting_response defensivamente.
   if (action === 'send_followup' && result?.error &&
-      !['lead_not_first_degree', 'lead_invite_still_pending', 'profile_not_found'].includes(result.error)) {
+      !['lead_not_first_degree', 'lead_invite_still_pending', 'profile_not_found',
+        'lead_not_messageable', 'awaiting_response'].includes(result.error)) {
     try {
       const { data: cmd } = await supabase
         .from('extension_commands')
@@ -308,6 +589,111 @@ async function handleCommandResult(msg) {
       }
     } catch (err) {
       console.error(`[bridge] mark dead 404 failed:`, err.message)
+    }
+  }
+
+  // v0.7.6: lead_not_messageable = LinkedIn cerró el thread (2°/3° + sin respuesta,
+  // InMail required, sponsored thread). NO reintentar — marcar lead apropiadamente.
+  if (action === 'send_followup' && result?.error === 'lead_not_messageable') {
+    try {
+      const { data: cmd } = await supabase
+        .from('extension_commands')
+        .select('related_lead_id')
+        .eq('id', commandId)
+        .single()
+      if (cmd?.related_lead_id) {
+        const reason = result.reason ?? 'unknown'
+        // 2°/3° + InMail required: lead NO es 1er grado, revert a invite_sent
+        // para que check_sent_invites lo re-verifique (no kill permanente).
+        if (reason.includes('2nd_degree') || reason.includes('3rd_degree') ||
+            reason.includes('inmail_required') || reason.includes('inmail_credits')) {
+          // v0.7.13 P1-1: contar reverts. Si >= cap → dead (evita loop infinito).
+          // Antes de v0.7.13, un lead InMail-only se quedaba rebotando entre
+          // invite_sent → check_inbox → revert → infinito.
+          const { data: leadRow } = await supabase
+            .from('leads')
+            .select('inmail_revert_count')
+            .eq('id', cmd.related_lead_id)
+            .maybeSingle()
+          const newCount = (leadRow?.inmail_revert_count ?? 0) + 1
+          const { data: capCfg } = await supabase
+            .from('runtime_config').select('value').eq('key', 'inmail_revert_cap').maybeSingle()
+          const cap = typeof capCfg?.value === 'number' ? capCfg.value : 2
+          if (newCount >= cap) {
+            await supabase.from('leads').update({
+              status: 'dead',
+              dead_reason: 'inmail_only_x' + newCount,
+              inmail_revert_count: newCount,
+            }).eq('id', cmd.related_lead_id)
+            console.log(`[bridge] 💀 lead ${cmd.related_lead_id.slice(0,8)} dead: inmail_only_x${newCount} (cap ${cap})`)
+          } else {
+            await supabase.from('leads').update({
+              status: 'invite_sent',
+              connected_at: null,
+              dead_reason: `not_messageable_${reason}`.slice(0, 100),
+              inmail_revert_count: newCount,
+            }).eq('id', cmd.related_lead_id)
+            console.log(`[bridge] 🚫 lead ${cmd.related_lead_id.slice(0,8)} reverted ${newCount}/${cap}: not_messageable (${reason})`)
+          }
+        } else if (reason.includes('sponsored')) {
+          // Sponsored thread = no es real lead, mark dead permanent
+          await supabase.from('leads').update({
+            status: 'dead',
+            dead_reason: 'sponsored_thread',
+          }).eq('id', cmd.related_lead_id)
+        } else if (reason.includes('awaiting_reply') || reason.includes('no_editor_with_awaiting') || reason.includes('awaiting_response') || reason.includes('cannot_message') || reason.includes('message_blocked')) {
+          // v0.7.15 Fix B: awaiting_reply_badge / no_editor_with_awaiting = LinkedIn
+          // anti-spam window (lead anti-spam-locked hasta que ELLOS respondan).
+          // Antes esto sólo seteaba dead_reason flag → status seguía 'connected' →
+          // smart-sync drift → scheduler re-despachaba → loop infinito (caso Alfonso
+          // Martinez 2026-06-02: 2 cmds en 4h, ambos error_lead_not_messageable).
+          // Fix: mover a status='awaiting_response' que el sweep v0.7.8 mata al 21d.
+          await supabase.from('leads').update({
+            status: 'awaiting_response',
+            awaiting_response_since: new Date().toISOString(),
+            awaiting_response_reason: reason.slice(0, 200),
+            dead_reason: null,
+          }).eq('id', cmd.related_lead_id)
+          console.log(`[bridge] ⏳ lead ${cmd.related_lead_id.slice(0,8)} → awaiting_response (${reason.slice(0,40)})`)
+        } else {
+          // Reason desconocida — flag pero NO cambiar status (defensive)
+          await supabase.from('leads').update({
+            dead_reason: `not_messageable_${reason}`.slice(0, 100),
+          }).eq('id', cmd.related_lead_id)
+        }
+      }
+    } catch (err) {
+      console.error(`[bridge] lead_not_messageable handler failed:`, err.message)
+    }
+  }
+
+  // v0.7.8: awaiting_response = LinkedIn aplica ban window al lead conectado
+  // (banner "no has recibido respuesta aún" + composer/send disabled).
+  // NO es error: lead está OK, solo hay que esperar. Marcamos status especial
+  // sin consumir retry, sin avanzar fu_count, sin ingest de mensaje.
+  if (action === 'send_followup' && result?.status === 'awaiting_response') {
+    try {
+      const { data: cmd } = await supabase
+        .from('extension_commands')
+        .select('related_lead_id')
+        .eq('id', commandId)
+        .single()
+      if (cmd?.related_lead_id) {
+        const rawReason = result.reason ?? 'unknown'
+        const reasonStr = String(typeof rawReason === 'string' ? rawReason : JSON.stringify(rawReason)).slice(0, 100)
+        const { error: awErr } = await supabase.from('leads').update({
+          status: 'awaiting_response',
+          awaiting_response_since: new Date().toISOString(),
+          awaiting_response_reason: reasonStr,
+        }).eq('id', cmd.related_lead_id)
+        if (awErr) {
+          console.error(`[bridge] awaiting_response update failed:`, awErr.message)
+        } else {
+          console.log(`[bridge] ⏳ lead ${cmd.related_lead_id.slice(0,8)} → awaiting_response (${reasonStr})`)
+        }
+      }
+    } catch (err) {
+      console.error(`[bridge] awaiting_response handler failed:`, err.message)
     }
   }
 
@@ -350,7 +736,7 @@ async function handleCommandResult(msg) {
   // check_sent_invites ingest — marca leads como connected si dejaron de estar pending
   if (!isError && action === 'check_sent_invites' && result?.status === 'ok' && Array.isArray(result?.pending)) {
     try {
-      await ingestCheckSentInvites(commandId, result.pending)
+      await ingestCheckSentInvites(commandId, result.pending, result.statedTotal)
     } catch (err) {
       console.error(`[bridge] ingest check_sent_invites failed:`, err.message)
     }
@@ -358,7 +744,7 @@ async function handleCommandResult(msg) {
 }
 
 // ── Ingest: check_sent_invites → marca accepts (leads que dejaron de estar pending)
-async function ingestCheckSentInvites(commandId, pending) {
+async function ingestCheckSentInvites(commandId, pending, statedTotal = null) {
   const { data: cmd } = await supabase
     .from('extension_commands')
     .select('account_id')
@@ -381,6 +767,16 @@ async function ingestCheckSentInvites(commandId, pending) {
     return
   }
 
+  // 🔴 SAFETY GUARD (v0.7.34): si el scrape devolvió 0 pending PERO tenemos
+  // invite_sent leads, es casi seguro un FALLO DEL PARSER (/sent/ drift es gap
+  // conocido) — NO que TODOS aceptaron de golpe. Sin este guard, cada invite_sent
+  // >1h caería en stillPending=false → falso accept masivo → followups a gente que
+  // nunca conectó. Asimetría: perder un accept real (lo recapturamos next cycle) <<<
+  // marcar falsos connected. Abortamos.
+  if (!Array.isArray(pending) || pending.length === 0) {
+    console.warn(`[bridge] check_sent_invites: pending=0 con ${invitedLeads.length} invite_sent leads → ABORT (probable parser failure, NO marco accepts)`)
+    return
+  }
   // Normalizar urls de pending (LinkedIn agrega trailing slash, query params, etc.)
   const normalize = (url) => (url || '')
     .toLowerCase()
@@ -390,34 +786,52 @@ async function ingestCheckSentInvites(commandId, pending) {
   const pendingUrls = new Set(pending.map(p => normalize(p.profileUrl)))
   const pendingNames = new Set(pending.map(p => (p.name ?? '').toLowerCase().trim()))
 
-  let accepted = 0
-  // Safety: solo marcar como connected si el invite tiene al menos 1h de antigüedad.
-  // Evita marcar como accept un invite que justo se mandó hace 5 min cuya pestaña
-  // todavía no actualizó la lista de pending.
-  const minSentAgeMs = 60 * 60 * 1000
+  const isPending = (lead) =>
+    pendingUrls.has(normalize(lead.linkedin_url)) ||
+    (lead.full_name && pendingNames.has(lead.full_name.toLowerCase().trim()))
+
+  // v0.7.38 DETECCIÓN POR VENTANA TEMPORAL (resuelve /sent/ paginado SIN falsos):
+  // LinkedIn /sent/ ordena newest-first; capturamos los N más recientes (no todos
+  // los 86). Boundary = sent_at MÁS VIEJO entre los leads que SÍ vemos en pending.
+  // Un lead AUSENTE del pending solo es "aceptado" si es MÁS NUEVO que el boundary
+  // (estaría en la página capturada si siguiera pendiente → ausencia = aceptado).
+  // Un lead más viejo que el boundary es AMBIGUO (puede estar en página 2) → skip.
+  // Si NO hay ningún DB lead en pending → no hay boundary → skip todo (seguro).
+  const capturedDbTimes = invitedLeads
+    .filter(l => l.sent_at && isPending(l))
+    .map(l => new Date(l.sent_at).getTime())
+  const boundaryTime = capturedDbTimes.length ? Math.min(...capturedDbTimes) : null
+  const incomplete = statedTotal && pending.length < statedTotal
+  if (incomplete) {
+    console.log(`[bridge] check_sent_invites: scrape parcial (${pending.length}/${statedTotal}) → modo ventana, boundary=${boundaryTime ? new Date(boundaryTime).toISOString() : 'null(skip)'}`)
+  }
+
+  let accepted = 0, skippedAmbiguous = 0
+  const minSentAgeMs = 60 * 60 * 1000  // no marcar accept si el invite tiene <1h
 
   for (const lead of invitedLeads) {
     if (!lead.sent_at) continue
-    const ageMs = Date.now() - new Date(lead.sent_at).getTime()
-    if (ageMs < minSentAgeMs) continue
+    const sentMs = new Date(lead.sent_at).getTime()
+    if (Date.now() - sentMs < minSentAgeMs) continue
+    if (isPending(lead)) continue  // sigue pendiente → no aceptado
 
-    const urlMatch = pendingUrls.has(normalize(lead.linkedin_url))
-    const nameMatch = lead.full_name && pendingNames.has(lead.full_name.toLowerCase().trim())
-    const stillPending = urlMatch || nameMatch
-
-    if (!stillPending) {
-      // Lead ya no aparece como pending → fue aceptado (o withdraw)
-      const { error } = await supabase.from('leads').update({
-        status: 'connected',
-        connected_at: new Date().toISOString(),
-      }).eq('id', lead.id)
-      if (!error) {
-        accepted++
-        console.log(`[bridge] ✅ Accept detectado: ${lead.full_name} (invite_sent → connected)`)
+    // Ausente del pending. ¿Dentro de la ventana capturada?
+    if (incomplete) {
+      if (boundaryTime === null || sentMs <= boundaryTime) {
+        skippedAmbiguous++  // más viejo que la ventana / sin boundary → ambiguo, no marcar
+        continue
       }
     }
+    // Seguro concluir accept: scrape completo, o lead más nuevo que el boundary.
+    const { error } = await supabase.from('leads').update({
+      status: 'connected', connected_at: new Date().toISOString(),
+    }).eq('id', lead.id)
+    if (!error) {
+      accepted++
+      console.log(`[bridge] ✅ Accept detectado: ${lead.full_name} (invite_sent → connected)`)
+    }
   }
-  console.log(`[bridge] check_sent_invites ingest: ${accepted} accepts detectados de ${invitedLeads.length} pending`)
+  console.log(`[bridge] check_sent_invites ingest: ${accepted} accepts de ${invitedLeads.length} invite_sent (${skippedAmbiguous} ambiguos saltados por ventana)`)
 }
 
 // ── Ingest: search → insertar leads nuevos en DB ───────────────────────────
@@ -516,13 +930,19 @@ async function ingestSendFollowup(commandId, result) {
     await supabase.from('leads').update({
       status: statusValue,
       [timestampField]: new Date().toISOString(),
+      // v0.7.13 P0-4: reset lockout_skip_count en cada FU exitoso —
+      // un FU que SÍ logró enviarse "limpia" el historial de lockouts.
+      lockout_skip_count: 0,
     }).eq('id', leadId)
   }
 
-  await supabase.rpc('increment_daily_activity', {
+  // RPC error capture (2026-05-29 fix): antes era fire-and-forget; ahora loggea
+  // si falla para detectar problemas de counter silenciosos.
+  const { error: incMsgErr } = await supabase.rpc('increment_daily_activity', {
     p_account_id: cmd.account_id,
     p_field:      'messages_sent',
   })
+  if (incMsgErr) console.error(`[bridge] ❌ RPC increment_daily_activity (messages_sent) failed for ${cmd.account_id.slice(0,8)}: ${incMsgErr.message}`)
 
   // Registrar el evento + actualizar conversation
   const messageText = cmd.payload?.message
@@ -600,34 +1020,61 @@ async function ingestSendInvite(commandId, result) {
   }).eq('id', leadId)
 
   // Incrementar daily_activity (CDMX date-aligned vía RPC)
-  await supabase.rpc('increment_daily_activity', {
+  // RPC error capture (2026-05-29 fix): visibilidad si counter silenciosamente falla.
+  const { error: incInvErr } = await supabase.rpc('increment_daily_activity', {
     p_account_id: cmd.account_id,
     p_field:      'invites_sent',
   })
+  if (incInvErr) console.error(`[bridge] ❌ RPC increment_daily_activity (invites_sent) failed for ${cmd.account_id.slice(0,8)}: ${incInvErr.message}`)
 
-  // Si el message fue tipeado, registrar conversation + event
+  // v0.7.22 BUG-K: registrar activity_log para send_invite success (antes vacío →
+  // observability gap por-cmd). Permite auditoría de cuándo/cómo se envió cada invite.
+  const { error: actLogErr } = await supabase.from('activity_log').insert({
+    linkedin_account_id: cmd.account_id,
+    lead_id:             leadId,
+    action:              'send_invite',
+    result:              'success',
+    details:             { status: result.status, path: result.path ?? null, withNote: !!result.withNote },
+  })
+  if (actLogErr) console.warn(`[bridge] activity_log insert (send_invite) failed: ${actLogErr.message}`)
+
+  // SIEMPRE registrar conversation + event de invite_sent (con o sin nota).
+  // BUG fix: antes solo se loggeaba si textareaUsed=true → invites sin nota
+  // (path spa_route_no_note) nunca creaban evento → dashboard contaba 0 ayer/streak.
   const messageText = cmd.payload?.message
-  if (messageText && result.textareaUsed) {
-    const { data: conv } = await supabase
-      .from('conversations')
-      .upsert({
-        lead_id:             leadId,
-        linkedin_account_id: cmd.account_id,
-        status:              'initiated',
-      }, { onConflict: 'lead_id' })
-      .select('id')
-      .single()
+  const { data: conv } = await supabase
+    .from('conversations')
+    .upsert({
+      lead_id:             leadId,
+      linkedin_account_id: cmd.account_id,
+      status:              'initiated',
+    }, { onConflict: 'lead_id' })
+    .select('id')
+    .single()
 
-    if (conv?.id) {
-      await supabase.from('conversation_events').insert({
-        conversation_id: conv.id,
-        event_type:      'invite_sent',
-        direction:       'outbound',
-        content:         messageText.slice(0, 4000),
-        sent_at:         new Date().toISOString(),
-        sent_via:        'orion_extension',
-      })
-    }
+  if (conv?.id) {
+    // Fix 29-may: garantizar que conversation tenga last_message_at desde el inicio,
+    // así aparece en /dashboard/conversations ORDER BY last_message_at. Antes solo
+    // FU ingest lo poblaba → invites quedaban con last_message_at=NULL → invisibles.
+    await supabase.from('conversations').update({
+      last_message_at:   new Date().toISOString(),
+      last_message_text: (messageText && result.textareaUsed)
+        ? `[Tú]: ${messageText.slice(0, 200)}`
+        : '[Invitación enviada (sin nota)]',
+    }).eq('id', conv.id)
+
+    // BUG fix: sent_via='orion_extension' viola el CHECK constraint
+    // (allowed: orion, orion_auto, orion_manual, linkedin_manual, linkedin_inbound, unknown).
+    // Usamos 'orion_auto' que es lo correcto para acciones autónomas del bot.
+    const { error: evErr } = await supabase.from('conversation_events').insert({
+      conversation_id: conv.id,
+      event_type:      'invite_sent',
+      direction:       'outbound',
+      content:         (messageText && result.textareaUsed) ? messageText.slice(0, 4000) : null,
+      sent_at:         new Date().toISOString(),
+      sent_via:        'orion_auto',
+    })
+    if (evErr) console.error(`[bridge] ❌ invite_sent event insert: ${evErr.message}`)
   }
 
   console.log(`[bridge] ✅ send_invite ingested: lead ${leadId.slice(0,8)} → invite_sent`)
@@ -662,18 +1109,40 @@ async function ingestCheckInbox(commandId, conversations) {
 
   for (const convo of conversations) {
     if (!convo.name) continue
+    // BUG FIX: NO ingestar cuentas de SISTEMA de LinkedIn (Talent Solutions, etc.) —
+    // sus notificaciones se tomaban como "reply", creaban orphans/leads y disparaban
+    // auto-reply → thread_editor_not_found. No son personas contestables.
+    if (isSystemLinkedInAccount(convo.name)) continue
     const scrapedLower = convo.name.toLowerCase().trim()
 
-    // Match: el primer nombre del scraped debe estar en el lead, o viceversa
-    const scrapedFirst = scrapedLower.split(/\s+/)[0]
-    const lead = leads.find(l => {
-      const leadLower = (l.full_name ?? '').toLowerCase()
-      const leadFirst = leadLower.split(/\s+/)[0]
-      // Match si comparten primer nombre + algún apellido OR el nombre completo aparece embebido
-      return (leadFirst === scrapedFirst && scrapedLower.includes(leadLower.split(' ').pop() ?? '__')) ||
-             leadLower.includes(scrapedLower) ||
-             scrapedLower.includes(leadLower)
-    })
+    // Match PRIMARIO por thread_id (fix 29-may-2026): si el scraped trae threadId
+    // y existe una conversation con ese thread_id ya vinculada a un lead, ESE es
+    // el match correcto sin importar string del nombre. Esto resuelve el bug donde
+    // el lead se guardó con nombre abreviado/truncado ("Jose Pablo T.") y el inbox
+    // scrape trae el nombre completo ("Jose Pablo Torres Reyes") → string match
+    // fallaba → quedaba como orphan, scheduler nunca disparaba FM auto-reply.
+    let lead = null
+    if (convo.threadId) {
+      const { data: matchConv } = await supabase
+        .from('conversations')
+        .select('lead_id')
+        .eq('linkedin_thread_id', convo.threadId)
+        .maybeSingle()
+      if (matchConv?.lead_id) {
+        lead = leads.find(l => l.id === matchConv.lead_id) ?? null
+      }
+    }
+    // FALLBACK: string matching por nombre (original)
+    if (!lead) {
+      const scrapedFirst = scrapedLower.split(/\s+/)[0]
+      lead = leads.find(l => {
+        const leadLower = (l.full_name ?? '').toLowerCase()
+        const leadFirst = leadLower.split(/\s+/)[0]
+        return (leadFirst === scrapedFirst && scrapedLower.includes(leadLower.split(' ').pop() ?? '__')) ||
+               leadLower.includes(scrapedLower) ||
+               scrapedLower.includes(leadLower)
+      })
+    }
 
     if (!lead) {
       // Conversación que NO matchea ningún lead activo → es ORPHAN. Loguear para
@@ -689,12 +1158,19 @@ async function ingestCheckInbox(commandId, conversations) {
           .match(orphanKey)
           .maybeSingle()
         if (existing) {
+          // BUG fix: el UPDATE original no persistía linkedin_thread_id ni
+          // linkedin_profile_url cuando un sweep posterior los capturaba (orphan
+          // existía sin thread_id, nuevo sweep tiene thread_id → quedaba sin
+          // persistir → auto-promote nunca disparaba). Ahora los actualizamos
+          // si vienen no-null en el sweep actual.
           await supabase.from('orphan_conversations').update({
             occurrence_count: (existing.occurrence_count ?? 1) + 1,
             last_seen_at: new Date().toISOString(),
             snippet: convo.snippet ?? null,
             unread_count: convo.unread ?? 0,
             last_activity_label: convo.lastActivity ?? null,
+            ...(convo.threadId ? { linkedin_thread_id: convo.threadId } : {}),
+            ...(convo.threadUrl ? { linkedin_profile_url: convo.threadUrl } : {}),
           }).eq('id', existing.id)
         } else {
           await supabase.from('orphan_conversations').insert({
@@ -706,6 +1182,89 @@ async function ingestCheckInbox(commandId, conversations) {
             linkedin_profile_url: convo.threadUrl ?? null,
             last_activity_label: convo.lastActivity ?? null,
           })
+        }
+
+        // P-C: AUTO-PROMOTE orphan → lead contestable si:
+        //  - tiene thread_id (capturado vía click) Y
+        //  - el snippet es un INBOUND genuino del lead (no "Tú:"/"[Tú]:") Y
+        //  - NO es patrocinado/promo (filtrar spam de LinkedIn) Y
+        //  - el snippet tiene contenido sustantivo (>30 chars, evita "Consultor IT" etc)
+        // Opción C: removido el requirement `unread > 0` para incluir conversaciones
+        // que el usuario ya abrió pero no contestó (Wal lee sin responder a menudo).
+        const snip = (convo.snippet ?? '').trim()
+        const isInbound = snip.length > 0 && !/^(\[?tú\]?|tu|you)\s*:/i.test(snip)
+        const isSponsored = /^\s*(patrocinado|sponsored|promo)/i.test(snip)
+        const hasSubstance = snip.length > 30
+        // Fix 29-may-2026: fallback al thread_id ya guardado en DB si el scrape
+        // actual no lo trae (captureThreads skipea conversations que ya tienen
+        // thread_id). Sin esto, orphans históricos quedaban stuck pending para
+        // siempre porque convo.threadId=null en scrapes subsiguientes.
+        const effectiveThreadId = convo.threadId ?? existing?.linkedin_thread_id ?? null
+        if (effectiveThreadId && isInbound && !isSponsored && hasSubstance) {
+          try {
+            // Campaña activa de la cuenta para colgar el lead
+            const { data: camp } = await supabase
+              .from('campaigns')
+              .select('id')
+              .eq('linkedin_account_id', cmd.account_id)
+              .eq('is_active', true)
+              .limit(1)
+              .maybeSingle()
+            if (camp?.id) {
+              // Evitar duplicar si ya existe lead con ese thread (usa effectiveThreadId)
+              const { data: existingConv } = await supabase
+                .from('conversations')
+                .select('lead_id')
+                .eq('linkedin_thread_id', effectiveThreadId)
+                .maybeSingle()
+              if (!existingConv) {
+                const cleanName = convo.name.replace(/\s*·.*$/, '').trim()
+                // Fix 2026-05-29: leads.linkedin_url es NOT NULL. Si el orphan
+                // no tiene profile URL real (común: solo tiene messaging URL),
+                // usamos thread URL como placeholder. El FU/auto-reply usará
+                // el thread_id directo, no necesita perfil URL.
+                const fallbackUrl = convo.threadUrl
+                  ?? existing?.linkedin_profile_url
+                  ?? `https://www.linkedin.com/messaging/thread/${effectiveThreadId}/`
+                const { data: newLead, error: leadErr } = await supabase.from('leads').insert({
+                  campaign_id:  camp.id,
+                  full_name:    cleanName,
+                  linkedin_url: fallbackUrl,
+                  status:       'replied',
+                  replied_at:   new Date().toISOString(),
+                  source:      'inbound_orphan_promoted',
+                }).select('id').single()
+                if (leadErr) console.error(`[bridge] ❌ auto-promote lead INSERT failed for ${cleanName}: ${leadErr.message}`)
+                if (newLead?.id) {
+                  const { data: newConv } = await supabase.from('conversations').upsert({
+                    lead_id:             newLead.id,
+                    linkedin_account_id: cmd.account_id,
+                    linkedin_thread_id:  effectiveThreadId,
+                    status:              'active',
+                    last_message_text:   snip.replace(/^[^:]+:\s*/, '').slice(0, 500),
+                    last_message_at:     new Date().toISOString(),
+                  }, { onConflict: 'lead_id' }).select('id').single()
+                  if (newConv?.id) {
+                    await supabase.from('conversation_events').insert({
+                      conversation_id: newConv.id,
+                      event_type:      'reply_received',
+                      direction:       'inbound',
+                      content:         snip.replace(/^[^:]+:\s*/, '').slice(0, 4000),
+                      sent_at:         new Date().toISOString(),
+                      sent_via:        'linkedin_inbound',
+                    })
+                  }
+                  // Marcar orphan como promovido
+                  await supabase.from('orphan_conversations')
+                    .update({ status: 'lead_created', matched_lead_id: newLead.id })
+                    .match(orphanKey)
+                  console.log(`[bridge] ⬆️  Orphan "${cleanName}" promovido a lead replied (thread capturado) → auto-reply lo contestará`)
+                }
+              }
+            }
+          } catch (err) {
+            console.warn(`[bridge] orphan promote failed for "${convo.name}":`, err.message)
+          }
         }
       } catch (err) {
         console.warn(`[bridge] orphan upsert failed for "${convo.name}":`, err.message)
@@ -831,6 +1390,39 @@ async function pollAndDispatch() {
   const connectedAccountIds = Array.from(connections.keys())
   if (connectedAccountIds.length === 0) return
 
+  // v0.7.15 Fix A: respetar linkedin_accounts.extension_paused — el scheduler ya
+  // lo hacía vía checkCampaignActiveGates, pero el bridge despachaba TODO lo que
+  // estuviera en queue (incluyendo cmds creados antes de la pausa y cmds que
+  // bypass scheduler como check_inbox). Caso 2026-06-02: Josh paused desde
+  // ayer pero check_inbox seguía dispatching cada 15 min.
+  // v0.7.21 P1-4: además de extension_paused (boolean), respetar
+  // extension_paused_until (TIMESTAMPTZ futuro) — esto cubre el gap del banner
+  // warning (invite_limit/rate_limit) que sólo setea el cooldown sin pausar.
+  const { data: pausedRows } = await supabase
+    .from('linkedin_accounts')
+    .select('id, label, extension_paused, extension_paused_until, extension_paused_reason, inbox_paused')
+    .in('id', connectedAccountIds)
+  const pausedAccounts = new Set()
+  const nowMs = Date.now()
+  for (const row of pausedRows ?? []) {
+    if (row.extension_paused) { pausedAccounts.add(row.id); continue }
+    const untilMs = row.extension_paused_until ? new Date(row.extension_paused_until).getTime() : 0
+    if (untilMs > nowMs) {
+      pausedAccounts.add(row.id)
+      const remainMin = Math.round((untilMs - nowMs) / 60_000)
+      console.log(`[bridge] ⏸  ${row.label} paused_until ${remainMin}min (${row.extension_paused_reason ?? 'n/a'})`)
+    }
+  }
+  if (pausedAccounts.size > 0) {
+    const labels = [...pausedAccounts].map(id => connections.get(id)?.label ?? id.slice(0, 8))
+    console.log(`[bridge] 🛑 Cuentas paused (skip dispatch): ${labels.join(', ')}`)
+  }
+
+  // v0.7.13 stress test harness: si stress_test_lock está activo para una cuenta,
+  // solo despachamos commands con payload.is_stress_test=true para esa cuenta.
+  // Los demás (producción) esperan a que expire el lock.
+  const stressLockedAccount = await readStressTestLockBridge()
+
   // Sub-Fase 3.7: Serialización por cuenta para evitar tab collision.
   // Cada cuenta solo puede tener 1 comando NAVEGACIONAL en flight.
   // Si ya hay 'dispatched' para una cuenta, skipeamos esa cuenta este tick.
@@ -855,7 +1447,9 @@ async function pollAndDispatch() {
   }
 
   const availableAccounts = connectedAccountIds.filter(id =>
-    !busyAccounts.has(id) && !isAccountInNoWindowCooldown(id)
+    !busyAccounts.has(id)
+    && !isAccountInNoWindowCooldown(id)
+    && !pausedAccounts.has(id)  // v0.7.15 Fix A: paused = NO dispatch
   )
   if (availableAccounts.length === 0) return
 
@@ -879,6 +1473,10 @@ async function pollAndDispatch() {
   const dispatchedThisTick = new Set()
   for (const cmd of commands) {
     if (dispatchedThisTick.has(cmd.account_id)) continue
+    // v0.7.13 stress_test_lock: para la cuenta lockeada, solo cmds is_stress_test
+    if (stressLockedAccount && cmd.account_id === stressLockedAccount && !cmd.payload?.is_stress_test) {
+      continue
+    }
     const conn = connections.get(cmd.account_id)
     if (!conn || conn.ws.readyState !== 1 /* OPEN */) continue
 
@@ -928,14 +1526,88 @@ function pingAll() {
 }
 
 // ── Timeout cleanup: comandos vencidos → status='timeout' ──────────────────
+// v0.7.11 fix: stamp completed_at junto con el status flip. Antes quedaba NULL
+// y el lockout 24h del scheduler (.gte('completed_at', cutoff)) NUNCA matcheaba
+// (NULL >= X es false en Postgres) → re-dispatch cada 5min para leads en
+// timeout perpetuo. Ahora completed_at = NOW() en la misma transacción.
 
 async function cleanupExpired() {
-  const { error } = await supabase
+  const nowIso = new Date().toISOString()
+  // v0.7.26 BUG extension_did_not_respond fix B2: distinguir dos causas muy
+  // distintas que antes se mezclaban bajo 'extension_did_not_respond':
+  //   - status='pending' al expirar → NUNCA se dispatchó (cuenta paused/busy/
+  //     desconectada). NO es culpa de la extensión ni del lead. error='expired_in_queue'.
+  //   - status='dispatched' al expirar → SÍ llegó al SW pero no reportó resultado
+  //     (content.js navegó/murió, SW killed). error='extension_did_not_respond'.
+  // Esto da observabilidad real (61-88% de los did_not_respond eran queue-expiry)
+  // y permite que la lógica de lockout/fault NO penalice al lead por queue-expiry.
+  const { error: e1 } = await supabase
     .from('extension_commands')
-    .update({ status: 'timeout', error: 'extension_did_not_respond' })
-    .in('status', ['pending', 'dispatched'])
-    .lt('expires_at', new Date().toISOString())
-  if (error) console.error(`[bridge] Cleanup error: ${error.message}`)
+    .update({ status: 'timeout', error: 'expired_in_queue', completed_at: nowIso })
+    .eq('status', 'pending')
+    .lt('expires_at', nowIso)
+  if (e1) console.error(`[bridge] Cleanup error (pending): ${e1.message}`)
+
+  // Opción B taxonomía: el branch dispatched-expirado se parte según acked_at.
+  //   - acked_at NULL → content.js NUNCA confirmó recepción: SW killed / no
+  //     inyectado / WS caído entre dispatch y ejecución → error='content_unreachable'.
+  //     Es INFRA (no culpa del lead) — NO debe lockear al lead (como expired_in_queue).
+  //   - acked_at SET → content.js SÍ recibió pero murió mid-work (navegación reinject,
+  //     SW kill mid-ejecución) → error='content_died_mid_work'. Per-comando: SÍ cuenta
+  //     para lockout (loop pattern), el scheduler lo incluye en TIMEOUT_ERROR_CODES.
+  // v0.7.34 AUTO-RETRY content_unreachable: como content.js NUNCA recibió el comando
+  // (sin ack → nunca ejecutó → nunca envió), es 100% SEGURO re-despacharlo (cero
+  // riesgo de doble-envío, a diferencia de content_died_mid_work). Convierte "SW murió
+  // mid-comando → comando perdido en silencio" en "→ bridge lo re-despacha solo".
+  // Cap MAX_UNREACHABLE_RETRIES para evitar loops si el SW está crónicamente roto.
+  const MAX_UNREACHABLE_RETRIES = 2
+  const { data: unackedCmds, error: e2aSel } = await supabase
+    .from('extension_commands')
+    .select('id, account_id, action, payload, related_lead_id, micro_phase_log')
+    .eq('status', 'dispatched')
+    .is('acked_at', null)
+    .lt('expires_at', nowIso)
+  if (e2aSel) console.error(`[bridge] Cleanup select (unacked): ${e2aSel.message}`)
+  for (const cmd of (unackedCmds ?? [])) {
+    // SEGURIDAD: el ack es best-effort (se pierde si el WS estaba caído). Si content.js
+    // emitió checkpoints en micro_phase_log, SÍ corrió aunque el ack se perdiera →
+    // es content_died_mid_work (pudo haber enviado) → NUNCA re-despachar. Solo
+    // content.js-sin-actividad-alguna es content_unreachable (seguro re-despachar).
+    const ranSomething = Array.isArray(cmd.micro_phase_log) && cmd.micro_phase_log.length > 0
+    const errorCode = ranSomething ? 'content_died_mid_work' : 'content_unreachable'
+    const { error: mErr } = await supabase
+      .from('extension_commands')
+      .update({ status: 'timeout', error: errorCode, completed_at: nowIso })
+      .eq('id', cmd.id)
+    if (mErr) { console.error(`[bridge] mark ${errorCode} failed: ${mErr.message}`); continue }
+    if (ranSomething) continue  // corrió → no retry (riesgo doble-envío)
+
+    // content_unreachable real (cero actividad) → auto-retry seguro si bajo el cap.
+    const retryN = Number(cmd.payload?._unreachable_retry ?? 0)
+    if (retryN >= MAX_UNREACHABLE_RETRIES) {
+      console.log(`[bridge] content_unreachable retry cap (${retryN}) reached for ${cmd.action} ${cmd.id.slice(0,8)}`)
+      continue
+    }
+    const retryRow = {
+      account_id: cmd.account_id,
+      action: cmd.action,
+      payload: { ...(cmd.payload ?? {}), _unreachable_retry: retryN + 1, _retry_of: cmd.id },
+      status: 'pending',
+      expires_at: new Date(Date.now() + 6 * 60_000).toISOString(),
+    }
+    if (cmd.related_lead_id) retryRow.related_lead_id = cmd.related_lead_id
+    const { error: insErr } = await supabase.from('extension_commands').insert(retryRow)
+    if (insErr) console.error(`[bridge] content_unreachable auto-retry insert failed: ${insErr.message}`)
+    else console.log(`[bridge] content_unreachable → auto-retry ${retryN + 1}/${MAX_UNREACHABLE_RETRIES} ${cmd.action} (orig ${cmd.id.slice(0,8)})`)
+  }
+
+  const { error: e2b } = await supabase
+    .from('extension_commands')
+    .update({ status: 'timeout', error: 'content_died_mid_work', completed_at: nowIso })
+    .eq('status', 'dispatched')
+    .not('acked_at', 'is', null)
+    .lt('expires_at', nowIso)
+  if (e2b) console.error(`[bridge] Cleanup error (died_mid_work): ${e2b.message}`)
 }
 
 // ── Start ───────────────────────────────────────────────────────────────────

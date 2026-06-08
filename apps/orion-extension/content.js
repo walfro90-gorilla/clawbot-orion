@@ -197,36 +197,1159 @@ startOrionIndicator()
 // bridge lo reintente limpio cuando el primero termine.
 let _isExecuting = false
 let _executingSince = 0
+let _currentCommandId = null  // v0.6.46: para detectar re-dispatch del mismo cmd
+
+// v0.7.1: hard timeout DINÁMICO basado en msg.length (era 120s fijo, insuficiente
+// para mensajes >400 chars que humanType toma ~80-100s + 30s overhead = >120s).
+// Now: msg.length * 200ms + 60s base, min 60s, max 240s.
+const EXEC_HARD_TIMEOUT_MIN_MS = 90_000
+const EXEC_HARD_TIMEOUT_MAX_MS = 480_000  // 8 min para messages muy largos
+const EXEC_HARD_TIMEOUT_MS = 120_000  // fallback para acciones sin payload.message
+
+function calcHardTimeout(action, payload) {
+  if (action === 'send_followup' || action === 'send_invite') {
+    const msgLen = (payload?.message?.length ?? 0)
+    // v0.7.22 BUG-M: sin mensaje (Path A.1 no-note / send_followup vacío) → floor 90s.
+    if (!payload?.message) return EXEC_HARD_TIMEOUT_MIN_MS
+    // v0.7.22 BUG-M: CON mensaje, el modelo previo (400ms/char + 90s) subestimaba
+    // Path A.2 (con nota) y send_followup Path B en horas pesadas CDMX (10-11h, 18-19h).
+    // Realidad MEDIDA: ~1000ms/char (jitter v0.7.21 pct=0.70) + 60-100s navigate overhead.
+    // Caso Miguel (147 chars): exec real 189.8s vs budget viejo 148.8s → timeout.
+    // Nuevo modelo: 550ms/char + 120s base. Para 147 chars → 200.85s (margen 11s).
+    const dynamic = msgLen * 550 + 120_000
+    return Math.max(EXEC_HARD_TIMEOUT_MIN_MS, Math.min(EXEC_HARD_TIMEOUT_MAX_MS, dynamic))
+  }
+  // v0.7.19: check_inbox dinámico — captureThreads + maxCaptures dominan tiempo.
+  // v0.7.22 BUG-E: 7s/capture era muy ajustado (177s budget vs 164s real, margen 13s).
+  // Algunos captures gastan 8-10s (URL bounce + DOM hydration React). Subir a 9s/capture.
+  if (action === 'check_inbox') {
+    const captures = payload?.captureThreads ? (payload?.maxCaptures ?? 12) : 0
+    const limit = payload?.limit ?? 20
+    const dynamic = 60_000 + (captures * 9_000) + (Math.ceil(limit / 10) * 4_000)
+    return Math.max(60_000, Math.min(300_000, dynamic))
+  }
+  return 120_000
+}
+
+// v0.7.1: bypass del modal nativo "Leave site?" del navegador cuando Orion está
+// navegando intencionalmente. LinkedIn registra beforeunload handlers que disparan
+// el modal cuando hay texto sin guardar en el editor. Cuando el SW navega (via
+// chrome.tabs.update), Chrome lanza el modal y bloquea la navegación. Setear
+// __orionExpectedNav antes de cualquier nav intencional permite que el unload
+// proceda silencioso.
+;(function setupBeforeUnloadBypass() {
+  const orig = window.addEventListener
+  window.addEventListener = function(type, listener, options) {
+    if (type === 'beforeunload' && typeof listener === 'function') {
+      const wrapped = function(e) {
+        if (window.__orionExpectedNav) {
+          try { e.returnValue = '' } catch {}
+          try { e.preventDefault?.() } catch {}
+          return undefined
+        }
+        return listener.call(this, e)
+      }
+      return orig.call(this, type, wrapped, options)
+    }
+    return orig.call(this, type, listener, options)
+  }
+})()
+
+// ── v0.7.9 LinkedIn Discard-Modal Auto-Canceller ──────────────────────────
+// El modal NATIVO de LinkedIn (NO el de Chrome) que aparece cuando hay draft
+// + intento de route-change: "¿Salir? ¿Seguro que quieres eliminar este
+// mensaje?" con botones Cancelar / Descartar (focus default en Descartar).
+// Si el Enter del flow o el timeout natural lo consume → draft perdido + send
+// nunca se ejecuta. Solución: MutationObserver permanente que detecta el
+// modal por TEXTO (no por selector — LinkedIn cambia clases con frecuencia)
+// y clickea "Cancelar" automáticamente (NUNCA "Descartar"). Solo activo si
+// Orion espera navegación O está ejecutando comando (evita falsos positivos
+// en discard modals legítimos del usuario humano).
+const ORION_DISCARD_REGEX = /(descartar|discard).*(mensaje|message|draft)|salir.*mensaje|leave.*message|delete.*draft|eliminar.*mensaje/i
+const ORION_CANCEL_REGEX = /^(cancelar|cancel|seguir editando|keep editing|continue editing)$/i
+
+function orionDetectDiscardModal() {
+  // Solo actuamos si Orion está en medio de un comando o esperando nav.
+  if (!window.__orionExpectedNav && !window._orionIsExecuting) return false
+  const dialogs = document.querySelectorAll('[role="dialog"], .artdeco-modal')
+  for (const dlg of dialogs) {
+    if (dlg.offsetParent === null) continue
+    const txt = (dlg.textContent || '').slice(0, 600)
+    if (!ORION_DISCARD_REGEX.test(txt)) continue
+    // Encontrado: buscar el botón "Cancelar" / "Seguir editando" — NUNCA Descartar.
+    const btns = Array.from(dlg.querySelectorAll('button, [role="button"]'))
+    const cancelBtn = btns.find(b => {
+      if (b.offsetParent === null) return false
+      const t = (b.textContent || '').trim()
+      const aria = (b.getAttribute('aria-label') || '').trim()
+      return ORION_CANCEL_REGEX.test(t) || ORION_CANCEL_REGEX.test(aria)
+    })
+    if (cancelBtn) {
+      console.warn('[Orion v0.7.9] ⚠️  LinkedIn discard-modal detectado — auto-click Cancelar para preservar draft')
+      try { cancelBtn.click() } catch (e) { console.warn('[Orion v0.7.9] click Cancelar falló:', e?.message) }
+      // Telemetría: trigger Visual Learning tracker (3× en 1h → captura)
+      try { vlOnPhaseTimeout && vlOnPhaseTimeout('linkedin_discard_modal_intercepted') } catch {}
+      return true
+    } else {
+      // No hay Cancelar visible — al menos NO dejar que Enter caiga en Descartar.
+      // Cerrar via ESC (LinkedIn lo trata como Cancel en su artdeco-modal).
+      console.warn('[Orion v0.7.9] ⚠️  discard-modal sin botón Cancelar — ESC fallback')
+      try { document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })) } catch {}
+      try { vlOnPhaseTimeout && vlOnPhaseTimeout('linkedin_discard_modal_no_cancel_btn') } catch {}
+      return true
+    }
+  }
+  return false
+}
+
+;(function setupDiscardModalObserver() {
+  if (!document.body) {
+    // body aún no listo (run_at=document_idle suele estar OK pero defensive)
+    return setTimeout(setupDiscardModalObserver, 200)
+  }
+  const observer = new MutationObserver((mutations) => {
+    // Fast-path: solo correr si alguna mutación añadió un nodo (no por text-changes)
+    for (const m of mutations) {
+      if (m.addedNodes && m.addedNodes.length > 0) {
+        orionDetectDiscardModal()
+        return
+      }
+    }
+  })
+  observer.observe(document.body, { childList: true, subtree: true })
+  // Poll defensivo cada 1s — el observer puede perder modals que se montan
+  // ANTES del observe (race con React portal). Cost: ~queryAll de 1-2 dialogs.
+  setInterval(() => { try { orionDetectDiscardModal() } catch {} }, 1000)
+  console.log('[Orion v0.7.9] Discard-modal observer instalado')
+})()
+
+// ── v0.7.9 SPA Route-Change Guard ──────────────────────────────────────────
+// Wrap de history.pushState/replaceState que ABORTA el route-change si:
+//   (a) Orion está ejecutando un comando (_orionIsExecuting === true), Y
+//   (b) hay un editor contenteditable visible con texto (draft activo), Y
+//   (c) la fase actual NO es 'send_clicked'/'send_confirmed' (post-send la
+//       navegación a /thread/<id> es LEGÍTIMA y no debemos bloquearla).
+// Esto previene que el propio LinkedIn dispare el discard-modal y elimina
+// el disparador raíz del bug que vio Marco.
+;(function setupSpaRouteGuard() {
+  const origPush = history.pushState
+  const origReplace = history.replaceState
+  // v0.7.21 P2-6: removidos 'navigating' y 'hydrating' (referencias muertas — nunca emitidas).
+  const BLOCKED_PHASES = new Set(['dispatched', 'thread_opened', 'typing', 'typed'])
+
+  function hasActiveDraft() {
+    try {
+      const eds = document.querySelectorAll(
+        '.msg-form__contenteditable, div[contenteditable="true"][role="textbox"], div.msg-form__msg-content-container [contenteditable="true"]'
+      )
+      for (const ed of eds) {
+        if (ed.offsetParent === null) continue
+        if ((ed.textContent || '').trim().length > 3) return true
+      }
+    } catch {}
+    return false
+  }
+
+  function shouldBlock(targetUrl) {
+    if (!window._orionIsExecuting) return false
+    if (window.__orionAllowSpaNav) return false  // escape hatch para nav intencional
+    const phase = window._orionCurrentPhase || ''
+    if (!BLOCKED_PHASES.has(phase)) return false
+    if (!hasActiveDraft()) return false
+    console.warn(`[Orion v0.7.9] BLOCKED pushState→${(targetUrl||'').slice(0,80)} (phase=${phase}, draft activo)`)
+    try { vlOnPhaseTimeout && vlOnPhaseTimeout(`spa_nav_blocked_phase_${phase}`) } catch {}
+    return true
+  }
+
+  history.pushState = function(state, title, url) {
+    if (shouldBlock(url)) return undefined
+    return origPush.apply(this, arguments)
+  }
+  history.replaceState = function(state, title, url) {
+    if (shouldBlock(url)) return undefined
+    return origReplace.apply(this, arguments)
+  }
+  console.log('[Orion v0.7.9] SPA route-change guard instalado')
+})()
+
+// ── v0.7.3 Runtime Config (auto-learning-driven) ──────────────────────────
+// Fetched once per content.js init desde /api/runtime-config + cached en
+// chrome.storage.local. Permite que phase-analyzer auto-aplique cambios
+// (timeouts más generosos, send method reorder, etc.) sin necesidad de
+// recompilar/redeploy. Re-fetch cada 30min via SW alarm.
+let _runtimeConfig = {
+  phase_timeouts: {
+    editor_focused: 3000,
+    typing_complete: 4000,
+    send_button_enabled: 4000,
+    editor_cleared_via_humanClick: 4500,
+    editor_cleared_via_ctrl_enter: 4500,
+    editor_cleared_via_plain_enter: 4500,
+    editor_cleared_via_form_submit: 4500,
+    message_in_dom: 12000,
+  },
+  send_method_order: ['humanClick','ctrl_enter','plain_enter','form_submit'],
+  page_errors_extra: [],
+}
+
+async function loadRuntimeConfig() {
+  try {
+    // Primero: cache local
+    const cached = await chrome.storage.local.get('_runtime_config')
+    if (cached?._runtime_config?.config) {
+      _runtimeConfig = { ..._runtimeConfig, ...cached._runtime_config.config }
+      console.log(`[Orion content] runtime_config cargado de cache (${Object.keys(_runtimeConfig).length} keys)`)
+    }
+    // Segundo: fetch fresh del server (no blocking — usa cache si falla)
+    const stored = await chrome.storage.local.get(['orion_url'])
+    if (stored?.orion_url) {
+      const r = await fetch(`${stored.orion_url}/api/runtime-config`, { cache: 'no-store' }).catch(() => null)
+      if (r?.ok) {
+        const j = await r.json().catch(() => null)
+        if (j?.config) {
+          _runtimeConfig = { ..._runtimeConfig, ...j.config }
+          await chrome.storage.local.set({ _runtime_config: j })
+          console.log(`[Orion content] runtime_config refrescado del server`)
+        }
+      }
+      // v0.7.4: fetch learned_selectors
+      await loadLearnedSelectors(stored.orion_url)
+      // v0.7.12 P0-1 heartbeat: POST snapshot del config actual + account_id + version
+      // para que phase-analyzer pueda detectar drift (P2-2) y para verificar T13.
+      try {
+        const stored2 = await chrome.storage.local.get(['account_id', 'extension_api_key'])
+        if (stored2?.account_id) {
+          await fetch(`${stored.orion_url}/api/runtime-config/heartbeat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              account_id: stored2.account_id,
+              ext_version: chrome.runtime.getManifest().version,
+              phase_timeouts: _runtimeConfig.phase_timeouts ?? null,
+              send_method_order: _runtimeConfig.send_method_order ?? null,
+              page_errors_extra: _runtimeConfig.page_errors_extra ?? null,
+            }),
+          }).catch(() => null)
+        }
+      } catch {}
+    }
+  } catch (err) {
+    console.warn('[Orion content] loadRuntimeConfig falló:', err?.message)
+  }
+}
+loadRuntimeConfig()  // fire-and-forget
+
+// v0.7.12 P0-1: periodic refresh cada 5 min — sin esto, tunes de phase-analyzer
+// (L3 timeouts, L4 send order, L5 page errors) nunca llegan a la extensión.
+// Causa raíz del 3% success rate v0.7.7-v0.7.11.
+setInterval(loadRuntimeConfig, 5 * 60 * 1000)
+
+// v0.7.12 P0-1: listener para refresh forzado desde SW alarm (background.js)
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.type === 'orion_runtime_config_refresh') {
+    loadRuntimeConfig().then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }))
+    return true  // async response
+  }
+})
+
+// v0.7.4: cache de learned_selectors agrupados por label
+let _learnedSelectors = {}  // { label: [{ id, selector, alternatives, priority }, ...] }
+
+async function loadLearnedSelectors(orionUrl) {
+  try {
+    const r = await fetch(`${orionUrl}/api/visual-learning/learned-selectors`, { cache: 'no-store' })
+      .catch(() => null)
+    if (!r?.ok) return
+    const j = await r.json().catch(() => null)
+    if (j?.byLabel) {
+      _learnedSelectors = j.byLabel
+      const total = Object.values(_learnedSelectors).reduce((s, arr) => s + arr.length, 0)
+      if (total > 0) console.log(`[Orion content] learned_selectors cargados: ${total} en ${Object.keys(_learnedSelectors).length} labels`)
+    }
+  } catch {}
+}
+
+// Devuelve el array de selectores aprendidos para un label, ordenado por priority desc.
+// content.js los PREPENDEA antes de selectores hardcoded.
+function getLearnedSelectors(label, phaseName = null) {
+  const arr = _learnedSelectors[label] ?? []
+  let filtered = arr.filter(ls => !ls.phase_name || ls.phase_name === phaseName)
+  return filtered.map(ls => ({
+    id: ls.id,
+    selector: ls.selector,
+    alternatives: ls.selector_alternatives ?? [],
+  }))
+}
+
+// Reporta hit/miss a server para tracking de health del learned_selector
+function reportLearnedSelectorStat(selectorId, hit) {
+  if (!selectorId) return
+  chrome.storage.local.get(['orion_url']).then(stored => {
+    if (!stored?.orion_url) return
+    fetch(`${stored.orion_url}/api/visual-learning/learned-selectors`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ selectorId, hit }),
+    }).catch(() => {})
+  }).catch(() => {})
+}
+
+// Helper para buscar elemento con selectors APRENDIDOS primero, luego defaults.
+// Si un learned matches → reporta hit. Si todos fallan → reporta miss para cada
+// learned intentado.
+function findElementSmart(label, defaultSelectors = [], phaseName = null) {
+  const learned = getLearnedSelectors(label, phaseName)
+  // 1. Intentar learned (todos)
+  for (const ls of learned) {
+    try {
+      const el = document.querySelector(ls.selector)
+      if (el) {
+        reportLearnedSelectorStat(ls.id, true)
+        return el
+      }
+      // Probar alternativas
+      for (const alt of ls.alternatives) {
+        try {
+          const el2 = document.querySelector(alt)
+          if (el2) {
+            reportLearnedSelectorStat(ls.id, true)
+            return el2
+          }
+        } catch {}
+      }
+      reportLearnedSelectorStat(ls.id, false)
+    } catch {}
+  }
+  // 2. Fallback: defaults hardcoded
+  for (const sel of defaultSelectors) {
+    try {
+      const el = document.querySelector(sel)
+      if (el) return el
+    } catch {}
+  }
+  return null
+}
+
+function getPhaseTimeout(phaseName, defaultMs) {
+  return _runtimeConfig.phase_timeouts?.[phaseName] ?? defaultMs
+}
+
+function getSendMethodOrder() {
+  return _runtimeConfig.send_method_order ?? ['humanClick','ctrl_enter','plain_enter','form_submit']
+}
+
+// ── v0.7.6 NOT-MESSAGEABLE DETECTOR ────────────────────────────────────────
+// Detecta cuando una conversación NO permite enviar mensajes nuevos. Casos:
+//   1. Lead es 2°/3° grado y NO ha contestado → LinkedIn esconde editor
+//   2. "No has recibido respuesta aún" badge + no editor → InMail only
+//   3. Lead bloqueó comunicación o desactivó cuenta
+//   4. Sponsored/Patrocinado thread (no es real lead)
+//
+// Devuelve { detected: bool, reason: string, signals: object } para reportar
+// al bridge sin reintentar.
+function detectNotMessageable() {
+  const signals = {}
+  let detected = false
+  let reasons = []
+
+  // Signal 1: degree badge "2°" o "3°" en header (LinkedIn marca explícitamente)
+  // Busca elementos pequeños cerca del header que digan "2°" o "3°"
+  try {
+    const headerArea = document.querySelector(
+      '.msg-thread__title-container, .msg-overlay-conversation-bubble__title-bar, [class*="msg-thread"] header, .msg-conversations-container__title-row'
+    ) || document.body
+    const degreeTexts = Array.from(headerArea.querySelectorAll('span, div, a'))
+      .slice(0, 50)
+      .map(el => (el.textContent ?? '').trim())
+      .filter(t => t.length > 0 && t.length < 15)
+    const has2nd = degreeTexts.some(t => /^2[°º]$/.test(t) || /\b2(nd|do|°|º)\b/i.test(t))
+    const has3rd = degreeTexts.some(t => /^3[°º]$/.test(t) || /\b3(rd|er|°|º)\b/i.test(t))
+    if (has2nd) { signals.degree = '2nd'; reasons.push('lead_is_2nd_degree'); detected = true }
+    if (has3rd) { signals.degree = '3rd'; reasons.push('lead_is_3rd_degree'); detected = true }
+  } catch {}
+
+  // Signal 2: "No has recibido respuesta aún" / "Awaiting reply" badge visible
+  try {
+    const bodyText = document.body.innerText.toLowerCase()
+    const awaitingPhrases = [
+      'no has recibido respuesta',
+      'awaiting reply',
+      'awaiting their reply',
+      'pending response',
+      'aún no ha contestado',
+    ]
+    const awaitingFound = awaitingPhrases.find(p => bodyText.includes(p))
+    if (awaitingFound) {
+      signals.awaiting_reply_badge = awaitingFound
+      reasons.push('awaiting_reply_badge_present')
+      // No marcamos detected aquí solo — solo si COMBINADO con no-editor
+    }
+  } catch {}
+
+  // Signal 3: InMail button visible (LinkedIn requiere créditos para mensaje 2°)
+  try {
+    const inmailButtons = document.querySelectorAll(
+      'button[aria-label*="InMail" i], a[aria-label*="InMail" i], button[class*="inmail"], [class*="inmail-cta"]'
+    )
+    const inmailVisible = Array.from(inmailButtons).find(b => b.offsetParent !== null)
+    if (inmailVisible) {
+      signals.inmail_button = inmailVisible.tagName + ':' + (inmailVisible.className || '').slice(0, 50)
+      reasons.push('inmail_required')
+      detected = true
+    }
+    // InMail "créditos disponibles" texto típico del compose 2nd-degree
+    const inmailHintText = ['de \\d+ créditos', 'inmail credits', 'créditos disponibles']
+    for (const pat of inmailHintText) {
+      if (new RegExp(pat, 'i').test(document.body.innerText)) {
+        signals.inmail_hint = pat
+        reasons.push('inmail_credits_hint')
+        detected = true
+        break
+      }
+    }
+  } catch {}
+
+  // Signal 4: Editor NO presente Y tampoco hay textarea de typing
+  // Combinado con awaiting_reply_badge = LinkedIn cerró el thread
+  try {
+    const editorPresent = !!document.querySelector(
+      '.msg-form__contenteditable, div[contenteditable="true"][role="textbox"], textarea[name*="message" i]'
+    )
+    signals.editor_present = editorPresent
+    if (!editorPresent && signals.awaiting_reply_badge) {
+      reasons.push('no_editor_with_awaiting_badge')
+      detected = true
+    }
+  } catch {}
+
+  // Signal 5: Thread es "Patrocinado" / Sponsored
+  try {
+    const sponsoredPhrases = ['patrocinado', 'promoted', 'sponsored']
+    const titleEl = document.querySelector('.msg-thread__title-container, .msg-overlay-conversation-bubble__title-bar')
+    const titleText = (titleEl?.textContent ?? '').toLowerCase()
+    if (sponsoredPhrases.some(p => titleText.includes(p))) {
+      signals.sponsored = true
+      reasons.push('sponsored_thread_not_real_lead')
+      detected = true
+    }
+  } catch {}
+
+  const reason = reasons.length > 0 ? reasons.join('+') : null
+  return { detected, reason, signals }
+}
+
+// ── v0.7.8 AWAITING-RESPONSE LOCK DETECTOR ────────────────────────────────
+// Caso: lead CONECTADO (1er grado) al que ya enviamos FU1/FU2/FU3 y NO ha
+// respondido. LinkedIn aplica una "ban window" que mantiene el composer
+// presente pero deshabilitado (aria-disabled), y muestra un banner
+// "No has recibido respuesta aún" / "You haven't received a reply yet".
+// DIFERENTE de detectNotMessageable() (que detecta 2°/3°/InMail → dead).
+// Aquí el lead está OK, solo hay que esperar a que conteste; el bridge
+// marca status='awaiting_response' sin tocar fu_count ni reintentar.
+async function detectAwaitingResponseLock(editor) {
+  const signals = {}
+  try {
+    // Signal A: banner textual (es / en)
+    const bodyText = (document.body.innerText || '').toLowerCase()
+    const phrases = [
+      'no has recibido respuesta aún',
+      'no has recibido respuesta aun',
+      "you haven't received a reply yet",
+      'you have not received a reply yet',
+      'awaiting their reply',
+      'awaiting reply',
+    ]
+    const phraseFound = phrases.find(p => bodyText.includes(p))
+    if (phraseFound) signals.banner_phrase = phraseFound
+
+    // Signal B: composer presente pero aria-disabled="true"
+    let composerDisabled = false
+    if (editor) {
+      const ariaDisabled = editor.getAttribute('aria-disabled')
+      const ceAttr = editor.getAttribute('contenteditable')
+      if (ariaDisabled === 'true' || ceAttr === 'false') composerDisabled = true
+      // Algunos layouts envuelven el editor en un form deshabilitado
+      const formAncestor = editor.closest('form, .msg-form, [class*="msg-form"]')
+      if (formAncestor) {
+        const formDisabled = formAncestor.getAttribute('aria-disabled') === 'true' ||
+                             formAncestor.classList.toString().toLowerCase().includes('disabled')
+        if (formDisabled) composerDisabled = true
+      }
+      signals.composer_aria_disabled = ariaDisabled
+      signals.composer_contenteditable = ceAttr
+    }
+
+    // Signal C: send button visible y disabled (best-effort, sin escribir aún)
+    let sendBtnDisabled = false
+    try {
+      const sendBtns = Array.from(document.querySelectorAll(
+        'button[class*="msg-form__send-button"], button[type="submit"][class*="msg-form"]'
+      ))
+      const visibleSend = sendBtns.find(b => b.offsetParent !== null)
+      if (visibleSend) {
+        const dis = visibleSend.disabled === true ||
+                    visibleSend.getAttribute('aria-disabled') === 'true' ||
+                    visibleSend.getAttribute('disabled') !== null
+        if (dis) sendBtnDisabled = true
+        signals.send_btn_state = dis ? 'disabled' : 'enabled'
+      }
+    } catch {}
+
+    // Veredicto: banner + (composer-disabled O send-btn-disabled) = lock confirmado.
+    // Requerimos AMBAS condiciones (banner + algún disabled) para minimizar
+    // falsos positivos sobre threads que solo muestran el badge informativo.
+    if (signals.banner_phrase && (composerDisabled || sendBtnDisabled)) {
+      // Re-check tras 600ms — algunos layouts de LinkedIn habilitan el editor
+      // un instante después de renderizar el banner.
+      await sleep(600)
+      let stillLocked = false
+      try {
+        const ad = editor ? editor.getAttribute('aria-disabled') : null
+        const ce = editor ? editor.getAttribute('contenteditable') : null
+        const stillComposerDis = ad === 'true' || ce === 'false'
+        const sendBtns2 = Array.from(document.querySelectorAll(
+          'button[class*="msg-form__send-button"], button[type="submit"][class*="msg-form"]'
+        ))
+        const vs = sendBtns2.find(b => b.offsetParent !== null)
+        const stillSendDis = vs && (vs.disabled === true || vs.getAttribute('aria-disabled') === 'true')
+        stillLocked = stillComposerDis || stillSendDis
+      } catch {}
+      if (stillLocked) {
+        const reason = composerDisabled ? 'banner_plus_composer_disabled'
+                       : sendBtnDisabled ? 'banner_plus_send_btn_disabled'
+                       : 'banner_plus_lock'
+        return { locked: true, reason, signals }
+      }
+    }
+  } catch (e) {
+    signals.detector_error = String(e?.message || e).slice(0, 120)
+  }
+  return { locked: false, reason: null, signals }
+}
+
+// ── v0.7.4 Visual Selector Learning ────────────────────────────────────────
+// Cuando una phase falla N veces en M minutos, capturamos screenshot + DOM
+// snapshot del viewport actual + lo subimos al bridge para crear un ticket.
+// Admin lo abre, hace pins, y aprendemos selectores nuevos.
+
+const VL_FAILURE_TRACKER_KEY = '_vl_failures'
+const VL_DEFAULT_THRESHOLD = 3
+const VL_DEFAULT_WINDOW_MIN = 60
+
+// Tracker de fails per phase en storage.session (survives SW restart)
+async function vlTrackFailure(phaseName, accountInfo) {
+  try {
+    const stored = await chrome.storage.session?.get?.(VL_FAILURE_TRACKER_KEY)
+    const tracker = stored?.[VL_FAILURE_TRACKER_KEY] ?? {}
+    const now = Date.now()
+    const windowMs = (_runtimeConfig?.visual_learning_config?.auto_capture_window_minutes ?? VL_DEFAULT_WINDOW_MIN) * 60_000
+    const threshold = _runtimeConfig?.visual_learning_config?.auto_capture_threshold ?? VL_DEFAULT_THRESHOLD
+    const list = (tracker[phaseName] ?? []).filter(ts => now - ts < windowMs)
+    list.push(now)
+    tracker[phaseName] = list.slice(-20)
+    await chrome.storage.session?.set?.({ [VL_FAILURE_TRACKER_KEY]: tracker })
+    if (list.length >= threshold) {
+      console.log(`[Orion VL] phase "${phaseName}" failed ${list.length}× en ${Math.round(windowMs/60000)}min → triggering capture`)
+      await vlTriggerCapture(phaseName, 'auto_threshold', accountInfo)
+      // Clear tracker para no spamear
+      tracker[phaseName] = []
+      await chrome.storage.session?.set?.({ [VL_FAILURE_TRACKER_KEY]: tracker })
+    }
+  } catch (err) {
+    console.warn('[Orion VL] vlTrackFailure error:', err?.message)
+  }
+}
+
+// Mapeo phase → elemento de referencia a scrollear antes de capturar
+const VL_REFERENCE_SELECTORS = {
+  editor_focused:        '.msg-form__contenteditable, .msg-form, [class*="msg-form"]',
+  typing_complete:       '.msg-form__contenteditable, .msg-form',
+  send_button_enabled:   '.msg-form__send-button, button[class*="send"], .msg-form',
+  editor_cleared_via_humanClick:   '.msg-form__send-button, .msg-form',
+  editor_cleared_via_ctrl_enter:   '.msg-form__send-button, .msg-form',
+  editor_cleared_via_plain_enter:  '.msg-form__send-button, .msg-form',
+  editor_cleared_via_form_submit:  '.msg-form__send-button, .msg-form',
+  message_in_dom:        '.msg-s-message-list, [class*="msg-s-message-list"]',
+  thread_visible_in_list: '.msg-conversations-container__conversations-list, ul[class*="conversations-list"]',
+  list_rendered:          '.msg-conversations-container__conversations-list',
+  thread_opened:          '.msg-s-message-list, .msg-form',
+}
+
+// Genera un selector CSS "estable" de un elemento (preferimos aria-label, role,
+// data-*, class names estables sobre hash class names random).
+function vlGenerateStableSelector(el) {
+  if (!el || el.nodeType !== 1) return null
+  const candidates = []
+  const tag = el.tagName.toLowerCase()
+
+  // 1. ID estable (no hash)
+  if (el.id && !/^[a-z0-9]{8,}$/.test(el.id) && !el.id.startsWith('ember')) {
+    candidates.push({ sel: `${tag}#${CSS.escape(el.id)}`, score: 0.95 })
+  }
+
+  // 2. aria-label
+  const aria = el.getAttribute('aria-label')
+  if (aria && aria.length > 1 && aria.length < 50) {
+    candidates.push({ sel: `${tag}[aria-label="${aria.replace(/"/g,'\\"')}" i]`, score: 0.90 })
+  }
+
+  // 3. data-* atributos
+  for (const attr of el.attributes) {
+    if (attr.name.startsWith('data-') && attr.value && attr.value.length < 50 &&
+        !/^[a-z0-9]{20,}$/.test(attr.value)) {
+      candidates.push({ sel: `${tag}[${attr.name}="${attr.value}"]`, score: 0.85 })
+    }
+  }
+
+  // 4. role + class estable
+  const role = el.getAttribute('role')
+  const classes = (el.className?.toString() ?? '').split(/\s+/).filter(c =>
+    c.length > 3 && c.length < 50 &&
+    !/^[a-z0-9]{10,}$/.test(c) &&         // no hash
+    !c.startsWith('ember') &&
+    (c.includes('-') || c.includes('_'))  // tiene separadores
+  )
+  if (role && classes.length > 0) {
+    candidates.push({ sel: `${tag}[role="${role}"].${classes[0]}`, score: 0.80 })
+  } else if (role) {
+    candidates.push({ sel: `${tag}[role="${role}"]`, score: 0.70 })
+  }
+
+  // 5. Class names estables
+  if (classes.length > 0) {
+    const topClass = classes.find(c => c.includes('msg-') || c.includes('artdeco-')) ?? classes[0]
+    candidates.push({ sel: `${tag}.${topClass}`, score: 0.65 })
+    if (classes.length >= 2) {
+      candidates.push({ sel: `${tag}.${classes[0]}.${classes[1]}`, score: 0.70 })
+    }
+  }
+
+  // 6. contenteditable= como discriminador
+  if (el.getAttribute('contenteditable') === 'true') {
+    const ariaPart = aria ? `[aria-label="${aria.replace(/"/g,'\\"')}" i]` : ''
+    candidates.push({ sel: `${tag}[contenteditable="true"]${ariaPart}`, score: 0.75 })
+  }
+
+  candidates.sort((a, b) => b.score - a.score)
+  return {
+    primary: candidates[0]?.sel ?? null,
+    alternatives: candidates.slice(1, 4).map(c => c.sel),
+    confidence: candidates[0]?.score ?? 0,
+  }
+}
+
+// Serializa los elementos visibles del viewport en JSON. Incluye:
+// - tagName, attributes relevantes, rect (x,y,w,h), textPreview, depth
+// Usado para resolver pin(x,y) → element posteriormente.
+function vlCaptureDOMSnapshot(maxElements = 500) {
+  const snapshot = []
+  const seen = new WeakSet()
+  // Walk árbol del body
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT)
+  let node = walker.currentNode
+  let depth = 0
+  while (node && snapshot.length < maxElements) {
+    const el = node
+    if (!seen.has(el)) {
+      seen.add(el)
+      try {
+        const rect = el.getBoundingClientRect()
+        if (rect.width > 8 && rect.height > 8 &&
+            rect.bottom > 0 && rect.top < window.innerHeight &&
+            rect.right > 0 && rect.left < window.innerWidth) {
+          const attrs = {}
+          for (const a of el.attributes) {
+            if (a.name === 'id' || a.name === 'role' ||
+                a.name.startsWith('aria-') || a.name.startsWith('data-')) {
+              attrs[a.name] = a.value.slice(0, 80)
+            }
+          }
+          snapshot.push({
+            tag: el.tagName.toLowerCase(),
+            cls: (el.className?.toString?.() ?? '').slice(0, 200),
+            attrs,
+            rect: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) },
+            textPreview: (el.textContent ?? '').slice(0, 60).replace(/\s+/g, ' ').trim(),
+            editable: el.getAttribute?.('contenteditable') === 'true',
+            depth,
+          })
+        }
+      } catch {}
+    }
+    node = walker.nextNode()
+  }
+  return snapshot
+}
+
+async function vlTriggerCapture(phaseName, source, accountInfo) {
+  try {
+    // 1. Scroll al elemento de referencia
+    const refSel = VL_REFERENCE_SELECTORS[phaseName]
+    if (refSel) {
+      const ref = document.querySelector(refSel)
+      if (ref) {
+        ref.scrollIntoView({ behavior: 'instant', block: 'center' })
+        await sleep(600)  // dejar React re-render + paint
+      }
+    }
+    // 2. DOM snapshot
+    const domSnapshot = vlCaptureDOMSnapshot(500)
+    // 3. Enviar al SW para que tome screenshot
+    chrome.runtime.sendMessage({
+      type: 'orion_visual_capture',
+      phaseName,
+      source,
+      commandId: _currentCommandId,
+      url: location.href,
+      viewport: { width: window.innerWidth, height: window.innerHeight, scrollY: window.scrollY },
+      domSnapshot,
+      capturedAt: new Date().toISOString(),
+    }).catch(err => console.warn('[Orion VL] sendMessage capture failed:', err?.message))
+    console.log(`[Orion VL] capture triggered for phase "${phaseName}" (${domSnapshot.length} DOM elements, source=${source})`)
+  } catch (err) {
+    console.warn('[Orion VL] vlTriggerCapture error:', err?.message)
+  }
+}
+
+// Hook al MicroPhaseRunner — cuando una phase reporta 'timeout', tracking dispara
+// async setTimeout para no bloquear el flow del runner.
+function vlOnPhaseTimeout(phaseName) {
+  // Fire-and-forget
+  vlTrackFailure(phaseName).catch(() => {})
+}
+
+// ── FSM v0.7.0 ────────────────────────────────────────────────────────────────
+// Phase state machine. content.js es la única fuente de verdad del estado del
+// cmd. El SW DEBE consultar phase antes de navegar/dispatchear.
+//
+// Transitions válidas:
+//   idle → dispatched → navigating → hydrating → thread_opened → typed
+//        → send_clicked → send_confirmed → done
+//   (cualquier phase puede ir a 'error')
+//
+// v0.7.21 P2-6: removidos 'navigating' y 'hydrating' (nunca emitidos por setPhase).
+// "Active" phases (SW NO debe navegar): dispatched, thread_opened, typing, typed, send_clicked.
+// "Safe" phases (SW puede navegar): idle, send_confirmed, done, error.
+const FSM_ACTIVE_PHASES = new Set([
+  'dispatched', 'thread_opened', 'typing', 'typed', 'send_clicked'
+])
+const FSM_SAFE_PHASES = new Set(['idle', 'send_confirmed', 'done', 'error'])
+const FSM_STORAGE_KEY = '_phase_fsm'
+
+async function setPhase(state, extra = {}) {
+  const ts = Date.now()
+  const phase = {
+    state,
+    commandId: _currentCommandId,
+    transitionedAt: ts,
+    elapsed: ts - (_executingSince || ts),
+    ...extra,
+  }
+  // v0.7.9: expose to window para que SPA route-guard + discard-modal observer
+  // (instalados al init, ANTES del listener) puedan leer el estado vivo.
+  try { window._orionCurrentPhase = state } catch {}
+  console.log(`[Orion FSM] → ${state} (cmd ${_currentCommandId?.slice(0,8) ?? '?'}, ${extra.note ?? ''})`)
+  try {
+    await chrome.storage.session?.set?.({ [FSM_STORAGE_KEY]: phase })
+  } catch (err) {
+    console.warn(`[Orion FSM] storage set failed:`, err?.message)
+  }
+  // También notificamos al SW via runtime para que pueda logear / forward a bridge
+  try {
+    chrome.runtime.sendMessage({
+      type: 'orion_phase_update',
+      commandId: _currentCommandId,
+      phase: state,
+      ts,
+      extra,
+    }).catch(() => {})
+  } catch {}
+}
+
+async function clearPhase() {
+  try { await chrome.storage.session?.remove?.(FSM_STORAGE_KEY) } catch {}
+  try { window._orionCurrentPhase = 'idle' } catch {}
+}
+
+// ── v0.7.2 MICRO-PHASE ENGINE ───────────────────────────────────────────────
+// Cada paso del flow es un CHECKPOINT que se confirma con evidencia DOM observable
+// (NO con timers). Pattern: runner.runPhase(name, evidenceFn, options) polea hasta
+// que evidenceFn retorne truthy, o falla con timeout. Cada transition se persiste
+// para audit + debug.
+class MicroPhaseRunner {
+  constructor(commandId, actionName) {
+    this.commandId = commandId
+    this.actionName = actionName
+    this.phases = []
+    this.startedAt = Date.now()
+  }
+
+  /**
+   * Corre una micro-phase: polea evidenceFn() hasta truthy, persist transition.
+   * @param {string} name - nombre de la phase (e.g., 'editor_focused')
+   * @param {Function} evidenceFn - retorna truthy si la evidencia está presente
+   * @param {object} options - { timeoutMs, intervalMs, label }
+   * @returns evidence value (lo que retornó evidenceFn cuando passed)
+   */
+  async runPhase(name, evidenceFn, options = {}) {
+    const { timeoutMs = 8000, intervalMs = 200, label } = options
+    const phaseStart = Date.now()
+    await this._record(name, { state: 'started', label })
+
+    const deadline = Date.now() + timeoutMs
+    let lastError = null
+    let polls = 0
+    while (Date.now() < deadline) {
+      polls++
+      try {
+        const ev = await evidenceFn()
+        if (ev) {
+          const ms = Date.now() - phaseStart
+          await this._record(name, {
+            state: 'ok',
+            ms,
+            polls,
+            evidence: typeof ev === 'object' && ev !== null ? ev : true,
+          })
+          return ev
+        }
+      } catch (err) {
+        lastError = err.message
+        // No abort — sigue poleando (evidenceFn puede tener errores transitorios)
+      }
+      await sleep(intervalMs)
+    }
+
+    const ms = Date.now() - phaseStart
+    await this._record(name, { state: 'timeout', ms, polls, lastError, timeoutMs })
+    // v0.7.4: trigger Visual Learning tracker (async, fire-and-forget)
+    try { vlOnPhaseTimeout(name) } catch {}
+    throw new Error(`micro_phase_${name}_timeout_${ms}ms`)
+  }
+
+  /**
+   * Marca una phase como instantánea (no poll) — usado para milestones que ya
+   * sabemos que ocurrieron (e.g., justo después de humanClick).
+   */
+  async mark(name, extra = {}) {
+    await this._record(name, { state: 'mark', ...extra })
+  }
+
+  async _record(name, extra) {
+    const entry = {
+      name,
+      ts: Date.now(),
+      elapsed: Date.now() - this.startedAt,
+      ...extra,
+    }
+    this.phases.push(entry)
+    console.log(`[Orion µ-phase] ${name}: ${extra.state} (${extra.ms ?? 0}ms${extra.polls ? `, ${extra.polls} polls` : ''}${extra.evidence ? `, ev=${JSON.stringify(extra.evidence).slice(0, 80)}` : ''})`)
+    // Persist to storage.session
+    try {
+      await chrome.storage.session?.set?.({
+        _micro_phase: {
+          commandId: this.commandId,
+          action: this.actionName,
+          latest: entry,
+          count: this.phases.length,
+        },
+      })
+    } catch {}
+    // Forward al SW → bridge → DB
+    try {
+      chrome.runtime.sendMessage({
+        type: 'orion_micro_phase',
+        commandId: this.commandId,
+        action: this.actionName,
+        entry,
+      }).catch(() => {})
+    } catch {}
+  }
+
+  getPhases() { return [...this.phases] }
+}
+
+// Helper para confirmar envío: polea el DOM buscando un mensaje outbound
+// reciente que matchee el fingerprint (primeros 50 chars normalizados).
+// 15s budget, polling 500ms. v0.7.0 reemplaza a verifyFollowupSent.
+async function confirmMessageSent(message, options = {}) {
+  const { budgetMs = 15000, intervalMs = 500 } = options
+  // v0.7.16 L6: fingerprint MÁS PERMISIVO. slice(0,20) y normalización agresiva
+  // (quita puntuación + colapsa whitespace) — LinkedIn está mutando encoding/anidación.
+  const normalize = (s) => (s ?? '').toLowerCase()
+    .replace(/[ ​-‍﻿]/g, ' ')        // NBSP, ZWJ, BOM
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')                    // quita puntuación/símbolos
+    .replace(/\s+/g, ' ').trim()
+  const fingerprint = normalize(message).slice(0, 50)
+  if (!fingerprint || fingerprint.length < 8) return { confirmed: false, reason: 'empty_fingerprint' }
+  const fpShort = fingerprint.slice(0, 20)              // antes 30 — más laxo
+  const deadline = Date.now() + budgetMs
+  let pollCount = 0
+  while (Date.now() < deadline) {
+    pollCount++
+    // v0.7.16: pool ampliado (incluye contenedores padre + role=listitem fallback)
+    const messages = document.querySelectorAll(
+      '.msg-s-message-list__event, .msg-s-event-listitem, [class*="msg-s-event"], ' +
+      '.msg-s-message-group, [class*="message-group"], ' +
+      '.msg-s-message-list li, li[role="listitem"]'
+    )
+    // Buscar entre las últimas 8 (antes 5)
+    for (let i = messages.length - 1; i >= Math.max(0, messages.length - 8); i--) {
+      const text = normalize(messages[i]?.textContent)
+      if (text.includes(fpShort)) {
+        return { confirmed: true, pollCount, foundAt: i, totalMessages: messages.length, matchedOn: 'textContent' }
+      }
+      // v0.7.16: fallback — buscar en innerHTML por si LinkedIn anida <span> raros
+      const html = normalize((messages[i]?.innerHTML ?? '').replace(/<[^>]+>/g, ' '))
+      if (html.includes(fpShort)) {
+        return { confirmed: true, pollCount, foundAt: i, totalMessages: messages.length, matchedOn: 'innerHTML' }
+      }
+    }
+    await sleep(intervalMs)
+  }
+  return { confirmed: false, reason: 'fingerprint_not_found_in_dom', pollCount }
+}
+
+function withHardTimeout(promise, ms, action) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`exec_hard_timeout_${action}_${ms}ms`)), ms)
+    promise.then(v => { clearTimeout(t); resolve(v) },
+                 e => { clearTimeout(t); reject(e) })
+  })
+}
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // v0.6.46: ping status del content.js — el SW lo usa ANTES de navegar para
+  // saber si content.js sigue ejecutando un cmd previo (caso post-WS-reconnect).
+  if (msg.type === 'orion_status_ping') {
+    sendResponse({
+      isExecuting: _isExecuting,
+      currentCommandId: _currentCommandId,
+      since: _executingSince,
+      elapsedMs: _executingSince ? Date.now() - _executingSince : 0,
+    })
+    return true
+  }
+
   if (msg.type !== 'orion_command') return false
 
   const { commandId, action, payload } = msg
 
+  // Opción B — ACK de recepción: confirmamos al SW que RECIBIMOS el comando
+  // (antes de cualquier guard/ejecución). El SW lo reenvía al bridge → acked_at.
+  // Si luego el comando expira sin resultado, acked_at distingue
+  // content_died_mid_work (recibido, murió) de content_unreachable (nunca llegó).
+  // Fire-and-forget; si el SW no está, el catch lo ignora.
+  try {
+    chrome.runtime.sendMessage({ type: 'orion_cmd_ack', commandId, ts: Date.now() }).catch(() => {})
+  } catch {}
+
   // Guard: si hay un comando en ejecución, rechazar el nuevo.
-  // Safety: si lleva >3min "ejecutando" asumimos que se colgó y liberamos el lock.
-  if (_isExecuting && (Date.now() - _executingSince) < 180_000) {
+  // Safety: si lleva >2min "ejecutando" asumimos que se colgó y liberamos el lock.
+  // Bajado de 180s→125s (alineado con EXEC_HARD_TIMEOUT_MS + margen 5s).
+  if (_isExecuting && (Date.now() - _executingSince) < 125_000) {
     console.warn(`[Orion content] Command ${action} (${commandId}) RECHAZADO — otro comando en ejecución desde hace ${Math.round((Date.now()-_executingSince)/1000)}s`)
     sendResponse({ ok: false, error: 'content_busy_executing' })
     return true
   }
 
+  // Si llegamos aquí con _isExecuting=true es porque el lock está stale (>125s).
+  // Forzamos release para arrancar limpio.
+  if (_isExecuting) {
+    console.warn(`[Orion content] Lock stale ${Math.round((Date.now()-_executingSince)/1000)}s → force-release`)
+    _isExecuting = false
+  }
+
+  // v0.6.44: limpiar editor de basura del comando ANTERIOR antes de empezar
+  // este. Si Leave-site modal apareció + se aceptó, queda texto huérfano en
+  // el editor que ensucia el próximo typing. También dispara `beforeunload`
+  // cleanup para evitar el modal.
+  try {
+    const dirtyEditors = document.querySelectorAll(
+      '.msg-form__contenteditable, div[contenteditable="true"][role="textbox"]'
+    )
+    for (const ed of dirtyEditors) {
+      if (ed.textContent && ed.textContent.trim().length > 0) {
+        ed.innerHTML = ''
+        ed.dispatchEvent(new Event('input', { bubbles: true }))
+      }
+    }
+  } catch {}
+
   _isExecuting = true
   _executingSince = Date.now()
+  _currentCommandId = commandId  // v0.6.46
+  // v0.7.9: expose to window para discard-modal observer + SPA route guard.
+  try { window._orionIsExecuting = true } catch {}
+  // v0.6.49: storage.session mutex como fallback al ping (más rápido + survives SW restart)
+  try {
+    chrome.storage.session?.set?.({
+      _executing: { commandId, since: _executingSince, url: location.href }
+    })
+  } catch {}
+  // v0.7.0 FSM: phase 'dispatched' al recibir el cmd
+  setPhase('dispatched', { action, leadName: payload?.leadName, kind: payload?.kind })
+  // v0.7.1: avisar al beforeunload handler que Orion espera nav (en caso de
+  // re-dispatch post-WS-reconnect, SW podría navegar de nuevo a esta misma tab).
+  // El flag se borra al limpiar el editor en .finally().
+  window.__orionExpectedNav = true
   console.log(`[Orion content] Command ${action} (${commandId})`, payload)
 
-  // Ejecutar de forma asíncrona y responder
-  executeAction(action, payload)
+  // v0.7.1: hard timeout dinámico según msg.length (era 120s fijo, insuficiente
+  // para mensajes >400 chars que humanType toma ~80-100s).
+  const hardTimeoutMs = calcHardTimeout(action, payload)
+  console.log(`[Orion content] Hard timeout dinámico: ${hardTimeoutMs}ms para ${action} (msg ${payload?.message?.length ?? 0} chars)`)
+
+  withHardTimeout(executeAction(action, payload), hardTimeoutMs, action)
     .then(result => sendResponse({ ok: true, ...result }))
-    .catch(err => sendResponse({ ok: false, error: err.message ?? String(err) }))
-    .finally(() => { _isExecuting = false })
+    .catch(err => {
+      const errMsg = err.message ?? String(err)
+      // v0.7.5: si exec_hard_timeout, también dispara Visual Learning (3× en 1h → capture).
+      // Phase pseudoname para tracker: 'exec_hard_timeout_<action>'.
+      if (errMsg.startsWith('exec_hard_timeout_')) {
+        try { vlOnPhaseTimeout(`exec_hard_timeout_${action}`) } catch {}
+      }
+      sendResponse({ ok: false, error: errMsg })
+    })
+    .finally(() => {
+      _isExecuting = false
+      _currentCommandId = null
+      // v0.7.9: limpiar flag global para que el discard-observer/spa-guard se desactiven.
+      try { window._orionIsExecuting = false } catch {}
+      // v0.6.49: limpiar mutex de storage al terminar
+      try { chrome.storage.session?.remove?.('_executing') } catch {}
+      // v0.7.0 FSM: clear phase (back to idle)
+      clearPhase()
+      // v0.7.1: UNIVERSAL EDITOR CLEANUP — sin importar por qué salimos, vaciar
+      // cualquier editor con texto huérfano. Esto previene el modal "Leave site?"
+      // del navegador cuando el SW navegue para el siguiente cmd. Es la red
+      // de seguridad final del flow.
+      try {
+        const editors = document.querySelectorAll(
+          '.msg-form__contenteditable, div[contenteditable="true"][role="textbox"], div.msg-form__msg-content-container [contenteditable="true"]'
+        )
+        let cleaned = 0
+        for (const ed of editors) {
+          if (ed.textContent && ed.textContent.trim().length > 0) {
+            ed.innerHTML = ''
+            ed.dispatchEvent(new Event('input', { bubbles: true }))
+            cleaned++
+          }
+        }
+        if (cleaned > 0) console.log(`[Orion content] v0.7.1 final cleanup: ${cleaned} editor(s) vaciado(s)`)
+      } catch {}
+      // v0.7.31 SAFETY: para send_invite, desarmar+cerrar cualquier modal de
+      // invitación que el flujo dejó abierto (cuelgue/timeout post-typing). Evita
+      // invitaciones "armadas" con nota que podrían enviarse en una interacción
+      // posterior. Corre incluso en exec_hard_timeout (este finally settla la race).
+      if (action === 'send_invite') {
+        try { safeDismissInviteModal() } catch {}
+      }
+      // v0.7.1: limpiar flag de nav esperada (próxima navegación humana mostrará modal normal)
+      try { delete window.__orionExpectedNav } catch { window.__orionExpectedNav = false }
+    })
 
   return true  // mantener canal abierto para sendResponse asíncrono
 })
 
 // ── Acciones disponibles ────────────────────────────────────────────────────
 
+// v0.7.16 — Pre-flight LinkedIn security banner detector.
+// Bilingüe ES/EN. Solo dispara si TEXT match Y selector visible (doble confirmación
+// → low false-positive). Severity 'critical' → abort + pause; 'warning' → soft
+// abort + cooldown; 'benign' → auto-dismiss + continue.
+const BANNER_RULES = {
+  captcha_checkpoint: {
+    severity: 'critical',
+    textSignals: [
+      /captcha|recaptcha/i,
+      /verify you are human|verifica que eres humano/i,
+      /security check|comprobaci[óo]n de seguridad/i,
+      /confirm your identity|confirma tu identidad/i,
+    ],
+    selectorSignals: ['.g-recaptcha', '[class*="recaptcha"]', 'iframe[src*="recaptcha"]', '[class*="challenge"]'],
+  },
+  account_locked: {
+    severity: 'critical',
+    textSignals: [
+      /account (has been )?restricted|cuenta (ha sido )?restringida/i,
+      /temporarily (disabled|restricted)|deshabilitada temporalmente/i,
+      /unusual activity|actividad inusual/i,
+      /we['']ve detected|hemos detectado/i,
+    ],
+    selectorSignals: ['[class*="alert-banner"][class*="error"]', '[class*="account-restricted"]', '[aria-label*="restricted"]'],
+  },
+  session_expired: {
+    severity: 'critical',
+    textSignals: [
+      /sesi[óo]n (expirada|expir[óo])|session expired|session has ended/i,
+      /vuelve a iniciar sesi[óo]n|log in again|sign in to continue/i,
+    ],
+    selectorSignals: ['[class*="auth-wall"]', '[data-testid*="sign_in"]', 'form[action*="login"]'],
+  },
+  invite_limit_warning: {
+    severity: 'warning',
+    textSignals: [
+      /(weekly )?invitation limit|l[íi]mite (semanal )?de invitaciones/i,
+      /you['']?ve sent many invitations|has enviado muchas invitaciones/i,
+    ],
+    selectorSignals: ['[class*="limit"]', '[class*="invitation-limit"]'],
+  },
+  rate_limit_notice: {
+    severity: 'warning',
+    textSignals: [
+      /sent many messages recently|muchos mensajes recientemente/i,
+      /slow down|take a break|espera un poco/i,
+    ],
+    selectorSignals: ['[class*="rate-limit"]', '[class*="throttle"]'],
+  },
+}
+
+function checkBannersBeforeExecute() {
+  try {
+    const bodyText = (document.body?.innerText ?? '').toLowerCase().slice(0, 8000)
+    const titleText = (document.title ?? '').toLowerCase()
+    for (const [code, rule] of Object.entries(BANNER_RULES)) {
+      let textMatch = null
+      for (const rx of rule.textSignals) {
+        if (rx.test(bodyText) || rx.test(titleText)) { textMatch = rx.source; break }
+      }
+      if (!textMatch) continue
+      let selMatch = null
+      for (const sel of rule.selectorSignals) {
+        try {
+          const el = document.querySelector(sel)
+          if (el && (el.offsetParent !== null || el.tagName === 'IFRAME')) { selMatch = sel; break }
+        } catch {}
+      }
+      if (!selMatch) continue
+      return { detected: true, code, severity: rule.severity, textSignal: textMatch, selectorSignal: selMatch }
+    }
+  } catch (err) {
+    console.warn('[Orion content] bannerCheck error:', err.message)
+  }
+  return { detected: false }
+}
+
 async function executeAction(action, payload) {
+  // v0.7.16 pre-flight: detecta banners de seguridad LinkedIn ANTES de cualquier acción.
+  // Skip para capture_session (no toca LinkedIn DOM normal).
+  if (action !== 'capture_session') {
+    const banner = checkBannersBeforeExecute()
+    if (banner.detected) {
+      console.warn(`[Orion content] BANNER PRE-FLIGHT: ${banner.code} (${banner.severity}) — abort ${action}`)
+      try { vlOnPhaseTimeout(`banner_${banner.code}`) } catch {}
+      // Error code estandarizado consumido por bridge handler.
+      return {
+        status: 'error',
+        error: `linkedin_security_check`,
+        bannerCode: banner.code,
+        bannerSeverity: banner.severity,
+        textSignal: banner.textSignal,
+        selectorSignal: banner.selectorSignal,
+      }
+    }
+  }
   switch (action) {
     case 'check_inbox':
       return await checkInbox(payload)
@@ -292,6 +1415,7 @@ function getWebGLInfo() {
 // Retornamos array normalizado: [{name, snippet, unread, threadUrl, threadId, lastActivity}]
 
 async function checkInbox(payload = {}) {
+  let _captureStoppedFlag = false  // v0.7.23 BUG-O: true si captureThreads cortó por budget
   const deepScrape = !!payload.deepScrape
   const daysWindow = Math.min(payload.daysWindow ?? 15, 90)  // window in days para deepScrape
   const limit = deepScrape ? 500 : Math.min(payload.limit ?? 30, 50)
@@ -310,15 +1434,35 @@ async function checkInbox(payload = {}) {
   }
 
   // 2. Esperar a que el contenedor de conversaciones aparezca
+  // v0.7.20: pool ampliado con fallbacks defensivos contra selector drift LinkedIn
   const containerSel = [
     '.msg-conversations-container__conversations-list',
     '.msg-conversations-container',
     '[class*="msg-conversations-container"]',
     'ul[class*="conversations-list"]',
+    '[class*="msg-conversation-list"]',
+    'aside[aria-label*="essag" i]',
+    'aside[aria-label*="ist" i] ul',
+    'main[role="main"] ul[role="list"]',
+    '[data-test-msg-conversations-container]',
   ]
   const containerFound = await waitForSelector(containerSel, 15000)
   if (!containerFound) {
-    return { action: 'check_inbox', status: 'error', error: 'conversations_container_not_found', url: location.href }
+    // v0.7.20: enriquecer error con DOM debug para L6 ticket sin necesidad de re-run
+    const bodyClasses = document.body?.className?.slice(0, 200) ?? ''
+    const ulSample = Array.from(document.querySelectorAll('ul, aside')).slice(0, 5).map(el => ({
+      tag: el.tagName.toLowerCase(),
+      cls: (el.className ?? '').slice(0, 150),
+      al:  el.getAttribute('aria-label')?.slice(0, 80) ?? null,
+      childCount: el.children?.length ?? 0,
+    }))
+    return {
+      action: 'check_inbox',
+      status: 'error',
+      error: 'conversations_container_not_found',
+      url: location.href,
+      debugSample: { bodyClasses, ulSample },
+    }
   }
 
   // Pequeña pausa para hidratación tardía
@@ -372,20 +1516,126 @@ async function checkInbox(payload = {}) {
 
   console.log(`[Orion content] ${items.length} conversation items detectados (deepScrape=${deepScrape})`)
 
-  // 4. Normalizar cada item
+  // 4. Normalizar cada item (guardamos referencia al DOM para click-capture)
   const conversations = []
+  const itemByName = new Map()
   for (const el of items.slice(0, limit)) {
     const parsed = parseConversationItem(el)
-    if (parsed) conversations.push(parsed)
+    if (parsed) {
+      conversations.push(parsed)
+      if (parsed.name) itemByName.set(parsed.name, el)
+    }
   }
 
-  // 5. Debug: si todos los threadId están null, incluir muestra del primer item
-  // para iterar selectores en próxima ronda
-  const allThreadIdsNull = conversations.length > 0 && conversations.every(c => !c.threadId)
-  const debugSample = allThreadIdsNull && items[0] ? {
-    outerHTML: items[0].outerHTML.slice(0, 800),
-    attrs: Array.from(items[0].attributes).map(a => ({ name: a.name, value: a.value.slice(0, 80) })),
+  // 4b. CLICK-CAPTURE de thread_id (P-C): LinkedIn ya NO expone el thread_id en
+  // el DOM del inbox (es estado React interno). La única forma confiable de
+  // obtenerlo es CLICKEAR la conversación → la URL cambia a /messaging/thread/<id>/.
+  // Lo hacemos solo para conversaciones sin threadId (prioriza unread), capeado
+  // y humanizado para no parecer bot.
+  if (payload.captureThreads) {
+    const needCapture = conversations
+      .filter(c => !c.threadId)
+      .sort((a, b) => (b.unread ?? 0) - (a.unread ?? 0))  // unread primero
+      .slice(0, Math.min(payload.maxCaptures ?? 12, 20))
+    console.log(`[Orion content] captureThreads: ${needCapture.length} conversaciones sin threadId`)
+    // v0.7.23 BUG-O: budget de tiempo. En horas pesadas CDMX cada capture toma
+    // 11-12s (era 9s estimado) → 15 captures pueden exceder el hard timeout y
+    // PERDER TODO el inbox (timeout = result vacío). Derivamos el budget del mismo
+    // hard timeout (calcHardTimeout check_inbox) menos 55s de overhead (setup +
+    // scroll + parse + return), y cortamos al alcanzarlo retornando parciales.
+    const _capN = payload?.captureThreads ? (payload?.maxCaptures ?? 12) : 0
+    const _lim = payload?.limit ?? 20
+    const _hardMs = Math.max(60_000, Math.min(300_000, 60_000 + (_capN * 9_000) + (Math.ceil(_lim / 10) * 4_000)))
+    const captureBudgetMs = Math.max(30_000, _hardMs - 55_000)
+    const captureStart = Date.now()
+    let captureStopped = false
+    for (const convo of needCapture) {
+      if (Date.now() - captureStart > captureBudgetMs) {
+        console.warn(`[Orion content] captureThreads: budget ${Math.round(captureBudgetMs/1000)}s agotado tras ${needCapture.indexOf(convo)} captures — retorno parcial`)
+        captureStopped = true
+        break
+      }
+      const el = itemByName.get(convo.name)
+      if (!el) continue
+      const clickable = el.querySelector(
+        '.msg-conversation-listitem__link, [class*="convo-item-link"]'
+      ) ?? el
+      try {
+        // BUG fix crítico: capturar URL ANTES del click. Si LinkedIn ignora el click
+        // sintético (isTrusted=false en anchors SPA), la URL NO cambia y el código
+        // anterior asignaba el thread_id de la conversación previa al convo actual
+        // → orphans con thread_ids cruzados → mensajes a leads equivocados.
+        const beforeUrl = location.href
+        const beforeThread = beforeUrl.match(/\/messaging\/thread\/([^/?#]+)/)?.[1] ?? null
+        clickable.scrollIntoView({ block: 'center', behavior: 'instant' })
+        await sleep(randInt(250, 600))
+        clickable.click()
+        // Esperar a que la URL CAMBIE — no basta que tenga "/thread/" (podría ser la
+        // anterior si el click no funcionó). Verificar (a) URL distinta a beforeUrl
+        // Y (b) thread_id distinto al previo.
+        const start = Date.now()
+        let captured = false
+        while (Date.now() - start < 4000) {
+          const currentUrl = location.href
+          const m = currentUrl.match(/\/messaging\/thread\/([^/?#]+)/)
+          if (m && currentUrl !== beforeUrl && m[1] !== beforeThread) {
+            convo.threadId = decodeURIComponent(m[1])
+            convo.threadUrl = currentUrl.split('?')[0]
+            captured = true
+            // v0.7.39: el thread está ABIERTO → capturar profileUrl del participante
+            // desde el HEADER (insight #553: el list-item SDUI no expone /in/). Scoped
+            // al título/top-bar; null si no matchea (sin regresión). SIN sleep extra
+            // (el header ya está al cambiar la URL) — un sleep aquí se throttlea a ~1s
+            // en background tab y reventaba el hard-timeout de check_inbox (v0.7.39a).
+            try {
+              const hdr = document.querySelector(
+                '.msg-title-bar a[href*="/in/"], .msg-thread__top-bar a[href*="/in/"], ' +
+                '[class*="title-bar"] a[href*="/in/"], [class*="thread-header"] a[href*="/in/"], ' +
+                '[class*="msg-entity-lockup"] a[href*="/in/"]'
+              )
+              if (hdr) {
+                const h = hdr.getAttribute('href') || ''
+                if (h.includes('/in/')) convo.profileUrl = (hdr.href || `https://www.linkedin.com${h}`).split('?')[0]
+              }
+            } catch {}
+            break
+          }
+          await sleep(300)
+        }
+        if (!captured) {
+          console.warn(`[Orion content] captureThreads: NO cambio de URL para ${convo.name} (click ignorado, prob. isTrusted=false). Skip — no cruzar threadId.`)
+        }
+        await sleep(randInt(400, 900))  // dwell humano
+      } catch (err) {
+        console.warn(`[Orion content] captureThreads click falló para ${convo.name}:`, err?.message)
+      }
+    }
+    const captured = needCapture.filter(c => c.threadId).length
+    console.log(`[Orion content] captureThreads: ${captured}/${needCapture.length} thread_ids capturados${captureStopped ? ' (PARCIAL — budget agotado)' : ''}`)
+    if (captureStopped) _captureStoppedFlag = true
+  }
+
+  // 5. Debug enriquecido v0.7.17: si threadId-null > 50% OR profileUrl-null > 50%,
+  // capturamos sample profundo del primer item para L6 visual ticket.
+  const total = conversations.length
+  const threadIdNullPct = total > 0 ? (conversations.filter(c => !c.threadId).length / total) * 100 : 0
+  const profileUrlNullPct = total > 0 ? (conversations.filter(c => !c.profileUrl).length / total) * 100 : 0
+  const triggerDebug = total > 0 && (threadIdNullPct > 50 || profileUrlNullPct > 50)
+  const debugSample = triggerDebug && items[0] ? {
+    outerHTML: items[0].outerHTML.slice(0, 1500),
+    attrs: Array.from(items[0].attributes).map(a => ({ name: a.name, value: a.value.slice(0, 120) })),
     linkHrefs: Array.from(items[0].querySelectorAll('a[href]')).map(a => a.href).slice(0, 5),
+    dataHrefs: Array.from(items[0].querySelectorAll('[data-href]')).map(d => d.getAttribute('data-href')).slice(0, 5),
+    dataAttrs: Array.from(items[0].querySelectorAll('[data-conversation-urn], [data-urn], [data-conversation-id], [data-thread-id], [data-test-conversation-urn], [data-app-aware-link]')).map(d => {
+      const out = {}
+      for (const a of d.attributes) if (a.name.startsWith('data-')) out[a.name] = a.value.slice(0, 120)
+      return out
+    }).slice(0, 5),
+    dropRates: {
+      threadId_null_pct: Math.round(threadIdNullPct),
+      profileUrl_null_pct: Math.round(profileUrlNullPct),
+      sample_size: total,
+    },
   } : null
 
   return {
@@ -395,6 +1645,7 @@ async function checkInbox(payload = {}) {
     scrapedAt: new Date().toISOString(),
     url: location.href,
     ...(debugSample ? { debugSample } : {}),
+    ...(_captureStoppedFlag ? { capturePartial: true } : {}),
   }
 }
 
@@ -467,35 +1718,53 @@ function parseConversationItem(el) {
     let threadId = null
     let threadUrl = null
 
-    // (1) data attributes en el item o sus hijos
+    // (1) data attributes en el item o cualquier descendiente — pool ampliado v0.7.17
+    // Inbox parser drift 2026-06-02: LinkedIn migró __link de <a> a <div tabindex=0>
+    // → linkHrefs=[]. Buscamos data-attrs en TODOS los descendientes, no solo el li.
     const dataAttrs = [
       'data-conversation-urn',
       'data-urn',
       'data-conversation-id',
       'data-thread-id',
+      'data-test-conversation-urn',
+      'data-app-aware-link',
+      'data-control-id',
     ]
     for (const attr of dataAttrs) {
-      const found = el.getAttribute(attr) ?? el.querySelector(`[${attr}]`)?.getAttribute(attr)
-      if (found) {
-        // URN format: urn:li:msg_conversation:(...,2-<base64>) o solo 2-<base64>
+      const direct = el.getAttribute(attr)
+      const descendantEls = el.querySelectorAll(`[${attr}]`)
+      const candidates = [direct, ...Array.from(descendantEls).map(d => d.getAttribute(attr))].filter(Boolean)
+      for (const found of candidates) {
         const m = found.match(/2-[A-Za-z0-9_=-]{16,}/)
-        if (m) threadId = m[0]
-        break
+        if (m) { threadId = m[0]; break }
       }
+      if (threadId) break
     }
 
-    // (2) href de links que matchean /messaging/thread/<id>/
+    // (2) href de links que matchean /messaging/thread/<id>/ — busca también data-href (lazy anchors)
     if (!threadId) {
-      const linkEls = el.querySelectorAll('a[href]')
+      const linkEls = el.querySelectorAll('a[href], [data-href], a[data-test-app-aware-link]')
       for (const linkEl of linkEls) {
-        const href = linkEl.getAttribute('href') ?? ''
+        const href = linkEl.getAttribute('href') ?? linkEl.getAttribute('data-href') ?? ''
         const m = href.match(/\/messaging\/thread\/([^/?#]+)/)
         if (m) {
           threadId = decodeURIComponent(m[1])
-          threadUrl = linkEl.href
+          threadUrl = linkEl.href || `https://www.linkedin.com/messaging/thread/${threadId}/`
           break
         }
       }
+    }
+
+    // (3) NEW v0.7.17: scan outerHTML por pattern urn:li:fsd_conversation o thread urn
+    // como ULTIMO RECURSO antes de marcarlo null. LinkedIn embebe URNs en React props.
+    if (!threadId) {
+      try {
+        // v0.7.20: cap a 50KB para evitar regex lento sobre items con props React grandes
+        const html = (el.outerHTML ?? '').slice(0, 50000)
+        // urn:li:fsd_conversation:(urn:li:fsd_profile:...,2-<id>) o solo 2-<id>=
+        const m = html.match(/(?:fsd_conversation|msg_conversation|conversation_urn)[^"']{0,500}?(2-[A-Za-z0-9_=-]{16,})/)
+        if (m) threadId = m[1]
+      } catch {}
     }
     // Construir threadUrl si tenemos threadId pero no URL
     if (threadId && !threadUrl) {
@@ -503,16 +1772,29 @@ function parseConversationItem(el) {
     }
 
     // ── Profile URL del otro participante ────────────────────────────────
-    // En el listing puede no aparecer (LinkedIn solo lo muestra al abrir el thread).
-    // Buscamos en: <a href*="/in/"> dentro del item.
+    // v0.7.17 fallback: en el listing puede no aparecer; LinkedIn ahora suele
+    // poner /in/ slug en avatar img wrapper o aria-label. Buscamos:
+    //   (a) <a href*="/in/"> directo
+    //   (b) [data-href*="/in/"]
+    //   (c) URN fsd_profile en outerHTML → derivar /in/ no posible (URN ≠ slug)
+    //       — pero al menos capturamos URN para que server-side haga lookup
     let profileUrl = null
-    const profileLinks = el.querySelectorAll('a[href*="/in/"]')
+    let profileUrn = null
+    const profileLinks = el.querySelectorAll('a[href*="/in/"], [data-href*="/in/"]')
     for (const pl of profileLinks) {
-      const href = pl.getAttribute('href') ?? ''
+      const href = pl.getAttribute('href') ?? pl.getAttribute('data-href') ?? ''
       if (href.includes('/in/')) {
-        profileUrl = pl.href
+        profileUrl = pl.href || `https://www.linkedin.com${href}`
         break
       }
+    }
+    if (!profileUrl) {
+      try {
+        // v0.7.20: cap a 50KB preventivo
+        const html = (el.outerHTML ?? '').slice(0, 50000)
+        const urnMatch = html.match(/urn:li:fsd_profile:([A-Za-z0-9_=-]{1,200})/)
+        if (urnMatch) profileUrn = urnMatch[1]
+      } catch {}
     }
 
     return {
@@ -523,6 +1805,7 @@ function parseConversationItem(el) {
       threadId,
       threadUrl,
       profileUrl,
+      profileUrn,     // v0.7.17: fallback URN para lookup server-side
     }
   } catch (err) {
     console.warn('[Orion content] parse error:', err.message)
@@ -768,17 +2051,38 @@ async function sendInvite(payload = {}) {
 //   4. humanType el mensaje
 //   5. Si dryRun → click "X" o ESC para cancelar
 //   6. Si !dryRun → click "Enviar" / "Send"
+// v0.7.31 instrumentación send_invite (cierra el FSM-gap): emite checkpoints a
+// micro_phase_log para ver DÓNDE cuelga el flujo (especialmente Path A.2 con nota,
+// que hizo exec_hard_timeout 219s sin pista). Sobrevive al timeout (persistido en bridge).
+function emitInviteCheckpoint(name, extra) {
+  try {
+    chrome.runtime.sendMessage({
+      type: 'orion_micro_phase',
+      commandId: _currentCommandId,
+      action: 'send_invite',
+      entry: {
+        name, ts: Date.now(),
+        elapsed: Date.now() - (_executingSince || Date.now()),
+        state: 'mark', extra: extra ?? null,
+      },
+    }).catch(() => {})
+  } catch {}
+}
+
 async function sendInviteFromCustomInvite(payload) {
   const { message, dryRun } = payload
   const withNote = !!message  // Si message es null/empty/undefined → sin nota
   console.log(`[Orion content] PATH A — Modal SPA route, withNote=${withNote}`)
+  emitInviteCheckpoint('invite_start', { withNote, dryRun: !!dryRun })
 
   // 1. Esperar modal (¿Añadir una nota?)
   const modalSel = '[role="dialog"], .artdeco-modal'
   const found = await waitForSelector([modalSel], 8000)
   if (!found) {
+    emitInviteCheckpoint('modal_not_rendered')
     return { action: 'send_invite', status: 'error', error: 'preload_modal_not_rendered', url: location.href }
   }
+  emitInviteCheckpoint('modal_found', { withNote })
   await sleep(randInt(800, 1400))  // hidratación
 
   // ── PATH A.1: SIN NOTA — Click directo "Enviar sin nota" o "Enviar" ──────
@@ -804,6 +2108,10 @@ async function sendInviteFromCustomInvite(payload) {
     console.log('[Orion content] Clicking "Enviar sin nota"')
     await humanClick(sendNoNoteBtn)
     await sleep(2500)
+    // REMOVED 2026-05-29: setTimeout location.href causaba modal "Leave site?" cuando
+    // un siguiente command (FU/auto-reply) empezaba a typear durante la navegación.
+    // LinkedIn detectaba texto sin guardar y mostraba el modal. Sin el auto-nav,
+    // la tab queda en /preload/custom-invite/ pero next command navega correctamente.
     return {
       action: 'send_invite', status: 'sent',
       textareaUsed: false, withNote: false, path: 'spa_route_no_note',
@@ -826,12 +2134,15 @@ async function sendInviteFromCustomInvite(payload) {
 
   // 3. Click "Añadir una nota"
   console.log('[Orion content] Clicking "Añadir una nota"')
+  emitInviteCheckpoint('add_note_btn_found')
   await humanClick(addNoteBtn)
+  emitInviteCheckpoint('add_note_clicked')
   await sleep(randInt(1500, 2500))  // espera a que textarea aparezca
 
   // 4. Buscar textarea
   const textarea = await findNoteTextarea({ timeoutMs: 5000 })
   if (!textarea) {
+    emitInviteCheckpoint('textarea_not_found')
     return {
       action: 'send_invite',
       status: 'error',
@@ -839,23 +2150,24 @@ async function sendInviteFromCustomInvite(payload) {
       modalDebug: dumpModalContent(),
     }
   }
+  emitInviteCheckpoint('textarea_found', { tag: textarea.tagName, ce: textarea.isContentEditable })
 
-  // 5. Tipear mensaje (humanType)
-  console.log(`[Orion content] Typing message (${message.length} chars)`)
-  await humanType(textarea, message.slice(0, 290))
+  // 5. Tipear mensaje — v0.7.33 humanTypeChunked (evita el throttle de background
+  // tab que hacía colgar el char-por-char ~180s → exec_hard_timeout).
+  console.log(`[Orion content] Typing message (${message.length} chars) — chunked`)
+  emitInviteCheckpoint('typing_start', { len: Math.min(message.length, 290) })
+  await humanTypeChunked(textarea, message.slice(0, 290), 12)
+  emitInviteCheckpoint('typing_done')
   await sleep(randInt(500, 1000))
 
-  // 6. dryRun: cancelar (click X o ESC) sin enviar
+  // 6. dryRun: cerrar sin enviar. v0.7.33: usar safeDismissInviteModal (vacía la
+  // nota PRIMERO → cierre sin disparar el modal "¿Descartar?" que hacía pelear al
+  // observer v0.7.9 y colgaba el cierre ~158s). Limpio y rápido.
   if (dryRun) {
-    console.log('[Orion content] DRY RUN — cerrando modal sin enviar')
-    // Intentar X primero
-    const closeBtn = document.querySelector('[role="dialog"] button[aria-label*="cerrar" i], [role="dialog"] button[aria-label*="close" i], .artdeco-modal__dismiss')
-    if (closeBtn) {
-      await humanClick(closeBtn)
-    } else {
-      // Fallback: ESC keypress
-      document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
-    }
+    emitInviteCheckpoint('dry_run_closing')
+    console.log('[Orion content] DRY RUN — desarmando + cerrando modal sin enviar')
+    safeDismissInviteModal()
+    emitInviteCheckpoint('dry_run_done')
     return {
       action: 'send_invite',
       status: 'dry_run_ok',
@@ -872,6 +2184,10 @@ async function sendInviteFromCustomInvite(payload) {
   }
   await humanClick(sendBtn)
   await sleep(2000)
+
+  // REMOVED 2026-05-29: setTimeout location.href causaba modal "Leave site?" cuando
+  // un siguiente command empezaba a typear durante la navegación a /mynetwork/.
+  // Lo dejamos sin auto-nav — el next command llegará y navegará donde necesite.
 
   return {
     action: 'send_invite',
@@ -1081,6 +2397,43 @@ function findAddNoteButton() {
   })
 }
 
+// v0.7.31 SAFETY — cleanup garantizado del modal de invitación. Si el flujo de
+// send_invite cuelga/falla DESPUÉS de teclear la nota pero ANTES de cerrar, el modal
+// queda "armado" (nota escrita, a un click de enviarse). Este helper, llamado desde
+// el .finally() del executeAction, VACÍA la nota (nada que enviar accidentalmente) y
+// cierra el modal. Idempotente y defensivo — no-op si no hay modal.
+function safeDismissInviteModal() {
+  try {
+    const modal = document.querySelector('[role="dialog"], .artdeco-modal')
+    if (!modal) return false
+    // 1. Vaciar cualquier nota escrita (textarea o contenteditable) → desarmar.
+    const inputs = [
+      ...modal.querySelectorAll('textarea'),
+      ...modal.querySelectorAll('div[contenteditable="true"]'),
+    ]
+    let cleared = 0
+    for (const el of inputs) {
+      const hasText = (el.value ?? el.textContent ?? '').trim().length > 0
+      if (!hasText) continue
+      if (el.tagName.toLowerCase() === 'textarea') {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
+        if (setter) { setter.call(el, ''); el.dispatchEvent(new Event('input', { bubbles: true })) }
+      } else if (el.isContentEditable) {
+        el.innerHTML = ''
+        el.dispatchEvent(new Event('input', { bubbles: true }))
+      }
+      cleared++
+    }
+    // 2. Cerrar el modal (X). Con la nota vacía, NO dispara "¿Descartar?".
+    const dismiss = modal.querySelector(
+      'button[aria-label*="cerrar" i], button[aria-label*="close" i], .artdeco-modal__dismiss'
+    )
+    if (dismiss && dismiss.offsetParent !== null) dismiss.click()
+    if (cleared > 0) console.log(`[Orion content] SAFETY: invite modal desarmado (${cleared} nota vaciada) + cerrado`)
+    return true
+  } catch { return false }
+}
+
 async function findNoteTextarea({ timeoutMs = 4000 } = {}) {
   // Búsqueda ULTRA permissiva: cualquier textarea o contenteditable VISIBLE
   // en cualquier parte del documento. Si después de clickear Conectar aparece
@@ -1248,6 +2601,32 @@ async function activateViaKeyboard(el) {
   el.dispatchEvent(new KeyboardEvent('keyup', keyOpts))
 }
 
+// v0.7.33 FIX background-throttle: Chrome throttlea setTimeout a ~1000ms en tabs
+// en background (la tab LinkedIn la maneja el SW sin foco). humanType char-por-char
+// hace 1 sleep POR carácter → 180 chars × ~1000ms throttled = ~180s → exec_hard_timeout.
+// (Era la causa real del hang de invite-con-nota / BUG-M / send_followup lento.)
+// Tipear en CHUNKS reduce los sleeps ~10x (180 chars / chunk 12 = 15 sleeps ≈ 15s)
+// manteniendo variabilidad. React registra el input event por chunk igual.
+async function humanTypeChunked(el, text, chunkSize = 12) {
+  el.focus()
+  await sleep(randInt(150, 300))
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
+                ?? Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+  const isTextareaLike = (el.tagName.toLowerCase() === 'textarea' || el.tagName.toLowerCase() === 'input')
+  for (let i = 0; i < text.length; i += chunkSize) {
+    if (setter && isTextareaLike) {
+      setter.call(el, text.slice(0, i + chunkSize))   // valor acumulado
+      el.dispatchEvent(new Event('input', { bubbles: true }))
+    } else if (el.isContentEditable) {
+      document.execCommand('insertText', false, text.slice(i, i + chunkSize))  // solo el trozo nuevo
+    } else {
+      el.value = text.slice(0, i + chunkSize)
+      el.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+    await sleep(randInt(120, 320))  // pausa variable entre chunks
+  }
+}
+
 async function humanType(el, text) {
   el.focus()
   await sleep(randInt(200, 400))
@@ -1265,9 +2644,15 @@ async function humanType(el, text) {
       el.value = (el.value ?? '') + ch
       el.dispatchEvent(new Event('input', { bubbles: true }))
     }
-    let delay = randInt(55, 130)
-    if ('.,!?¡¿'.includes(ch)) delay += randInt(80, 200)
-    if (Math.random() < 0.06) delay += randInt(250, 500)
+    // v0.7.21 P1-3: jitter_pct_typing wired desde runtime_config (default 0.70).
+    // Centro 100ms × (1 ± pct) → si pct=0.70 → [30,170] (igual que v0.7.16).
+    // Permite tuning sin redeploy via UPDATE runtime_config.
+    const pct = _runtimeConfig?.jitter_pct_typing ?? 0.70
+    const min = Math.max(10, Math.round(100 * (1 - pct)))
+    const max = Math.round(100 * (1 + pct))
+    let delay = randInt(min, max)
+    if ('.,!?¡¿'.includes(ch)) delay += randInt(60, 240)
+    if (Math.random() < 0.07) delay += randInt(200, 600)
     await sleep(delay)
   }
 }
@@ -1291,6 +2676,158 @@ async function humanType(el, text) {
 //   5. dryRun: NO clickear Send, limpiar el editor + return
 //   6. !dryRun: click Send (botón regular, no anchor) + esperar confirmation
 
+// v0.6.42: el inbox tiene filtros (Prioritarios / No leídos / Empleos / Contactos
+// / Mensajes InMail / Marcados). Si el usuario tiene activo "Prioritarios" o
+// "Empleos", el lead probablemente no aparece. Detectamos qué chip está activo
+// y, si NO es el universal, lo desactivamos clickeándolo (LinkedIn toggle).
+// Toggle off un filter chip = ver TODOS los mensajes.
+async function ensureInboxAllFilter() {
+  try {
+    // Los chips de filtros son button con aria-pressed="true" cuando activos.
+    // Texto visible: "Prioritarios", "Empleos", "No leídos", "Contactos",
+    // "Mensajes InMail", "Marcados".
+    const restrictiveLabels = /^(prioritarios|empleos|no leídos|no leidos|contactos|mensajes inmail|inmail|marcados)$/i
+    const chips = Array.from(document.querySelectorAll('button[aria-pressed], [role="button"][aria-pressed]'))
+    for (const chip of chips) {
+      if (chip.getAttribute('aria-pressed') !== 'true') continue
+      const label = (chip.textContent ?? '').trim()
+      if (restrictiveLabels.test(label)) {
+        console.log(`[Orion content] inbox filter "${label}" activo → toggle off`)
+        chip.click()
+        await sleep(randInt(600, 1100))
+        return true
+      }
+    }
+  } catch (err) {
+    console.warn('[Orion content] ensureInboxAllFilter falló:', err?.message)
+  }
+  return false
+}
+
+// P1: abre una conversación clickeándola desde la lista del inbox (SPA in-app).
+// Más confiable que navegar directo al thread URL (que deja la página a medias).
+// Match por nombre del lead (el thread_id no está en el DOM de la lista).
+async function openThreadFromInbox(leadName, threadUrl) {
+  // v0.6.42: si el usuario está en tab "Prioritarios" o "Empleos", la conversación
+  // del lead no aparece. Cambiamos a "No leídos"→"Contactos" o forzamos "Mostrar todo".
+  // El filter chip se aplica como un button con aria-pressed.
+  await ensureInboxAllFilter()
+
+  // Asegurar que la lista de conversaciones cargó
+  const containerSel = [
+    '.msg-conversations-container__conversations-list',
+    'ul[class*="conversations-list"]',
+    '.msg-conversations-container',
+  ]
+  const found = await waitForSelector(containerSel, 12000)
+  if (!found) { console.warn('[Orion content] openThreadFromInbox: lista no cargó'); return false }
+  await sleep(randInt(800, 1400))
+
+  // Extract thread_id from threadUrl for primary matching by href
+  // (más robusto que por nombre — funciona aunque el lead esté en vista filtrada
+  // o con nombre abreviado tipo "Jorge Francisco O.")
+  const threadIdMatch = threadUrl?.match(/\/messaging\/thread\/([^/?#]+)/)
+  const wantedThreadId = threadIdMatch ? decodeURIComponent(threadIdMatch[1]) : null
+
+  const itemSels = [
+    'li.msg-conversation-listitem',
+    'li[class*="msg-conversation-listitem"]',
+    'ul[class*="conversations-list"] > li',
+  ]
+  const getItems = () => {
+    let r = []
+    for (const sel of itemSels) { r = Array.from(document.querySelectorAll(sel)); if (r.length) break }
+    return r
+  }
+  let items = getItems()
+  if (!items.length) { console.warn('[Orion content] openThreadFromInbox: sin items'); return false }
+
+  // v0.6.47: helper que aplica el matching contra una lista de items.
+  // Devuelve { target, byThreadId } o null si nada matchea.
+  const tryMatch = (currentItems) => {
+    // PRIMARY: match por thread_id en anchor href (más confiable que nombre)
+    if (wantedThreadId) {
+      for (const el of currentItems) {
+        const a = el.querySelector('a[href*="/messaging/thread/"]')
+        const href = a?.getAttribute('href') ?? ''
+        const m = href.match(/\/messaging\/thread\/([^/?#]+)/)
+        const id = m ? decodeURIComponent(m[1]) : ''
+        if (id && id === wantedThreadId) return { target: el, by: 'thread_id' }
+      }
+    }
+    // FALLBACK: matching por SCORING de tokens del nombre
+    const norm = (s) => (s ?? '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9\s]/g, ' ').trim()
+    const leadTokens = norm(leadName).split(/\s+/).filter(t => t.length >= 3)
+    let best = null, bestScore = 0
+    for (const el of currentItems) {
+      const parsed = parseConversationItem(el)
+      const n = norm(parsed?.name)
+      if (!n) continue
+      if (leadName && (n.includes(norm(leadName)) || norm(leadName).includes(n))) return { target: el, by: 'name_substring' }
+      const nTokens = new Set(n.split(/\s+/).filter(t => t.length >= 3))
+      const overlap = leadTokens.filter(t => nTokens.has(t)).length
+      if (overlap >= 2 && overlap > bestScore) { bestScore = overlap; best = el }
+    }
+    return best ? { target: best, by: 'name_score' } : null
+  }
+
+  let match = tryMatch(items)
+
+  // v0.6.47: SCROLL-AND-RETRY — si el thread no está en los items visibles,
+  // scroleamos la lista para forzar lazy-load (LinkedIn solo renderiza ~20-30
+  // items inicialmente; las convos antiguas están abajo). Repetimos hasta 6
+  // veces (~12s) o hasta que aparezca el target.
+  if (!match) {
+    const scrollContainer = document.querySelector(
+      '.msg-conversations-container__conversations-list, ul[class*="conversations-list"]'
+    ) || document.querySelector('.msg-conversations-container')
+    const initialCount = items.length
+    for (let i = 0; i < 6 && !match; i++) {
+      if (scrollContainer) {
+        scrollContainer.scrollTop = scrollContainer.scrollHeight  // ir hasta abajo
+        await sleep(randInt(900, 1400))  // dejar que React renderice
+      } else {
+        // fallback: scrollear el window
+        window.scrollTo({ top: document.body.scrollHeight, behavior: 'instant' })
+        await sleep(randInt(900, 1400))
+      }
+      items = getItems()
+      if (items.length === initialCount && i > 1) break  // no se cargaron más items
+      match = tryMatch(items)
+    }
+    if (match) {
+      console.log(`[Orion content] openThreadFromInbox: ✅ encontrado tras scroll-retry (${items.length} items render)`)
+    }
+  }
+
+  const target = match?.target ?? null
+  if (target) console.log(`[Orion content] openThreadFromInbox: matched by ${match.by}`)
+
+  if (!target) {
+    console.warn(`[Orion content] openThreadFromInbox: no encontré conv de "${leadName}" (thread_id=${wantedThreadId?.slice(0,20)}…) en ${items.length} items`)
+    return false
+  }
+
+  // Click en el área clickeable del item → abre la conversación (SPA)
+  const clickable = target.querySelector(
+    '.msg-conversation-listitem__link, [class*="convo-item-link"]'
+  ) ?? target
+  clickable.scrollIntoView({ block: 'center', behavior: 'instant' })
+  await sleep(randInt(300, 600))
+  clickable.click()
+
+  // Esperar a que la conversación abra: URL /thread/ O composer visible
+  const start = Date.now()
+  while (Date.now() - start < 8000) {
+    if (/\/messaging\/thread\//.test(location.href)) break
+    if (document.querySelector('.msg-form__contenteditable, [class*="msg-form__contenteditable"]')) break
+    await sleep(300)
+  }
+  await sleep(randInt(600, 1100))  // hidratación del composer
+  console.log(`[Orion content] openThreadFromInbox: conversación de "${leadName}" abierta (url=${location.href.slice(0,60)})`)
+  return true
+}
+
 async function sendFollowup(payload = {}) {
   const { threadUrl, profileUrl, message, leadName, dryRun } = payload
   console.log(`[Orion content] sendFollowup: thread=${threadUrl?.slice(0, 60)}, profile=${profileUrl?.slice(0, 60)}, dryRun=${dryRun}`)
@@ -1300,11 +2837,117 @@ async function sendFollowup(payload = {}) {
   // - /messaging/compose/?recipient=... → composer pantalla completa (write+send)
   // - /messaging/thread/<id>/ → thread existente (flow original)
   const isProfilePage = /\/in\//.test(location.pathname) && !/\/messaging\//.test(location.pathname)
-  const isThreadPage  = location.href.includes('/messaging/thread/')
+  let isThreadPage    = location.href.includes('/messaging/thread/')
   const isComposePage = /\/messaging\/compose/.test(location.pathname)
+  const isInboxPage   = /\/messaging\/?($|\?)/.test(location.pathname) && !isThreadPage && !isComposePage
 
   if (isProfilePage) {
     return await sendFollowupFromProfile(payload)
+  }
+
+  // P1: si estamos en el INBOX (lista) y tenemos thread/lead → abrir la
+  // conversación por CLICK desde la lista (SPA in-app). Navegar directo al
+  // thread URL dejaba la página a medias sin composer; clickear desde la lista
+  // monta la conversación + editor confiablemente (como lo haría un humano).
+  //
+  // v0.6.43 + v0.7.10: si la tab quedó en /messaging/thread/<id>/ por una FU
+  // anterior (cascada thread_header_mismatch) O simplemente seguimos en thread
+  // page del FU previo, forzamos navegar al inbox via SPA pushState ANTES de
+  // click-to-open desde el inbox. El SW ya navegó a /messaging/ via
+  // navigateTabAndWait (background.js:450) pero LinkedIn SPA a veces mantiene
+  // el thread anterior en location.pathname → re-aseguramos aquí.
+  let needForceInbox = false
+  let threadMismatchDetected = false
+  if (isThreadPage && threadUrl) {
+    const currentMatch = location.pathname.match(/\/messaging\/thread\/([^/?#]+)/)
+    const wantedMatch = threadUrl.match(/\/messaging\/thread\/([^/?#]+)/)
+    const currentId = currentMatch ? decodeURIComponent(currentMatch[1]) : null
+    const wantedId = wantedMatch ? decodeURIComponent(wantedMatch[1]) : null
+    if (currentId && wantedId && currentId !== wantedId) {
+      console.warn(`[Orion content] thread mismatch en URL — current=${currentId.slice(0,20)}… wanted=${wantedId.slice(0,20)}… → forzar inbox`)
+      needForceInbox = true
+      threadMismatchDetected = true
+    }
+  }
+  // v0.7.10: incluso sin mismatch explícito, si la tab arrancó en thread page
+  // forzamos pushState a /messaging/ para garantizar que openThreadFromInbox
+  // monte la conv desde la lista (más confiable que reusar la pegada).
+  if (isThreadPage && threadUrl && !needForceInbox) {
+    needForceInbox = true
+  }
+
+  if (needForceInbox) {
+    // Navegar al inbox via SPA route — preserva content.js context.
+    // v0.7.10: window.__orionAllowSpaNav=true bypassa el SPA route-guard de
+    // v0.7.9 (líneas 313-359) que bloquearía este pushState si hay un draft
+    // activo en el thread anterior (escape hatch documentado en línea 341).
+    const pushStart = Date.now()
+    try {
+      window.__orionAllowSpaNav = true
+      history.pushState({}, '', '/messaging/')
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    } finally {
+      // Limpiamos el flag de inmediato — el resto del flow debe respetar el guard.
+      window.__orionAllowSpaNav = false
+    }
+    // v0.7.10: checkpoint observable para phase-analyzer y visual learning.
+    // Si esto deja de aparecer en micro_phase_log → fix degradado.
+    try {
+      chrome.runtime.sendMessage({
+        type: 'orion_micro_phase',
+        commandId: _currentCommandId,
+        action: 'send_followup',
+        entry: {
+          name: 'pre_nav_inbox_pushed',
+          ts: Date.now(),
+          elapsed: Date.now() - (_executingSince || Date.now()),
+          state: 'mark',
+          ms: Date.now() - pushStart,
+          extra: {
+            threadMismatch: threadMismatchDetected,
+            previousUrl: location.href.slice(0, 80),
+          },
+        },
+      }).catch(() => {})
+    } catch {}
+    await sleep(randInt(1200, 2000))
+    isThreadPage = false  // ya no estamos en thread page
+  }
+
+  if ((isInboxPage || needForceInbox) && (threadUrl || leadName)) {
+    const opened = await openThreadFromInbox(leadName, threadUrl)
+    if (!opened) {
+      // v0.7.5: track para visual learning (3× en 1h → captura)
+      try { vlOnPhaseTimeout('thread_not_found_in_inbox') } catch {}
+      return {
+        action: 'send_followup',
+        status: 'error',
+        error:  'thread_not_found_in_inbox',
+        leadName,
+        currentUrl: location.href,
+      }
+    }
+    // v0.7.10: compose-redirect guard. LinkedIn a veces redirige el click del
+    // item del inbox a /messaging/compose/?profileUrn=... cuando el thread
+    // está huérfano o el lead degradó a 2do grado mid-conversation. Sin este
+    // guard, isThreadPage se fuerza a true abajo y el flow continúa hacia
+    // humanType, terminando en exec_hard_timeout_send_followup_275000ms (275s
+    // perdidos). Detectamos la URL final inmediatamente.
+    if (/^\/messaging\/compose\//.test(location.pathname)) {
+      console.warn(`[Orion v0.7.10] thread_lost_compose_redirect — LinkedIn redirigió a ${location.pathname.slice(0,60)} (lead=${leadName})`)
+      try { vlOnPhaseTimeout('thread_lost_compose_redirect') } catch {}
+      try { await setPhase('error', { leadName, reason: 'thread_lost_compose_redirect', finalUrl: location.href.slice(0, 120) }) } catch {}
+      return {
+        action: 'send_followup',
+        status: 'error',
+        error:  'thread_lost_compose_redirect',
+        reason: 'linkedin_redirected_to_compose_post_inbox_click',
+        leadName,
+        currentUrl: location.href,
+        threadUrl,
+      }
+    }
+    isThreadPage = true  // ahora estamos en el thread abierto
   }
 
   // 1. Verificar URL: thread o compose page son válidas para escribir
@@ -1361,6 +3004,24 @@ async function sendFollowup(payload = {}) {
     }
   }
 
+  // v0.7.6: PRE-EDITOR CHECK — detectar si el thread permite mensajes nuevos
+  // ANTES de gastar 12s waitForSelector que va a fallar.
+  await sleep(800)  // dejar que LinkedIn renderice el thread completo
+  const messageable = detectNotMessageable()
+  if (messageable.detected) {
+    console.log(`[Orion content] v0.7.6 not-messageable detectado: ${messageable.reason}`)
+    try { vlOnPhaseTimeout(`not_messageable_${messageable.reason}`) } catch {}
+    return {
+      action: 'send_followup',
+      status: 'error',
+      error: 'lead_not_messageable',
+      reason: messageable.reason,
+      signals: messageable.signals,
+      headerName: leadName,
+      url: location.href,
+    }
+  }
+
   // 3. Esperar al editor del thread — selectores múltiples + fallback ultra-permissive
   const editorSels = [
     '.msg-form__contenteditable',
@@ -1387,6 +3048,39 @@ async function sendFollowup(payload = {}) {
     editor = candidates[0] ?? null
   }
 
+  // NUDGE: en threads, LinkedIn a veces NO monta el contenteditable hasta que
+  // interactúas con el área del formulario. Si no lo encontramos, clickeamos el
+  // placeholder/form footer para forzar el render, scroll al fondo, y re-esperamos.
+  if (!editor) {
+    console.log('[Orion content] Editor no encontrado — nudge para forzar render')
+    try {
+      // Scroll al fondo del thread (el form está abajo)
+      const scrollable = document.querySelector('.msg-s-message-list-container, [class*="msg-s-message-list"]')
+      if (scrollable) scrollable.scrollTop = scrollable.scrollHeight
+      window.scrollTo({ top: document.body.scrollHeight, behavior: 'instant' })
+      await sleep(800)
+      // Click en el placeholder "Escribe un mensaje..." o el contenedor del form
+      const formArea = document.querySelector(
+        '.msg-form__placeholder, .msg-form__msg-content-container, [class*="msg-form"]'
+      )
+      if (formArea && formArea.offsetParent !== null) {
+        formArea.click()
+        await sleep(randInt(400, 800))
+      }
+    } catch (err) {
+      console.warn('[Orion content] nudge falló:', err?.message)
+    }
+    // Segunda espera tras el nudge (hidratación tardía)
+    const reSel = await waitForSelector(editorSels, 8000)
+    editor = reSel ? document.querySelector(reSel) : null
+    if (!editor) {
+      const cands2 = Array.from(document.querySelectorAll('div[contenteditable="true"]'))
+        .filter(el => el.offsetParent !== null && el.getBoundingClientRect().width > 100)
+      editor = cands2[0] ?? null
+    }
+    if (editor) console.log('[Orion content] ✅ Editor apareció tras nudge')
+  }
+
   if (!editor) {
     // Debug: capturar TODO lo que podría ser un editor
     const allEditables = Array.from(document.querySelectorAll('div[contenteditable], textarea, input[type="text"]'))
@@ -1397,13 +3091,79 @@ async function sendFollowup(payload = {}) {
         aria: (el.getAttribute('aria-label') ?? '').slice(0, 50),
         classes: (el.className ?? '').slice(0, 80),
         visible: el.offsetParent !== null,
+        el,  // referencia DOM para v0.6.48
       }))
+
+    // v0.6.48 — COMPOSE RECIPIENT SELECT FIX: cuando estamos en /messaging/compose/
+    // con un campo `msg-connections-typeahead__search-field` (selector "Para:")
+    // pero sin editor de mensaje, LinkedIn está esperando que escribamos el lead
+    // en el typeahead para que aparezca el editor. Caso típico: invite sin nota
+    // que fue aceptada — LinkedIn no auto-popula el recipient aunque venga en URL.
+    const typeaheadField = allEditables.find(e =>
+      (e.classes ?? '').includes('msg-connections-typeahead__search-field') && e.visible
+    )?.el
+    if (isComposePage && typeaheadField && leadName) {
+      console.log(`[Orion content] v0.6.48 — compose typeahead detectado, escribiendo "${leadName}" para seleccionar recipient`)
+      try {
+        typeaheadField.focus()
+        await sleep(randInt(300, 600))
+        // Tipear humanizado en el typeahead
+        const firstWords = leadName.split(/\s+/).slice(0, 2).join(' ')  // 2 primeras palabras
+        for (const ch of firstWords) {
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+          setter?.call(typeaheadField, (typeaheadField.value ?? '') + ch)
+          typeaheadField.dispatchEvent(new Event('input', { bubbles: true }))
+          await sleep(randInt(50, 130))
+        }
+        await sleep(randInt(800, 1400))  // esperar autocomplete
+
+        // Click en la primera sugerencia del dropdown — buscar li/button visible
+        // con el nombre del lead dentro del dropdown que LinkedIn renderiza.
+        const suggestionSels = [
+          '.msg-connections-typeahead__search-result',
+          '[class*="typeahead__search-result"]',
+          '[class*="typeahead-suggestions"] li',
+          '[role="option"]',
+          '.search-typeahead-v2__hit',
+        ]
+        let suggestion = null
+        for (const sel of suggestionSels) {
+          const candidates = Array.from(document.querySelectorAll(sel))
+            .filter(el => el.offsetParent !== null)
+          if (candidates.length > 0) { suggestion = candidates[0]; break }
+        }
+        if (suggestion) {
+          console.log(`[Orion content] v0.6.48 — click en sugerencia recipient`)
+          suggestion.scrollIntoView({ block: 'center', behavior: 'instant' })
+          await sleep(randInt(200, 400))
+          suggestion.click()
+          await sleep(randInt(1500, 2500))  // esperar que editor aparezca
+
+          // Re-buscar el editor ahora que el recipient está seleccionado
+          const reEditorSel = await waitForSelector(editorSels, 10000)
+          editor = reEditorSel ? document.querySelector(reEditorSel) : null
+          if (!editor || editor.offsetParent === null) {
+            editor = Array.from(document.querySelectorAll('div[contenteditable="true"]'))
+              .find(el => {
+                if (el.offsetParent === null) return false
+                const r = el.getBoundingClientRect()
+                return r.width > 100 && r.height > 25
+              })
+          }
+          if (editor) console.log(`[Orion content] v0.6.48 ✅ editor encontrado tras selección de recipient`)
+        } else {
+          console.warn('[Orion content] v0.6.48 — no apareció sugerencia en dropdown')
+        }
+      } catch (err) {
+        console.warn(`[Orion content] v0.6.48 — fallo seleccionar recipient: ${err.message}`)
+      }
+    }
 
     // Patrón "compose-page-2nd-degree": estamos en /messaging/compose/, el editor
     // nunca aparece, y los únicos elementos editables son el search global + el
     // textarea oculto de recaptcha. LinkedIn esconde el editor cuando es 2do grado
     // SIN redirigir a /sales/ ni mostrar "créditos disponibles". Auto-revert.
-    if (isComposePage && allEditables.length <= 3) {
+    if (!editor && isComposePage && allEditables.length <= 3) {
       const hasOnlyNoise = allEditables.every(e =>
         (e.classes ?? '').includes('search-global-typeahead') ||
         (e.classes ?? '').includes('g-recaptcha-response')
@@ -1419,12 +3179,14 @@ async function sendFollowup(payload = {}) {
       }
     }
 
-    return {
-      action: 'send_followup',
-      status: 'error',
-      error:  'thread_editor_not_found',
-      url:    location.href,
-      debugEditables: allEditables,
+    if (!editor) {
+      return {
+        action: 'send_followup',
+        status: 'error',
+        error:  'thread_editor_not_found',
+        url:    location.href,
+        debugEditables: allEditables.map(({ el, ...rest }) => rest),  // sin la ref DOM
+      }
     }
   }
   await sleep(randInt(1500, 2500))  // hidratación
@@ -1446,11 +3208,86 @@ async function sendFollowup(payload = {}) {
     }
   }
 
-  // 5. humanType en contenteditable
+  // 4.5 v0.6.45 PRE-SEND GUARD: leer los últimos mensajes del thread y verificar
+  // si ya respondimos. Caso Kelisha: 12 intentos fallaron por timeout/error pero
+  // uno SÍ se envió en LinkedIn — DB no se enteró y scheduler reagenda. Esta guardia
+  // detecta "último mensaje del thread es OUTBOUND nuestro" → skip + report al bridge.
+  const lastOutboundCheck = detectLastMessageIsOutbound()
+  if (lastOutboundCheck.isOurs) {
+    console.log(`[Orion content] ✋ pre-send guard: último msg del thread ya es nuestro (${lastOutboundCheck.preview?.slice(0,50)}…) — skip envío duplicado`)
+    return {
+      action: 'send_followup',
+      status: 'already_responded',  // bridge ingest lo trata como envío silencioso
+      headerName,
+      lastOutboundPreview: lastOutboundCheck.preview?.slice(0, 200),
+      lastOutboundTs: lastOutboundCheck.timestamp,
+      note: 'thread ya tiene outbound como último msg — no se envía duplicado',
+    }
+  }
+
+  // 4.6 v0.7.8 AWAITING-RESPONSE LOCK CHECK — antes de gastar typing/Send.
+  // Si LinkedIn aplicó la "ban window" (banner + composer/send disabled), abortamos
+  // y reportamos status='awaiting_response' para que el bridge marque el lead
+  // sin consumir retry ni avanzar fu_count.
+  try {
+    const lock = await detectAwaitingResponseLock(editor)
+    if (lock.locked) {
+      console.log(`[Orion content] ⏳ awaiting_response lock: ${lock.reason}`)
+      try { vlOnPhaseTimeout(`awaiting_response_${lock.reason}`) } catch {}
+      return {
+        action: 'send_followup',
+        status: 'awaiting_response',
+        reason: lock.reason,
+        signals: lock.signals,
+        headerName,
+        url: location.href,
+      }
+    }
+  } catch (e) {
+    console.warn(`[Orion content] awaiting_response detector error:`, e?.message || e)
+  }
+
+  // 5. v0.7.2 MICRO-PHASE FLOW
   console.log(`[Orion content] Typing FU (${message.length} chars) en thread de ${headerName || '?'}`)
+  await setPhase('thread_opened', { leadName, msgLen: message.length })
+  const runner = new MicroPhaseRunner(_currentCommandId, 'send_followup')
+  const expectedTail = (message ?? '').slice(0, 8000).slice(-25).toLowerCase().replace(/\s+/g, ' ').trim()
+  const expectedHead = (message ?? '').slice(0, 30).toLowerCase().replace(/\s+/g, ' ').trim()
+
+  // µ-Phase: editor_focused — esperar a que activeElement sea el editor
+  // v0.7.3: timeout dinámico desde runtime_config (auto-tuned por phase-analyzer L3)
   editor.focus()
-  await sleep(randInt(300, 600))
-  await humanTypeContentEditable(editor, message.slice(0, 8000))  // LinkedIn permite mensajes largos
+  await runner.runPhase('editor_focused', () => {
+    if (document.activeElement === editor) return { tag: editor.tagName, cls: (editor.className||'').slice(0,60) }
+    editor.focus()
+    return null
+  }, { timeoutMs: getPhaseTimeout('editor_focused', 3000), intervalMs: 200 })
+
+  // Typing (humanType es síncronamente costoso; mark phase started/ended)
+  await runner.mark('typing_started', { msgLen: message.length, expectedHead: expectedHead.slice(0, 20), chunkMode: message.length > 300 })
+  // v0.7.5: progress callback emite µ-phase typing_progress cada 25%
+  await humanTypeContentEditable(editor, message.slice(0, 8000), {
+    progressCallback: async ({ charsTyped, total, pct }) => {
+      await runner.mark(`typing_progress_${pct}pct`, { charsTyped, total })
+      // Mantener phase activa para que SW no asuma stale durante typing largo
+      await setPhase('typing', { leadName, charsTyped, total, pct })
+    },
+  })
+
+  // µ-Phase: typing_complete — verificar que el editor contiene fingerprint completo
+  // Polea hasta que el textContent del editor matchee head + tail (>= 95% del mensaje)
+  await runner.runPhase('typing_complete', () => {
+    const actual = (editor.textContent ?? '').toLowerCase().replace(/\s+/g, ' ').trim()
+    if (actual.length < expectedHead.length) return null
+    const hasHead = actual.startsWith(expectedHead.slice(0, 20))
+    const hasTail = expectedTail.length === 0 || actual.endsWith(expectedTail.slice(-15))
+    if (hasHead && hasTail) {
+      return { editorLen: actual.length, expectedLen: message.length, ratio: +(actual.length / message.length).toFixed(3) }
+    }
+    return null
+  }, { timeoutMs: getPhaseTimeout('typing_complete', 4000), intervalMs: 250 })
+
+  await setPhase('typed', { leadName, charsTyped: editor.textContent?.length ?? 0 })
   await sleep(randInt(500, 1000))
 
   // 6. dryRun: limpiar editor + return sin enviar
@@ -1470,12 +3307,20 @@ async function sendFollowup(payload = {}) {
 
   // 6.5 VERIFICACIÓN: confirmar que el editor contiene el mensaje completo antes
   // de clickear Send. Defensa contra typing interrumpido / texto truncado.
-  const editorText = (editor.textContent ?? editor.innerText ?? '').trim()
-  const expectedText = message.slice(0, 8000).trim()
+  // v0.7.11 fix: canonicalizar AMBOS lados con replace(/\s+/g,' ').trim()
+  // — coincide con la normalización de la µ-phase typing_complete y elimina
+  // el false-positive truncated que disparaba CRLF en el mensaje original
+  // (cada \r\n perdía 1 char en editor.textContent porque insertText convierte
+  // \n → <br>, no serializable de vuelta). Compare en forma canónica único.
+  const canon = (s) => String(s ?? '').replace(/\s+/g, ' ').trim()
+  const editorRaw = (editor.textContent ?? editor.innerText ?? '')
+  const expectedRaw = message.slice(0, 8000)
+  const editorText = canon(editorRaw)
+  const expectedText = canon(expectedRaw)
   const editorLen = editorText.length
   const expectedLen = expectedText.length
   const lenRatio = expectedLen > 0 ? editorLen / expectedLen : 0
-  // Comparamos últimos 30 chars (tail) — si typing fue cortado, el tail no coincide
+  // Comparamos últimos 30 chars (tail, ya canónico) — si typing fue cortado, el tail no coincide
   const tailExpected = expectedText.slice(-30)
   const tailEditor = editorText.slice(-30)
   // Detección de:
@@ -1500,9 +3345,11 @@ async function sendFollowup(payload = {}) {
       lenRatio: Number(lenRatio.toFixed(3)),
       editorTail: tailEditor,
       expectedTail: tailExpected,
+      editorRawLen: editorRaw.length,
+      expectedRawLen: expectedRaw.length,
     }
   }
-  console.log(`[Orion content] ✅ Editor verified: ${editorLen}/${expectedLen} chars match`)
+  console.log(`[Orion content] ✅ Editor verified (canon): ${editorLen}/${expectedLen} chars match`)
 
   // 7. Click Send button (botón regular del thread footer / compose page)
   // El send button puede aparecer tardío en compose page — pequeño retry
@@ -1522,11 +3369,121 @@ async function sendFollowup(payload = {}) {
     }
   }
   console.log(`[Orion content] Send button: aria="${sendBtn.getAttribute('aria-label')}" cls="${(sendBtn.className ?? '').slice(0, 60)}"`)
-  await humanClick(sendBtn)
-  await sleep(randInt(2000, 3000))
 
-  // 8. Verificar que el mensaje aparece en el thread (último mensaje)
-  const confirmed = await verifyFollowupSent(message)
+  // µ-Phase: send_button_enabled — esperar a que el botón sea clickeable
+  // (LinkedIn lo deshabilita durante typing/processing intermitentemente)
+  await runner.runPhase('send_button_enabled', () => {
+    if (!sendBtn.isConnected) return null
+    if (sendBtn.disabled) return null
+    if (sendBtn.getAttribute('aria-disabled') === 'true') return null
+    return { aria: sendBtn.getAttribute('aria-label'), cls: (sendBtn.className||'').slice(0,60) }
+  }, { timeoutMs: getPhaseTimeout('send_button_enabled', 4000), intervalMs: 200 })
+
+  // v0.7.3: FALLBACK CHAIN con orden DINÁMICO desde runtime_config (L4 auto-reorder).
+  // Cada método verifica si el editor se vació (LinkedIn vacía post-send exitoso).
+  const sendBeforeText = (editor.textContent ?? '').trim()
+  const tryAndVerifySend = async (label, action) => {
+    await action()
+    try {
+      return await runner.runPhase(`editor_cleared_via_${label}`, () => {
+        if (!editor.isConnected) return { method: label, reason: 'editor_detached_after_send' }
+        const current = (editor.textContent ?? '').trim()
+        if (current.length < sendBeforeText.length * 0.1) return { method: label }
+        return null
+      }, { timeoutMs: getPhaseTimeout(`editor_cleared_via_${label}`, 4500), intervalMs: 300 })
+    } catch { return null }
+  }
+
+  const sendMethodActions = {
+    humanClick: async () => {
+      await humanClick(sendBtn)
+      await setPhase('send_clicked', { leadName, sendBtnAria: sendBtn.getAttribute('aria-label'), method: 'humanClick' })
+    },
+    ctrl_enter: async () => {
+      editor.focus()
+      await sleep(200)
+      editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', ctrlKey: true, bubbles: true, cancelable: true }))
+      editor.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', ctrlKey: true, bubbles: true }))
+    },
+    plain_enter: async () => {
+      editor.focus()
+      await sleep(200)
+      editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }))
+      editor.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }))
+    },
+    form_submit: async () => {
+      const form = editor.closest('form, .msg-form, [class*="msg-form"]')
+      if (form) {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+        if (typeof form.requestSubmit === 'function') form.requestSubmit()
+      }
+    },
+  }
+  const sendOrder = getSendMethodOrder().filter(m => sendMethodActions[m])
+  console.log(`[Orion content] send order (dinámico): ${sendOrder.join(' → ')}`)
+
+  let sendMethod = null
+  for (const methodName of sendOrder) {
+    if (sendMethod) break
+    sendMethod = await tryAndVerifySend(methodName, sendMethodActions[methodName])
+    if (sendMethod && methodName !== 'humanClick') {
+      await runner.mark(`send_clicked_via_${methodName}`)
+    }
+  }
+
+  if (!sendMethod) {
+    await runner.mark('send_all_methods_failed', { tried: ['humanClick','ctrl_enter','plain_enter','form_submit'] })
+    return {
+      action: 'send_followup',
+      status: 'error',
+      error: 'send_method_exhausted',
+      headerName,
+      microPhases: runner.getPhases().slice(-15),
+    }
+  }
+
+  console.log(`[Orion content] ✅ send vía ${sendMethod.method}`)
+  await setPhase('send_clicked', { leadName, method: sendMethod.method })
+
+  // µ-Phase: message_in_dom — confirmar que el mensaje aparece en el thread
+  let domConfirm = null
+  try {
+    domConfirm = await runner.runPhase('message_in_dom', () => {
+      // v0.7.16 L6: pool ampliado + match permisivo (slice 20, normalización agresiva,
+      // fallback en innerHTML). Mismo patrón que confirmMessageSent().
+      const messages = document.querySelectorAll(
+        '.msg-s-message-list__event, .msg-s-event-listitem, [class*="msg-s-event"], ' +
+        '.msg-s-message-group, [class*="message-group"], ' +
+        '.msg-s-message-list li, li[role="listitem"]'
+      )
+      const normalize = (s) => (s ?? '').toLowerCase()
+        .replace(/[ ​-‍﻿]/g, ' ')
+        .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+        .replace(/\s+/g, ' ').trim()
+      const fingerprint = normalize(message).slice(0, 20)
+      if (!fingerprint || fingerprint.length < 8) return null
+      for (let i = messages.length - 1; i >= Math.max(0, messages.length - 8); i--) {
+        const t = normalize(messages[i]?.textContent)
+        if (t.includes(fingerprint)) {
+          return { foundAt: i, totalMessages: messages.length, sendMethod: sendMethod.method, matchedOn: 'textContent' }
+        }
+        const html = normalize((messages[i]?.innerHTML ?? '').replace(/<[^>]+>/g, ' '))
+        if (html.includes(fingerprint)) {
+          return { foundAt: i, totalMessages: messages.length, sendMethod: sendMethod.method, matchedOn: 'innerHTML' }
+        }
+      }
+      return null
+    }, { timeoutMs: 12000, intervalMs: 500 })
+  } catch {
+    // Si no encontramos en DOM pero editor se vació, asumimos sent_unconfirmed
+    domConfirm = null
+  }
+
+  const confirmation = { confirmed: !!domConfirm, ...(domConfirm ?? {}) }
+  const confirmed = confirmation.confirmed
+  if (confirmed) {
+    await setPhase('send_confirmed', { leadName, sendMethod: sendMethod.method, foundAt: domConfirm.foundAt })
+  }
 
   // Sub-Fase 3.8: si veníamos de /messaging/compose/, capturar thread_id post-send.
   // LinkedIn redirige a /messaging/thread/<new_id>/ tras enviar.
@@ -1550,14 +3507,19 @@ async function sendFollowup(payload = {}) {
     }
   }
 
+  // v0.7.0 FSM: phase final + status diferenciado por confirmación
+  await setPhase('done', { leadName, confirmed, sentAt: new Date().toISOString() })
   return {
     action: 'send_followup',
-    status: confirmed ? 'sent' : 'sent_unconfirmed',
+    status: confirmed ? 'sent_confirmed' : 'sent_unconfirmed',
     editorUsed: true,
     headerName,
     path: isComposePage ? 'compose_page' : 'thread_page',
     threadIdCaptured,
     sentAt: new Date().toISOString(),
+    confirmation: confirmation ?? null,
+    sendMethod: sendMethod?.method ?? null,
+    microPhases: runner.getPhases().slice(-25),  // últimas 25 transitions
   }
 }
 
@@ -2068,19 +4030,97 @@ function listAllVisibleButtonsVerbose(limit = 80) {
     }))
 }
 
+// v0.6.45: lee los últimos N mensajes visibles del thread abierto y determina
+// si el más reciente es OUTBOUND (nuestro). Usa marcadores típicos de LinkedIn
+// que distinguen quién envió el mensaje. Robusto a cambios de class names.
+function detectLastMessageIsOutbound() {
+  // LinkedIn marca msgs nuestros con sender name = "Tú" (es-MX) / "You" (en),
+  // o con clases tipo `msg-s-message-group__profile-link--from-user`, o el
+  // bloque msg-s-event-listitem--from-me. Probamos varios heurísticos.
+  const allMsgs = document.querySelectorAll(
+    '.msg-s-message-list__event, .msg-s-event-listitem, [class*="msg-s-event"]'
+  )
+  if (allMsgs.length === 0) return { isOurs: false, reason: 'no_messages_in_dom' }
+
+  // Tomar el último visible. LinkedIn renderiza el más reciente al final.
+  const last = allMsgs[allMsgs.length - 1]
+  if (!last) return { isOurs: false }
+
+  // Heurístico 1: clases con "--from-me" o "--from-user"
+  const hasFromMeClass = !!last.querySelector('[class*="from-me"], [class*="from-user"]') ||
+                        /from-me|from-user/.test(last.className ?? '')
+  // Heurístico 2: header del grupo dice "Tú" o "You"
+  const senderHeader = last.querySelector(
+    '.msg-s-message-group__profile-link, .msg-s-message-group__name, [class*="message-group__name"]'
+  )
+  const senderText = (senderHeader?.textContent ?? '').trim().toLowerCase()
+  const isYou = senderText === 'tú' || senderText === 'you' || senderText === 'tu'
+  // Heurístico 3: alineación a la derecha (LinkedIn estiliza outbound a la derecha)
+  // No siempre confiable; usar solo como tiebreaker.
+  let isOurs = hasFromMeClass || isYou
+
+  // Si el last es un "indicador" sin contenido (timestamp separator), buscar hacia atrás
+  let probe = last
+  let attempts = 5
+  while (probe && attempts-- > 0) {
+    const content = (probe.textContent ?? '').trim()
+    if (content.length > 5) break  // tiene contenido real
+    probe = probe.previousElementSibling
+  }
+  const preview = (probe?.textContent ?? '').trim()
+  const timeEl = probe?.querySelector('time, [class*="timestamp"]')
+  const timestamp = timeEl?.getAttribute('datetime') ?? timeEl?.textContent ?? null
+
+  // Re-evaluate from probe if we walked back
+  if (probe && probe !== last) {
+    const probeHasFromMe = !!probe.querySelector('[class*="from-me"], [class*="from-user"]') ||
+                          /from-me|from-user/.test(probe.className ?? '')
+    const probeSender = probe.querySelector(
+      '.msg-s-message-group__profile-link, .msg-s-message-group__name'
+    )
+    const probeSenderText = (probeSender?.textContent ?? '').trim().toLowerCase()
+    isOurs = probeHasFromMe || probeSenderText === 'tú' || probeSenderText === 'you'
+  }
+
+  return { isOurs, preview, timestamp, senderText }
+}
+
 async function verifyFollowupSent(message) {
   // El mensaje recién enviado debe aparecer al final del thread (msg-s-event-list)
-  const messages = document.querySelectorAll('.msg-s-message-list__event, [class*="msg-s-event"]')
-  const last = messages[messages.length - 1]
-  if (!last) return false
+  // v0.6.41: retry loop con budget 8s en lugar de 1-shot. LinkedIn a veces tarda
+  // 3-5s en renderizar el mensaje recién enviado en el DOM.
   const snippet = message.slice(0, 50).toLowerCase()
-  return (last.textContent ?? '').toLowerCase().includes(snippet)
+  const deadline = Date.now() + 8000
+  while (Date.now() < deadline) {
+    const messages = document.querySelectorAll('.msg-s-message-list__event, [class*="msg-s-event"]')
+    const last = messages[messages.length - 1]
+    if (last && (last.textContent ?? '').toLowerCase().includes(snippet)) {
+      return true
+    }
+    await sleep(400)
+  }
+  return false
 }
 
 // ── humanTypeContentEditable: para divs contenteditable (no textareas) ──
-async function humanTypeContentEditable(el, text) {
+// v0.6.41: detecta URL change durante typing (SPA route change interrumpe typing).
+// v0.7.5: CHUNK MODE para mensajes largos (>300 chars). En vez de typear char-por-char
+// con pausa entre cada (que LinkedIn React re-renders y ralentiza 2-3×), typeamos
+// en bursts de 10 chars con UNA pausa por burst. Reduce events ~10× y mantiene
+// human-like timing (cada burst es un "thought" del humano).
+//
+// Para mensajes cortos (<300 chars), preservamos char-by-char con pausas naturales.
+async function humanTypeContentEditable(el, text, options = {}) {
+  const { progressCallback } = options
+  // v0.7.11 CRLF normalization: templates/AI a veces generan \r\n (Windows EOL).
+  // execCommand('insertText', ...) en contenteditable convierte el \n a <br> (que
+  // luego desaparece de editor.textContent), mientras que el \r sobrevive como
+  // char literal. Resultado: editor.textContent termina más corto que el buffer
+  // tipeado → la verificación post-typing dispara lenRatio<0.95 = truncated
+  // false-positive. Normalizamos a \n único (y limpiamos \r solitarios) UNA VEZ
+  // para que el typing y el length-compare estén alineados.
+  text = String(text ?? '').replace(/\r\n?/g, '\n')
   el.focus()
-  // Posicionar caret al final
   const range = document.createRange()
   range.selectNodeContents(el)
   range.collapse(false)
@@ -2088,16 +4128,66 @@ async function humanTypeContentEditable(el, text) {
   sel.removeAllRanges()
   sel.addRange(range)
 
-  for (const ch of text) {
-    // execCommand insertText es la forma estándar de inyectar en contenteditable
-    // que Slack/LinkedIn/Discord aceptan + dispara los eventos React internos
-    document.execCommand('insertText', false, ch)
-    let delay = randInt(55, 130)
-    if ('.?,!¡¿\n'.includes(ch)) delay += randInt(80, 200)
-    if (Math.random() < 0.05) delay += randInt(300, 500)
+  const startUrl = location.href
+  // v0.7.40 FIX background-throttle (mismo que send_invite humanTypeChunked): en
+  // tabs background Chrome throttlea setTimeout a ~1000ms → char-por-char (1 sleep
+  // POR carácter) hace que un FU de 200 chars tarde ~200s → exec_hard_timeout. Era
+  // la causa del ~59% success histórico de send_followup. Bajamos el umbral de 300
+  // a 40 → los FU típicos (100-280 chars) ahora chunkean (chunkSize 10 → ~10-28
+  // sleeps ≈ 10-28s). Solo mensajes ≤40 chars siguen char-por-char (≤40s, seguro).
+  const useChunks = text.length > 40
+  const chunkSize = useChunks ? 10 : 1
+  let charsTyped = 0
+  const total = text.length
+  const reportInterval = Math.max(1, Math.floor(total / 4))  // 25%, 50%, 75%, 100%
+  let lastReportThreshold = 0
+
+  if (useChunks) {
+    console.log(`[Orion content] humanType CHUNKED mode (${total} chars, chunks of ${chunkSize})`)
+  }
+
+  for (let i = 0; i < text.length; i += chunkSize) {
+    if (location.href !== startUrl) {
+      throw new Error(`navigation_during_typing_at_char_${charsTyped}_of_${total}`)
+    }
+    if (!el.isConnected) {
+      throw new Error(`editor_detached_at_char_${charsTyped}_of_${total}`)
+    }
+    const chunk = text.slice(i, i + chunkSize)
+    // En chunk mode: insertar string completo de chunk en UN execCommand
+    document.execCommand('insertText', false, chunk)
+    charsTyped += chunk.length
+
+    // Progress: cada 25% reportar al callback opcional
+    if (progressCallback && charsTyped >= lastReportThreshold + reportInterval) {
+      lastReportThreshold = charsTyped
+      const pct = Math.round((charsTyped / total) * 100)
+      try { await progressCallback({ charsTyped, total, pct }) } catch {}
+    }
+
+    // Pausa: en chunk mode escalamos por size del chunk para mantener WPM realista
+    let delay
+    // v0.7.21 P1-3: jitter_pct_typing wired desde runtime_config (default 0.70).
+    const pct = _runtimeConfig?.jitter_pct_typing ?? 0.70
+    if (useChunks) {
+      // 80-180ms por chunk de 10 chars = 8-18ms efectivo por char.
+      // Centro 140 × (1 ± pct) → si pct=0.70 → [42,238] (≈v0.7.16 [40,240]).
+      const minC = Math.max(20, Math.round(140 * (1 - pct)))
+      const maxC = Math.round(140 * (1 + pct))
+      delay = randInt(minC, maxC)
+      if (Math.random() < 0.12) delay += randInt(120, 500)  // "thinking" pause
+      if (/[.?!]/.test(chunk)) delay += randInt(80, 320)
+    } else {
+      const ch = chunk
+      // Centro 100 × (1 ± pct) → si pct=0.70 → [30,170] (igual v0.7.16).
+      const minC = Math.max(10, Math.round(100 * (1 - pct)))
+      const maxC = Math.round(100 * (1 + pct))
+      delay = randInt(minC, maxC)
+      if ('.?,!¡¿\n'.includes(ch)) delay += randInt(60, 240)
+      if (Math.random() < 0.07) delay += randInt(250, 600)
+    }
     await sleep(delay)
   }
-  // Trigger input event final para que React detecte el cambio
   el.dispatchEvent(new Event('input', { bubbles: true }))
 }
 
@@ -2110,14 +4200,32 @@ async function humanTypeContentEditable(el, text) {
 // Strategy: scroll natural → extractProfilesFromPage() → next page → repeat.
 // Post-filter por companyNames substring si fueron pasados.
 
+// v0.7.28 normaliza para comparación robusta: minúsculas + quita acentos.
+// FIX BUG location/company filter: LinkedIn renderiza ubicaciones acentuadas
+// ("Ciudad de México, México") pero las campañas configuran términos sin acento
+// ("Mexico") → "méxico".includes("mexico") era FALSE (é ≠ e) → rechazaba TODOS
+// los perfiles aunque geoUrn ya filtró server-side → Wal/Josh scrapeaban 0.
+function _normForFilter(s) {
+  return String(s ?? '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+}
+
 async function searchLeads(payload = {}) {
   const targetCount = Math.min(payload.targetCount ?? 25, 200)
   const maxPages = Math.min(payload.maxPages ?? 10, 20)
   const companyNames = Array.isArray(payload.companyNames)
-    ? payload.companyNames.filter(Boolean).map(s => s.toLowerCase())
+    ? payload.companyNames.filter(Boolean).map(_normForFilter)
+    : []
+  // Post-filter de location (fix 29-may-2026): si campaign tiene locations
+  // configuradas, filtramos perfiles cuyo .location matcheen al menos una.
+  // background.js ya mapea las ciudades conocidas a geoUrn (server-side).
+  // Este filter es backup para ciudades NO mapeadas o cuando LinkedIn devuelve
+  // perfiles de ubicaciones cercanas al geoUrn.
+  const locationFilters = Array.isArray(payload.locations)
+    ? payload.locations.filter(Boolean).map(_normForFilter)
     : []
 
   console.log(`[Orion content] searchLeads target=${targetCount} maxPages=${maxPages} url=${location.href}`)
+  _searchPaginatorDebug = null  // v0.7.22 BUG-F: reset debug por-cmd
 
   // 1. Sanity check: debemos estar en /search/results/people/
   if (!/\/search\/results\/people/.test(location.pathname)) {
@@ -2151,6 +4259,11 @@ async function searchLeads(payload = {}) {
   const seenUrls = new Set()
   let page = 1
   let stopReason = null
+  // v0.7.26 BUG company_names case-sensitivity: normalizar a minúsculas UNA vez.
+  // Antes el filtro comparaba headline.toLowerCase().includes(c) con c en su case
+  // original ("CEMEX","Softtek") → NUNCA matcheaba (minúscula no contiene mayúscula)
+  // → TODOS los perfiles filtrados → cuenta Josh (27 empresas) scrapeó 0 por 6 días.
+  const companyNamesLc = companyNames.filter(Boolean)  // ya normalizado (_normForFilter)
 
   while (page <= maxPages && collected.length < targetCount) {
     console.log(`[Orion content] Página ${page} — scrolling + extract`)
@@ -2167,11 +4280,21 @@ async function searchLeads(payload = {}) {
       if (seenUrls.has(p.profileUrl)) continue
       seenUrls.add(p.profileUrl)
 
-      // Post-filter: si companyNames está set, headline debe matchear
-      if (companyNames.length > 0) {
-        const h = (p.headline || '').toLowerCase()
-        const matched = companyNames.some(c => h.includes(c))
+      // Post-filter: si companyNames está set, headline debe matchear (case-insensitive v0.7.26).
+      // NOTA: matchear company en headline es DÉBIL (los headlines de LinkedIn rara vez
+      // incluyen el empleador). Si Josh necesita filtro estricto por empresa, mover a
+      // filtro currentCompany en la URL de búsqueda (requiere company URN lookup).
+      if (companyNamesLc.length > 0) {
+        const h = _normForFilter(p.headline)
+        const matched = companyNamesLc.some(c => h.includes(c))
         if (!matched) continue
+      }
+      // Post-filter de location: si campaign tiene locations, perfil debe
+      // matchear al menos una por substring (case + accent-insensitive v0.7.28).
+      if (locationFilters.length > 0) {
+        const loc = _normForFilter(p.location)
+        const locMatched = locationFilters.some(l => loc.includes(l))
+        if (!locMatched) continue
       }
       collected.push(p)
       added++
@@ -2184,6 +4307,53 @@ async function searchLeads(payload = {}) {
       break
     }
     if (pageProfiles.length === 0) {
+      // C4 fix (2026-05-29): distinguir entre "no hay más resultados" (legítimo)
+      // y "selector roto / captcha bloqueando" (problema). Si en página 1 hay 0
+      // perfiles, revisar si el contenedor sigue ahí y si hay captcha visible.
+      if (page === 1) {
+        const containerStillThere = !!document.querySelector(resultsSel.join(','))
+        const bodyTxt = (document.body?.innerText ?? '').toLowerCase()
+        const captchaSignals = ['captcha', 'verify you are human', 'verifica que eres humano', 'security check', 'unusual activity']
+        const captchaDetected = captchaSignals.some(s => bodyTxt.includes(s))
+        if (captchaDetected) {
+          return { action: 'search', status: 'error', error: 'captcha_detected', currentUrl: location.href }
+        }
+        if (!containerStillThere) {
+          return { action: 'search', status: 'error', error: 'results_container_gone', currentUrl: location.href }
+        }
+        // v0.7.29 stress fix: ANTES de concluir "selector roto", distinguir el
+        // empty-state legítimo (0 resultados) de un selector drift real. Un search
+        // con 0 resultados NO es fallo de selector — reportarlo así disparaba
+        // selector_tickets/L6 espurios y arrastraba el success-rate.
+        // SEÑAL ESTRUCTURAL (independiente del idioma, más robusta que text-match):
+        // contar links de perfil /in/ en el main. Si 0 → no hay personas en la
+        // página → empty legítimo. Si hay /in/ pero el extractor sacó 0 → el
+        // selector de card drifteó de verdad.
+        const broadProfileLinks = document.querySelectorAll('main a[href*="/in/"]').length
+        // Señal de texto secundaria (bilingüe) como respaldo.
+        const noResultsSignals = [
+          'no se encontraron resultados', 'no encontramos resultados', 'no hay resultados',
+          'prueba con palabras clave', 'prueba con otras palabras',
+          'no results', 'no results found', "couldn't find any results", 'try different keywords',
+        ]
+        const noResultsText = noResultsSignals.some(s => bodyTxt.includes(s))
+        if (broadProfileLinks === 0 || noResultsText) {
+          return {
+            action: 'search', status: 'ok', profiles: [], pagesScraped: 1,
+            totalFound: 0, stopReason: 'no_results_found',
+            scrapedAt: new Date().toISOString(),
+            debugSample: { broadProfileLinks, noResultsText },
+          }
+        }
+        // Hay /in/ links pero el extractor sacó 0 → selector drift real.
+        // Snippet del body + conteo para diagnóstico (observabilidad).
+        return {
+          action: 'search', status: 'error',
+          error: 'no_profiles_in_page_1_selector_may_have_changed',
+          currentUrl: location.href,
+          debugSample: { broadProfileLinks, bodyTextSnippet: bodyTxt.slice(0, 400) },
+        }
+      }
       stopReason = 'empty_page'
       break
     }
@@ -2209,6 +4379,8 @@ async function searchLeads(payload = {}) {
     stopReason,
     totalFound: collected.length,
     scrapedAt: new Date().toISOString(),
+    // v0.7.22 BUG-F: incluir debug del paginador cuando paró por no_next_page
+    ...(stopReason === 'no_next_page' && _searchPaginatorDebug ? { debugSample: _searchPaginatorDebug } : {}),
   }
 }
 
@@ -2363,34 +4535,34 @@ async function humanScrollSearch() {
 
 // Navega a la siguiente página de resultados.
 // Strategy: buscar botón "Siguiente" (aria-label), o fallback a URL param &page=N.
-async function goToNextSearchPage(nextPageNum) {
-  // 1. Intentar click en botón "Siguiente"
-  const nextSels = [
-    'button[aria-label="Siguiente"]',
-    'button[aria-label="Next"]',
-    'button.artdeco-pagination__button--next',
-  ]
-  for (const sel of nextSels) {
-    const btn = document.querySelector(sel)
-    if (btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true') {
-      console.log(`[Orion content] Click Next button (${sel})`)
-      btn.scrollIntoView({ behavior: 'smooth', block: 'center' })
-      await sleep(randInt(500, 1000))
-      await humanClick(btn)
-      // Esperar a que la URL cambie o results se re-render
-      await sleep(randInt(3000, 5000))
-      return true
-    }
-  }
+// v0.7.22 BUG-F: capturado para diagnóstico — searchLeads lo incluye en result.debugSample
+let _searchPaginatorDebug = null
 
-  // 2. Fallback: navegar via URL param &page=N (LinkedIn lo soporta)
-  const url = new URL(location.href)
-  url.searchParams.set('page', String(nextPageNum))
-  console.log(`[Orion content] Fallback: navegar a ${url.toString()}`)
-  location.href = url.toString()
-  // Después del navigation el content.js se reinyecta — el comando current finaliza aquí
-  // El bridge tendrá que considerar paginación por URL como un solo-page scrape
-  return false
+async function goToNextSearchPage(nextPageNum) {
+  // v0.7.24 BUG-F (fix4 — REVERT de fix3): LinkedIn usa paginación numerada
+  // (aria-label="Página N"), pero clickearla REINYECTA content.js (la página
+  // navega/re-renderiza) → la promesa de search queda huérfana y el comando
+  // se cuelga 15min (stuck dispatched, retorna 0 profiles). Esto es una
+  // limitación ARQUITECTÓNICA: el scrape multi-página en un solo comando es
+  // frágil porque cualquier navegación destruye el content script en ejecución.
+  //
+  // DECISIÓN: NO intentar paginar dentro del comando. Retornar limpio con
+  // page 1 (10 profiles). El multi-page real requiere orquestación SW
+  // (re-dispatch search con &page=N tras cada nav, acumular server-side) — un
+  // rediseño fuera de scope. Mientras, la rotación de keywords del scheduler
+  // da variedad de leads (13 keywords × 10 = 130 leads/ciclo).
+  //
+  // Capturamos los botones de página disponibles como evidencia para el rediseño.
+  try {
+    const pageButtons = Array.from(document.querySelectorAll('button[aria-label*="ágina" i], button[aria-label*="age" i]'))
+      .map(b => b.getAttribute('aria-label')).filter(Boolean)
+    _searchPaginatorDebug = {
+      next_page_wanted: nextPageNum,
+      page_buttons_found: pageButtons,
+      note: 'multi-page scrape deshabilitado (content.js reinject en pagination) — requiere SW orchestration',
+    }
+  } catch {}
+  return false  // siempre page-1 clean; no orfanar el comando
 }
 
 // ── 3.5 — check_sent_invites — scrape /mynetwork/invitation-manager/sent/ ────
@@ -2425,13 +4597,37 @@ async function checkSentInvites(payload = {}) {
   }
   await sleep(1500)
 
-  // Scroll para asegurar lazy-load completo
-  for (let i = 0; i < 4; i++) {
-    window.scrollBy(0, 600)
-    await sleep(randInt(400, 800))
+  // v0.7.37: scroll hasta cargar TODAS las invitaciones (lazy-load). CRÍTICO para
+  // no falsos-accepts: concluir "no está en pending = aceptado" solo es seguro si
+  // la lista está COMPLETA. Antes 4×600px cargaba ~10 de 86 → leads viejos fuera
+  // del batch se marcarían connected falsamente. Ahora scroll hasta que el conteo
+  // de /in/ anchors se estabilice (3 rondas sin crecer) o tope de 40 iteraciones.
+  // v0.7.38: cargar TODAS las invitaciones. LinkedIn /sent/ PAGINA (no scroll
+  // infinito) — scroll solo da ~10. Combinamos scroll + click en botón "Mostrar
+  // más resultados" (append in-page, SIN navegación → sin content.js reinject).
+  const loadMoreDebug = []
+  {
+    const mainEl = document.querySelector('main') || document.body
+    const moreRe = /mostrar m[áa]s|ver m[áa]s|cargar m[áa]s|m[áa]s resultados|show more|load more|see more/i
+    let prevN = -1, stableRounds = 0
+    for (let i = 0; i < 50 && stableRounds < 3; i++) {
+      window.scrollTo(0, document.body.scrollHeight)
+      await sleep(randInt(450, 800))
+      // Buscar botón "mostrar más" visible y clickearlo
+      const btns = Array.from(mainEl.querySelectorAll('button, [role="button"]'))
+      const moreBtn = btns.find(b => b.offsetParent !== null && moreRe.test((b.textContent || '').trim()))
+      if (moreBtn) {
+        if (loadMoreDebug.length < 3) loadMoreDebug.push((moreBtn.textContent || '').trim().slice(0, 40))
+        moreBtn.click()
+        await sleep(randInt(900, 1500))
+      }
+      const n = mainEl.querySelectorAll('a[href*="/in/"]').length
+      if (n === prevN && !moreBtn) stableRounds++
+      else { stableRounds = 0; prevN = n }
+    }
+    window.scrollTo({ top: 0 })
+    await sleep(800)
   }
-  window.scrollTo({ top: 0, behavior: 'smooth' })
-  await sleep(1000)
 
   // Cada invitación pending tiene:
   // - <a href="/in/<vanity>/"> con el nombre del invitado
@@ -2448,23 +4644,65 @@ async function checkSentInvites(payload = {}) {
     const url = full.split('?')[0].replace(/\/$/, '') + '/'
     if (!url.includes('/in/')) continue
     if (seenUrls.has(url)) continue
-    // Nombre desde anchor (preferimos text nodes directos)
-    const name = Array.from(link.childNodes)
-      .filter(n => n.nodeType === 3)
-      .map(n => n.textContent.trim())
-      .filter(Boolean)
-      .join(' ')
-      .trim()
-    if (!name || name.length > 80) continue
+    // v0.7.35 fix: estructura SDUI (componentkey) — el nombre YA NO es text node
+    // directo del anchor (está en span anidado). Extracción robusta multi-fuente:
+    //   1. text nodes directos (estructura vieja)
+    //   2. textContent completo del anchor (span anidado)
+    //   3. aria-label del anchor
+    // Y CRÍTICO: NO descartar si el nombre queda vacío — la URL basta para el
+    // match del ingest (matchea por URL O nombre). Antes el skip-on-empty-name
+    // tiraba los 10 anchors → parser devolvía 0.
+    let name = Array.from(link.childNodes)
+      .filter(n => n.nodeType === 3).map(n => n.textContent.trim()).filter(Boolean).join(' ').trim()
+    if (!name) name = (link.textContent || '').trim()
+    if (!name) name = (link.getAttribute('aria-label') || '').trim()
+    if (name.length > 80) name = name.slice(0, 80)
     seenUrls.add(url)
     pending.push({ profileUrl: url, name })
   }
 
-  return {
+  // v0.7.37: total declarado por LinkedIn ("personas (86)" / "people (86)") para
+  // chequeo de completitud en el ingest (si capturamos < total → scrape incompleto
+  // → NO marcar accepts, evita falsos por lazy-load/paginación).
+  let statedTotal = null
+  const mainTxt = (main.innerText || '')
+  const tm = mainTxt.match(/personas?\s*\((\d+)\)/i) || mainTxt.match(/people\s*\((\d+)\)/i)
+  if (tm) statedTotal = parseInt(tm[1], 10)
+
+  const out = {
     action: 'check_sent_invites',
     status: 'ok',
     pending,
     count: pending.length,
+    statedTotal,
+    loadMoreClicked: loadMoreDebug,
     scrapedAt: new Date().toISOString(),
   }
+  // Si quedó incompleto (count < statedTotal), capturar textos de botones visibles
+  // para diagnosticar el mecanismo de paginación real.
+  if (statedTotal && pending.length < statedTotal) {
+    out.buttonTexts = Array.from(main.querySelectorAll('button, [role="button"]'))
+      .filter(b => b.offsetParent !== null)
+      .map(b => (b.textContent || '').trim())
+      .filter(t => t && t.length < 40)
+      .slice(0, 25)
+  }
+  // v0.7.35 instrumentación: si count=0, capturar diagnóstico para ver POR QUÉ
+  // el parser /sent/ no encuentra invitaciones (gap conocido: drift de estructura).
+  if (pending.length === 0) {
+    const bodyTxt = (main.innerText || '').toLowerCase()
+    out.debugSample = {
+      allAnchors: main.querySelectorAll('a').length,
+      inAnchors: main.querySelectorAll('a[href*="/in/"]').length,
+      hasPendingText: /pendiente|pending|retirar|withdraw/.test(bodyTxt),
+      cardHits: {
+        invitationCard: main.querySelectorAll('[class*="invitation-card"]').length,
+        li: main.querySelectorAll('li').length,
+        componentkey: main.querySelectorAll('[componentkey]').length,
+        artdecoEntity: main.querySelectorAll('[class*="entity-lockup"], [class*="artdeco-entity"]').length,
+      },
+      bodySnippet: bodyTxt.slice(0, 400),
+    }
+  }
+  return out
 }

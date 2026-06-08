@@ -27,7 +27,15 @@ module.exports = {
       script:      'scheduler-extension.js',
       interpreter: 'node',
       autorestart: true,
-      env: { NODE_ENV: 'production' },
+      env: {
+        NODE_ENV: 'production',
+        // 29-may-2026: bajado de 300s→90s para iterar rápido durante fixes.
+        // Restaurar a 300000 cuando todo funcione estable.
+        TICK_INTERVAL_MS: '90000',
+        // Saltar pausa de comida (13-14h CDMX) durante depuración activa.
+        // Quitar cuando todo esté estable.
+        SKIP_LUNCH_PAUSE: 'true',
+      },
     },
     {
       name:        'extension-bridge',
@@ -37,6 +45,19 @@ module.exports = {
       autorestart: true,
       max_restarts: 10,
       env: { NODE_ENV: 'production' },
+    },
+    {
+      // v0.7.2 L1 Auto-Learning: analiza micro_phase_log + escribe insights cada hora.
+      name:        'phase-analyzer',
+      cwd:         '/root/clawbot/apps/prometheus',
+      script:      'phase-analyzer.js',
+      interpreter: 'node',
+      autorestart: true,
+      max_restarts: 10,
+      env: {
+        NODE_ENV: 'production',
+        PHASE_ANALYZER_TICK_MS: '3600000',  // 1h
+      },
     },
     {
       name:        'orion',

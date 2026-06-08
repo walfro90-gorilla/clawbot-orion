@@ -61,6 +61,19 @@ export async function GET(req: NextRequest) {
     .eq("account_id", accountId)
     .in("status", ["pending", "dispatched"])
 
+  // v0.6.46: ACTIVE command — el que está EN VUELO ahora mismo. Para el
+  // glowing badge "qué está haciendo Orion". Preferimos dispatched (ya está
+  // ejecutándose en content.js), si no, el pending más viejo (próximo en cola).
+  const { data: activeCmd } = await admin
+    .from("extension_commands")
+    .select("action, status, dispatched_at, created_at, payload")
+    .eq("account_id", accountId)
+    .in("status", ["dispatched", "pending"])
+    .order("status", { ascending: true })  // 'dispatched' antes que 'pending' alfabéticamente
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle()
+
   // Bridge connection
   let bridgeOnline = false
   try {
@@ -92,6 +105,14 @@ export async function GET(req: NextRequest) {
       completedAt: lastCmd.completed_at,
       result: (lastCmd.result as any)?.status ?? null,
       error: (lastCmd.result as any)?.error ?? null,
+    } : null,
+    activeCommand: activeCmd ? {
+      action: activeCmd.action,
+      status: activeCmd.status,  // 'pending' | 'dispatched'
+      dispatchedAt: activeCmd.dispatched_at,
+      createdAt: activeCmd.created_at,
+      leadName: (activeCmd.payload as any)?.leadName ?? null,
+      kind: (activeCmd.payload as any)?.kind ?? null,
     } : null,
     bridgeOnline,
     lastInboxCheck: account.last_inbox_check_at,

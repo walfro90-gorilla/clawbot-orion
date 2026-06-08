@@ -7,15 +7,21 @@ import { CampaignTabs } from "@/components/campaign-tabs"
 
 async function saveCampaign(formData: FormData) {
   "use server"
-  const admin = createAdminClient()
+  // `as any`: followup_tone_directive es una columna nueva aún no en los tipos generados.
+  const admin = createAdminClient() as any
   const id = formData.get("campaign_id") as string
 
   const parseList = (key: string): string[] =>
     (formData.get(key) as string || "")
       .split(",").map(s => s.trim()).filter(Boolean)
 
+  // v0.7.15: error capture obligatorio — antes silent fail engañaba al usuario
+  // con "guardado" cuando el UPDATE realmente fallaba. Logueamos y throw para
+  // que Next muestre error UI.
+  const errors: string[] = []
+
   // ── Campaign row
-  await admin.from("campaigns").update({
+  const { error: cErr } = await admin.from("campaigns").update({
     name:                  formData.get("name") as string,
     target_audience:       (formData.get("target_audience") as string) || null,
     is_active:             formData.get("is_active") === "true",
@@ -51,6 +57,7 @@ async function saveCampaign(formData: FormData) {
     follow_up_step4_delay_hours: Number(formData.get("follow_up_step4_delay_hours") || 96),
     follow_up_step5_message:     (formData.get("follow_up_step5_message") as string) || null,
     follow_up_step5_delay_hours: Number(formData.get("follow_up_step5_delay_hours") || 84),
+    followup_tone_directive:     (formData.get("followup_tone_directive") as string) || null,
     auto_dead_after_days:        Number(formData.get("auto_dead_after_days") || 21),
     fm1_example_reply:           (formData.get("fm1_example_reply") as string) || null,
     fm2_example_reply:           (formData.get("fm2_example_reply") as string) || null,
@@ -63,6 +70,10 @@ async function saveCampaign(formData: FormData) {
     ai_company_context:         (formData.get("ai_company_context") as string) || null,
     ai_example_messages:        (formData.get("ai_example_messages") as string) || null,
   }).eq("id", id)
+  if (cErr) {
+    console.error(`[saveCampaign] campaigns UPDATE failed: ${cErr.message}`)
+    errors.push(`campaign: ${cErr.message}`)
+  }
 
   // ── Message template — upsert by campaign_id
   const templateId = formData.get("template_id") as string | null
@@ -81,12 +92,28 @@ async function saveCampaign(formData: FormData) {
     updated_at:           new Date().toISOString(),
   }
 
-  if (templateId) {
-    await admin.from("message_templates").update(templatePayload).eq("id", templateId)
+  // v0.7.15: error capture en template upsert — antes silent fail
+  // ALSO: templateId puede ser "" (string vacío) cuando hidden input se rendea
+  // pero t es null. Tratarlo como ausente para hacer INSERT en lugar de UPDATE
+  // que .eq("id","") nunca matchea.
+  if (templateId && templateId.length > 0) {
+    const { error: tErr } = await admin.from("message_templates").update(templatePayload).eq("id", templateId)
+    if (tErr) {
+      console.error(`[saveCampaign] message_templates UPDATE id=${templateId} failed: ${tErr.message}`)
+      errors.push(`template UPDATE: ${tErr.message}`)
+    }
   } else {
-    await admin.from("message_templates").insert(templatePayload)
+    const { error: tErr } = await admin.from("message_templates").insert(templatePayload)
+    if (tErr) {
+      console.error(`[saveCampaign] message_templates INSERT campaign=${id} failed: ${tErr.message}`)
+      errors.push(`template INSERT: ${tErr.message}`)
+    }
   }
 
+  if (errors.length > 0) {
+    // Si hubo errores, NO redirect ciego. Throw para que Next.js error.tsx muestre el problema.
+    throw new Error(`saveCampaign falló: ${errors.join(" | ")}`)
+  }
   redirect("/dashboard/campaigns")
 }
 
@@ -485,6 +512,17 @@ NUNCA uses el cargo/título como si fuera el nombre de una empresa.`}
               description="Hasta 5 pasos de seguimiento automáticos. Cada paso se envía solo una vez por lead; si el lead responde en cualquier momento sale de la secuencia. Déjalo vacío para desactivarlo.">
               <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-4 text-xs text-amber-300 space-y-1">
                 <p>FU1 se envía en el siguiente tick (~30 min) tras aceptar la conexión. FU2-5 respetan el delay en horas configurado desde el envío del paso anterior.</p>
+              </div>
+
+              {/* Tono de seguimientos — instrucción que guía la personalización con IA */}
+              <div className="space-y-3">
+                <Field label="🎯 Tono de los seguimientos"
+                  hint="Instrucción que guía cómo la IA personaliza los FU. Vacío = relación (cálido, conocer a la persona, sin vender). Escribe una instrucción propia para cambiarlo (ej: 'SDR directo orientado a agendar una llamada').">
+                  <textarea name="followup_tone_directive" rows={2}
+                    defaultValue={(c as any).followup_tone_directive ?? ""}
+                    placeholder="Default: construir relación, saludar y mantener el contacto, NO vender ni agendar cita."
+                    className={inp} />
+                </Field>
               </div>
 
               {/* Step 1 */}

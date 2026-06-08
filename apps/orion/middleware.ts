@@ -37,7 +37,16 @@ export async function middleware(request: NextRequest) {
     request.nextUrl.pathname === "/api/extension/account-status" ||
     request.nextUrl.pathname === "/api/extension/pause-toggle" ||
     request.nextUrl.pathname === "/api/extension/capture-failure" ||
-    request.nextUrl.pathname === "/api/extension/connectivity"
+    request.nextUrl.pathname === "/api/extension/connectivity" ||
+    request.nextUrl.pathname === "/api/extension/next-actions" ||
+    request.nextUrl.pathname === "/api/extension/force-tick" ||
+    request.nextUrl.pathname === "/api/runtime-config" ||
+    request.nextUrl.pathname === "/api/runtime-config/heartbeat" ||
+    request.nextUrl.pathname === "/api/admin/dispatch-test" ||
+    request.nextUrl.pathname === "/api/visual-learning/capture" ||
+    request.nextUrl.pathname === "/api/visual-learning/learned-selectors" ||
+    request.nextUrl.pathname.startsWith("/api/visual-learning/tickets") ||
+    request.nextUrl.pathname.startsWith("/api/visual-learning/pins")
 
   if (!user && !isAuthRoute && !isPublicRoute && !isPublicExtensionRoute) {
     const url = request.nextUrl.clone()

@@ -60,7 +60,7 @@ export default async function ConversationsPage({
       )
     `)
     .order("last_message_at", { ascending: false, nullsFirst: false })
-    .limit(150)
+    .limit(500)
 
   if (isRestricted && me?.linkedin_account_id) {
     convosQuery = convosQuery.eq("linkedin_account_id", me.linkedin_account_id)
