@@ -102,7 +102,8 @@ async function loadAndPostHeartbeatFromSW() {
     // 1. GET /api/runtime-config (latest server-side config)
     let runtimeConfig = {}
     try {
-      const r = await fetch(`${stored.orion_url}/api/runtime-config`, { cache: 'no-store' })
+      // v0.7.47: account_id → el API mergea overrides per-cuenta sobre el global. Shape idéntico.
+      const r = await fetch(`${stored.orion_url}/api/runtime-config?account_id=${encodeURIComponent(account_id)}`, { cache: 'no-store' })
       if (r.ok) {
         const j = await r.json().catch(() => null)
         if (j?.config) {

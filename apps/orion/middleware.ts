@@ -42,6 +42,7 @@ export async function middleware(request: NextRequest) {
     request.nextUrl.pathname === "/api/extension/force-tick" ||
     request.nextUrl.pathname === "/api/runtime-config" ||
     request.nextUrl.pathname === "/api/runtime-config/heartbeat" ||
+    request.nextUrl.pathname === "/api/cal-webhook" ||
     request.nextUrl.pathname === "/api/admin/dispatch-test" ||
     request.nextUrl.pathname === "/api/visual-learning/capture" ||
     request.nextUrl.pathname === "/api/visual-learning/learned-selectors" ||

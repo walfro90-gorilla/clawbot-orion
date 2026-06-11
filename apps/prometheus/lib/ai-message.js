@@ -111,6 +111,23 @@ const TYPE_RULES = {
   },
 }
 
+// v0.7.45: inyecta el lead_id en el link de cal.com vía el param `notes`. Cuando el
+// lead agenda, cal.com prefilla el campo notes con "LEAD_ID=<uuid>" y el webhook
+// BOOKING_CREATED (app/api/cal-webhook) lo extrae de responses.notes.value → setea
+// meeting_at automático. Sin esto el booking llega sin forma de matchearse al lead
+// (los leads no tienen email) → el funnel mostraba 0 citas aunque se agendaran.
+export function calUrlWithLeadId(calUrl, leadId) {
+  if (!calUrl || !leadId) return calUrl ?? null
+  try {
+    const u = new URL(calUrl)
+    u.searchParams.set('notes', `LEAD_ID=${leadId}`)
+    return u.toString()
+  } catch {
+    const sep = calUrl.includes('?') ? '&' : '?'
+    return `${calUrl}${sep}notes=LEAD_ID%3D${encodeURIComponent(leadId)}`
+  }
+}
+
 function buildSystemPrompt({ campaignPrompt, type, exampleReply, calUrl, lastFuTemplate, lastFuStepNum }) {
   const typeConf = TYPE_RULES[type] ?? TYPE_RULES.invite
   const sections = [
@@ -125,7 +142,7 @@ function buildSystemPrompt({ campaignPrompt, type, exampleReply, calUrl, lastFuT
   ]
   if (calUrl && (type === 'fm_reply_2' || type === 'fm_reply_3')) {
     sections.push('', `LINK DE CALENDARIO PARA AGENDAR: ${calUrl}`)
-    sections.push('Inclúyelo en tu respuesta tal cual, sin acortar.')
+    sections.push('Incluye el link COMPLETO y EXACTO, con TODOS sus parámetros (?notes=...). NO lo acortes, NO lo modifiques, NO quites nada después del "?". Es un link de seguimiento — alterarlo lo rompe.')
   }
   // Intención previa: si en FM, incluye el ÚLTIMO FU template que se mandó al lead
   // para mantener coherencia con la "fase del funnel" en la que está la conversación.
@@ -188,7 +205,7 @@ function buildReplyUserPrompt(lead, conversationHistory, calUrl) {
   parts.push('', buildUserPrompt(lead))
 
   if (calUrl) {
-    parts.push('', `CAL_URL disponible: ${calUrl}`)
+    parts.push('', `CAL_URL disponible (si lo incluyes, cópialo EXACTO con todos sus parámetros): ${calUrl}`)
   }
   return parts.join('\n')
 }
@@ -315,6 +332,7 @@ export async function generateLinkedInMessage(campaign, lead, type = 'invite', o
  * @param {string} calUrl - cal.com URL para incluir si aplica
  */
 export async function personalizeFollowupMessage(campaign, lead, template, fuStep, calUrl, opts = {}) {
+  calUrl = calUrlWithLeadId(calUrl, lead?.id)  // v0.7.45: link de cita rastreable por lead
   const stepKey = `follow_up_${fuStep}`
   const typeConf = TYPE_RULES[stepKey] ?? TYPE_RULES.follow_up_1
   const maxChars = typeConf.maxChars
@@ -351,7 +369,7 @@ export async function personalizeFollowupMessage(campaign, lead, template, fuSte
     `LÍMITE: máximo ${maxChars} caracteres.`,
   ]
   if (calUrl && template.toLowerCase().includes('cal') || template.includes('[CAL_URL]') || template.includes('{cal_url}')) {
-    systemSections.push('', `LINK CALENDARIO: ${calUrl} — inclúyelo tal cual si el template original tiene CTA de llamada.`)
+    systemSections.push('', `LINK CALENDARIO: ${calUrl} — inclúyelo COMPLETO y EXACTO (con todos sus parámetros ?notes=...) si el template tiene CTA de llamada. NO lo acortes ni modifiques.`)
   }
   systemSections.push('', 'FORMATO: SOLO el mensaje personalizado, texto plano. Sin comillas, sin prefijos, sin firma.')
   systemSections.push('🚫 PROHIBIDO corchetes [ ], llaves { } o placeholders de relleno ("[menciona algo]", "[Nombre]"). Si te falta un dato, OMÍTELO naturalmente. El mensaje debe quedar listo para enviar tal cual.')
@@ -393,7 +411,7 @@ export async function generateLinkedInReply(campaign, lead, ctx = {}, opts = {})
   const type = `fm_reply_${fmStep}`
   const exampleField = `fm${fmStep}_example_reply`
   const exampleReply = campaign[exampleField] ?? null
-  const calUrl = ctx.calUrl ?? null
+  const calUrl = calUrlWithLeadId(ctx.calUrl ?? null, lead?.id)  // v0.7.45: link rastreable por lead
   const systemPrompt = buildSystemPrompt({
     campaignPrompt: campaign.gemini_system_prompt,
     type, exampleReply, calUrl,

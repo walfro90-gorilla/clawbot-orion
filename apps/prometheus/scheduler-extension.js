@@ -25,6 +25,7 @@ import {
 } from './lib/extension-dispatch.js'
 import { generateLinkedInMessage, generateLinkedInReply, personalizeFollowupMessage, hasLeftoverPlaceholder } from './lib/ai-message.js'
 import { isSystemLinkedInAccount } from './lib/system-accounts.js'
+import { isGroupConversationName } from './lib/group-conversation.js'
 import { sweepQuarantineTimeout } from './lib/lead-failure.js'
 
 dotenv.config()
@@ -40,7 +41,20 @@ const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min
 
 // v0.7.13 — helper para leer runtime_config (single key) y retornar value como
 // número con default si no existe o no es número.
-async function readRuntimeNumber(key, def) {
+// v0.7.47 — accountId opcional: si se pasa, account_config[account_id][key] GANA sobre el
+// runtime_config global. Null-safe: sin accountId o sin fila → cae al global (idéntico a hoy).
+async function readRuntimeNumber(key, def, accountId = null) {
+  if (accountId) {
+    const { data: acc } = await supabase
+      .from('account_config')
+      .select('value')
+      .eq('account_id', accountId)
+      .eq('key', key)
+      .maybeSingle()
+    const av = acc?.value
+    if (typeof av === 'number') return av
+    if (typeof av === 'string' && !isNaN(Number(av))) return Number(av)
+  }
   const { data } = await supabase
     .from('runtime_config')
     .select('value')
@@ -50,6 +64,19 @@ async function readRuntimeNumber(key, def) {
   if (typeof v === 'number') return v
   if (typeof v === 'string' && !isNaN(Number(v))) return Number(v)
   return def
+}
+
+// v0.7.47 — lee un valor CRUDO de account_config (objeto/array/escalar) para esa cuenta.
+// Null si no hay fila. Para overrides no-numéricos (p.ej. inbox_hours {start,end}).
+async function getAccountConfigRaw(accountId, key) {
+  if (!accountId) return null
+  const { data } = await supabase
+    .from('account_config')
+    .select('value')
+    .eq('account_id', accountId)
+    .eq('key', key)
+    .maybeSingle()
+  return data?.value ?? null
 }
 
 // v0.7.13 — también reset lockout_skip_count cuando un FU succeeds.
@@ -119,6 +146,22 @@ async function logJob({ campaignId, accountId, jobType, status, skipReason, lead
 // ── Search trigger ───────────────────────────────────────────────────────────
 // Dispara search si: !search_paused + gap respetado + pending_leads bajo + connected
 
+// v0.7.46: cuenta leads scraped/pending que PASAN el filtro de títulos (ejecutivos reales
+// invitables), no el conteo crudo. Sin esto, un pool lleno de junk del company-scoped
+// bloqueaba nuevas búsquedas. El pool scraped suele ser <50, así que el fetch es barato.
+async function getEligiblePendingCount(campaign) {
+  const { data } = await supabase
+    .from('leads')
+    .select('profile_data')
+    .eq('campaign_id', campaign.id)
+    .in('status', ['scraped', 'pending'])
+  let n = 0
+  for (const l of (data ?? [])) {
+    if (passesTitleFilters(l.profile_data?.headline ?? '', campaign.title_whitelist, campaign.title_blacklist)) n++
+  }
+  return n
+}
+
 async function trySearchForCampaign(campaign, account) {
   if (campaign.search_paused) {
     return { skipped: true, reason: 'search_paused' }
@@ -127,34 +170,27 @@ async function trySearchForCampaign(campaign, account) {
   const searchGapHours = campaign.search_gap_hours ?? 24
   const minsSince = minutesSince(campaign.last_searched_at)
 
-  // Floor override: si el queue de invitables se agotó, forzar search ignorando gap
-  // (cap a 1 forzado por hora para no abusar de LinkedIn)
-  let droughtOverride = false
-  try {
-    const { count: scrapedCount } = await supabase
-      .from('leads')
-      .select('id', { count: 'exact', head: true })
-      .eq('campaign_id', campaign.id)
-      .eq('status', 'scraped')
-      .is('last_followup_at', null)
-    const target = campaign.daily_invite_target ?? 10
-    if ((scrapedCount ?? 0) < Math.max(1, Math.floor(target / 2)) && minsSince > 60) {
-      droughtOverride = true
-      console.log(`[SCH-EXT]   ⚡ drought override active for ${campaign.name}: scraped=${scrapedCount}, target=${target}`)
-    }
-  } catch (e) {
-    console.warn(`[SCH-EXT]   drought-check error:`, e?.message)
-  }
-
-  if (!droughtOverride && minsSince < searchGapHours * 60) {
-    return { skipped: true, reason: 'search_gap_not_met', minsSince: Math.floor(minsSince) }
-  }
-
+  // v0.7.48: reabastecer por CONTEO DE EJECUTIVOS ELEGIBLES, no por tiempo. Objetivo del
+  // usuario: que la cuenta NUNCA se quede con poco/nada de cuentas donde conectar. Lógica:
+  //   - eligibleCount >= minPending          → suficiente, no busca.
+  //   - eligibleCount <= critical (drought)  → busca YA, ignora el gap de horas (solo respeta
+  //                                            un piso anti-spam de 30min entre búsquedas).
+  //   - critical < eligibleCount < minPending → busca a cadencia normal (gap de horas).
+  // (antes el drought usaba scrapedCount CRUDO incl. junk del company-scoped → no detectaba
+  //  la escasez de ejecutivos reales y la cuenta se secaba.)
   const minPending = campaign.min_pending_threshold ?? 10
-  const pendingCount = await getPendingLeadsCount(campaign.id)
-  if (pendingCount >= minPending) {
-    return { skipped: true, reason: 'enough_pending_leads', pendingCount, minPending }
+  const criticalPending = Math.max(3, Math.floor(minPending / 3))   // ~6 si minPending=18
+  const CRIT_FLOOR_MIN = 30                                          // piso entre búsquedas en drought crítico
+  const eligibleCount = await getEligiblePendingCount(campaign)
+  if (eligibleCount >= minPending) {
+    return { skipped: true, reason: 'enough_eligible_leads', eligibleCount, minPending }
   }
+  const criticalDrought = eligibleCount <= criticalPending
+  const effGapMin = criticalDrought ? CRIT_FLOOR_MIN : searchGapHours * 60
+  if (minsSince < effGapMin) {
+    return { skipped: true, reason: criticalDrought ? 'search_crit_floor_not_met' : 'search_gap_not_met', eligibleCount, minsSince: Math.floor(minsSince) }
+  }
+  if (criticalDrought) console.log(`[SCH-EXT]   ⚡ drought CRÍTICO ${campaign.name}: ${eligibleCount} ejecutivos elegibles (≤${criticalPending}) → búsqueda forzada, ignora gap ${searchGapHours}h`)
 
   // Rotación per-search (fix 29-may-2026): antes usaba hour-of-day como índice,
   // pero si search corre 1×/día siempre cae en la misma hora → siempre misma keyword.
@@ -174,7 +210,15 @@ async function trySearchForCampaign(campaign, account) {
     return { dispatched: false, dryRun: true, keyword }
   }
 
-  const cmdId = await dispatchSearch(account, campaign, keyword)
+  // v0.7.46/48: válvula de volumen — en DROUGHT CRÍTICO (≤critical ejecutivos elegibles) y
+  // campaña company-scoped (rinde ~1 exec/50), esta búsqueda va title-only para reabastecer
+  // rápido y NO secarse. Con pool sano (>critical) se mantiene el targeting por empresa.
+  const companies = Array.isArray(campaign.search_company_names) ? campaign.search_company_names.filter(Boolean) : []
+  const starving = criticalDrought && companies.length > 0
+  const searchCampaign = starving ? { ...campaign, search_company_names: [] } : campaign
+  if (starving) console.log(`[SCH-EXT]   🔎 ${campaign.name}: drought crítico (${eligibleCount} elegibles) → búsqueda title-only "${keyword}" (válvula de volumen)`)
+
+  const cmdId = await dispatchSearch(account, searchCampaign, keyword)
   if (!cmdId) {
     return { skipped: true, reason: 'dispatch_failed' }
   }
@@ -189,7 +233,7 @@ async function trySearchForCampaign(campaign, account) {
   await logJob({
     campaignId: campaign.id, accountId: account.id, jobType: 'search',
     status: 'dispatched',
-    details: { commandId: cmdId, keyword, pendingBefore: pendingCount },
+    details: { commandId: cmdId, keyword, pendingBefore: eligibleCount },
   })
 
   return { dispatched: true, commandId: cmdId, keyword }
@@ -301,7 +345,7 @@ async function tryInvitesForCampaign(campaign, account) {
       leadName: lead.full_name,
       withNote: !!message,
       messageLength: message?.length ?? 0,
-      capUsage: `${usedToday + 1}/${cap}`,
+      capUsage: `${invitesToday + 1}/${cap}`,
     },
   })
 
@@ -310,7 +354,7 @@ async function tryInvitesForCampaign(campaign, account) {
     commandId: cmdId,
     leadName: lead.full_name,
     withNote: !!message,
-    capUsage: `${usedToday + 1}/${cap}`,
+    capUsage: `${invitesToday + 1}/${cap}`,
   }
 }
 
@@ -419,10 +463,12 @@ async function tryFollowupsForCampaign(campaign, account) {
   }
 
   // Cap diario de mensajes (FU+FM combinado) — protege contra blasts
+  // v0.7.47: override per-account (account_config.max_daily_messages) > env MAX_DAILY_MESSAGES.
+  const maxMsgs = await readRuntimeNumber('max_daily_messages', MAX_DAILY_MESSAGES, account.id)
   const todayActivity = await getDailyActivityToday(account.id, account.timezone)
   const msgsToday = todayActivity.messages_sent ?? 0
-  if (msgsToday >= MAX_DAILY_MESSAGES) {
-    return { skipped: true, reason: 'daily_messages_cap_reached', msgsToday, cap: MAX_DAILY_MESSAGES }
+  if (msgsToday >= maxMsgs) {
+    return { skipped: true, reason: 'daily_messages_cap_reached', msgsToday, cap: maxMsgs }
   }
 
   // Priorizamos steps avanzados (FU5 > FU4 > ... > FU1) para evitar que un backlog
@@ -463,7 +509,7 @@ async function tryFollowupsForCampaign(campaign, account) {
     // v0.7.16: jitter por step. step1 usa campaign.follow_up_jitter_hours (legacy).
     // step2-5 ahora aplican un % del delay base (jitter_pct_fu_delay desde
     // runtime_config, default 0.35). Evita ZERO jitter en FU2-5 sin schema change.
-    const jitterPctFu = await readRuntimeNumber('jitter_pct_fu_delay', 0.35)
+    const jitterPctFu = await readRuntimeNumber('jitter_pct_fu_delay', 0.35, account.id)
     const stepJitterHours = step.num === 1
       ? (campaign.follow_up_jitter_hours ?? 0)
       : Math.max(campaign[`follow_up_step${step.num}_jitter_hours`] ?? 0, delay * jitterPctFu)
@@ -542,7 +588,7 @@ async function tryFollowupsForCampaign(campaign, account) {
         console.log(`[SCH-EXT] 🚫 lead sistema descartado de FU: ${l.full_name} → dead`)
       }
     }
-    const dueHumans = dueWithJitter.filter(l => !isSystemLinkedInAccount(l.full_name))
+    const dueHumans = dueWithJitter.filter(l => !isSystemLinkedInAccount(l.full_name) && !isGroupConversationName(l.full_name))
     if (dueHumans.length === 0) continue
 
     // Lead-level dedup: si el primer candidato ya tiene comando en flight,
@@ -554,6 +600,31 @@ async function tryFollowupsForCampaign(campaign, account) {
       console.log(`[SCH-EXT]   ⏭️  FU skip ${candidate.full_name} — cmd en flight`)
     }
     if (!lead) continue  // todos los candidates del step ya tienen cmd activo
+
+    // v0.7.43: NO disparar FU si el contacto YA nos escribió y no le hemos respondido.
+    // Caso "conecta + escribe primero": evita mandar el FU genérico ("un gusto conectar…")
+    // por encima de un mensaje entrante real. Si el último evento de la conversación es
+    // inbound, marcamos el lead 'replied' → el auto-reply lo contesta con contexto en vez
+    // del FU canned. Cierra la ventana de carrera FU-vs-check_inbox (fail-open ante error).
+    try {
+      const { data: conv } = await supabase
+        .from('conversations').select('id').eq('lead_id', lead.id).maybeSingle()
+      if (conv?.id) {
+        const { data: lastEv } = await supabase
+          .from('conversation_events').select('direction')
+          .eq('conversation_id', conv.id)
+          .order('created_at', { ascending: false }).limit(1).maybeSingle()
+        if (lastEv?.direction === 'inbound') {
+          await supabase.from('leads')
+            .update({ status: 'replied', replied_at: new Date().toISOString() })
+            .eq('id', lead.id)
+          console.log(`[SCH-EXT]   ⏭️  FU suprimido ${lead.full_name} — inbound sin contestar → status='replied' (auto-reply lo toma)`)
+          continue
+        }
+      }
+    } catch (e) {
+      console.warn(`[SCH-EXT]   FU inbound-check falló para ${lead.full_name}: ${e.message} — continúo con FU`)
+    }
 
     let message = null
 
@@ -694,7 +765,7 @@ async function tryFollowupsForCampaign(campaign, account) {
         // 39 timeouts se quedaba en pipeline rebotando cada 24h. Fix:
         // contar cuántas veces hemos skippeado este lead por lockout y, después
         // de runtime_config.dead_after_lockouts (default 3), marcar dead.
-        const deadCap = await readRuntimeNumber('dead_after_lockouts', 3)
+        const deadCap = await readRuntimeNumber('dead_after_lockouts', 3, account.id)
         const newCount = (lead.lockout_skip_count ?? 0) + 1
         if (newCount >= deadCap) {
           console.warn(`[SCH-EXT]   💀 FU dead-after-lockouts ${lead.full_name} — ${newCount}× lockout skips ≥ cap ${deadCap}`)
@@ -765,10 +836,12 @@ async function tryAutoReplyForCampaign(campaign, account) {
   }
 
   // Cap diario de mensajes (FU+FM combinado)
+  // v0.7.47: override per-account (account_config.max_daily_messages) > env MAX_DAILY_MESSAGES.
+  const maxMsgs = await readRuntimeNumber('max_daily_messages', MAX_DAILY_MESSAGES, account.id)
   const todayActivity = await getDailyActivityToday(account.id, account.timezone)
   const msgsToday = todayActivity.messages_sent ?? 0
-  if (msgsToday >= MAX_DAILY_MESSAGES) {
-    return { skipped: true, reason: 'daily_messages_cap_reached', msgsToday, cap: MAX_DAILY_MESSAGES }
+  if (msgsToday >= maxMsgs) {
+    return { skipped: true, reason: 'daily_messages_cap_reached', msgsToday, cap: maxMsgs }
   }
 
   // Safety gate: solo procesar replies recientes — los históricos viejos
@@ -811,7 +884,7 @@ async function tryAutoReplyForCampaign(campaign, account) {
       console.log(`[SCH-EXT] 🚫 lead sistema descartado de auto-reply: ${lead.full_name} → dead`)
     }
   }
-  const repliedHumans = replied.filter(l => !isSystemLinkedInAccount(l.full_name))
+  const repliedHumans = replied.filter(l => !isSystemLinkedInAccount(l.full_name) && !isGroupConversationName(l.full_name))
   if (repliedHumans.length === 0) {
     return { skipped: true, reason: 'only_system_accounts' }
   }
@@ -1025,6 +1098,38 @@ async function _generateAIReply_DEPRECATED(campaign, lead, leadReplyText, fmStep
 
 // ── Inbox trigger (3.4) ──────────────────────────────────────────────────────
 
+// v0.7.45: deep sweep periódico para recuperar inbounds sepultados. Dispatcha un
+// check_inbox con deepScrape (carga hasta 500 convos, scroll 30×) máx 1×/día por cuenta.
+// Estado en runtime_config.deep_sweep_last (map accountId→iso). Devuelve true si dispatchó.
+const DEEP_SWEEP_GAP_H = 20
+async function maybeDispatchDeepSweep(account) {
+  if (DRY_RUN) return false
+  try {
+    const { data: rc } = await supabase.from('runtime_config').select('value').eq('key', 'deep_sweep_last').maybeSingle()
+    const map = (rc?.value && typeof rc.value === 'object') ? rc.value : {}
+    const lastMs = map[account.id] ? new Date(map[account.id]).getTime() : 0
+    // v0.7.47: gap per-account (account_config.deep_sweep_gap_h) > default 20h. Null-safe.
+    const gapH = await readRuntimeNumber('deep_sweep_gap_h', DEEP_SWEEP_GAP_H, account.id)
+    if (Date.now() - lastMs < gapH * 3_600_000) return false
+    // no encolar si ya hay un check_inbox en vuelo (mismo guard que tryInboxForAccount)
+    const { count } = await supabase.from('extension_commands')
+      .select('id', { count: 'exact', head: true })
+      .eq('account_id', account.id).eq('action', 'check_inbox')
+      .in('status', ['pending', 'dispatched']).gt('expires_at', new Date().toISOString())
+    if (count > 0) return false
+    const id = await dispatchCommand(account.id, 'check_inbox', {
+      deepScrape: true, daysWindow: 30, captureThreads: true, maxCaptures: 20,
+    }, { expiresInMinutes: 25 })
+    if (!id) return false
+    map[account.id] = new Date().toISOString()
+    await supabase.from('runtime_config').upsert({ key: 'deep_sweep_last', value: map }, { onConflict: 'key' })
+    return true
+  } catch (e) {
+    console.warn(`[SCH-EXT]   deep sweep falló para ${account.label}: ${e.message}`)
+    return false
+  }
+}
+
 async function tryInboxForAccount(account) {
   if (account.inbox_paused) {
     return { skipped: true, reason: 'inbox_paused' }
@@ -1039,6 +1144,21 @@ async function tryInboxForAccount(account) {
   if (DRY_RUN) {
     console.log(`[SCH-EXT] DRY_RUN check_inbox for ${account.label}`)
     return { dispatched: false, dryRun: true }
+  }
+
+  // v0.7.45: no encolar un check_inbox nuevo si ya hay uno EN VUELO (pending/dispatched
+  // sin expirar). Antes, si la cuenta se desconectaba tras el dispatch, el comando quedaba
+  // en cola; al cumplirse el gap se encolaba OTRO → ambos expiraban (expired_in_queue, el
+  // #1 error de check_inbox: 59/7d). Con el guard esperamos a que el previo resuelva/expire.
+  const { count: inboxInFlight } = await supabase
+    .from('extension_commands')
+    .select('id', { count: 'exact', head: true })
+    .eq('account_id', account.id)
+    .eq('action', 'check_inbox')
+    .in('status', ['pending', 'dispatched'])
+    .gt('expires_at', new Date().toISOString())
+  if (inboxInFlight > 0) {
+    return { skipped: true, reason: 'check_inbox_already_in_flight' }
   }
 
   const cmdId = await dispatchCheckInbox(account)
@@ -1138,21 +1258,39 @@ async function runConnectivityHealthCheck(connectedIds) {
       const lastUnstable = _lastUnstableAlert.get(acc.id) ?? 0
       if (Date.now() - lastUnstable > 3 * 60 * 60_000) {
         const since6h = new Date(Date.now() - 6 * 3600_000).toISOString()
-        const { count: discCount } = await supabase
+        // v0.7.46: contar solo desconexiones REALES (gap >90s antes de reconectar), NO el
+        // micro-churn de MV3 (el SW muere a 30s idle y revive en 1-2s — normal, no es falla).
+        // Antes contaba TODO disconnect → daba un diagnóstico falso de "background mode off"
+        // aunque estuviera ON (mediana de reconexión real: 2s = puro churn). El ping de 20s
+        // del bridge ya previene ese churn; aquí solo alertamos de outages genuinos.
+        const { data: cevents } = await supabase
           .from('account_connectivity_log')
-          .select('id', { count: 'exact', head: true })
+          .select('event_type, created_at')
           .eq('linkedin_account_id', acc.id)
-          .eq('event_type', 'disconnected')
+          .in('event_type', ['disconnected', 'connected'])
           .gte('created_at', since6h)
-        if ((discCount ?? 0) < 4) {
-          // Estable de nuevo → resolver cualquier connection_unstable abierta
+          .order('created_at', { ascending: true })
+        let sustained = 0, lastDisc = null
+        for (const e of (cevents ?? [])) {
+          const t = new Date(e.created_at).getTime()
+          if (e.event_type === 'disconnected') lastDisc = t
+          else if (e.event_type === 'connected' && lastDisc != null) {
+            if (t - lastDisc > 90_000) sustained++   // outage real >90s (no micro-churn)
+            lastDisc = null
+          }
+        }
+        // disconnect colgado sin reconectar hace >90s también cuenta
+        if (lastDisc != null && Date.now() - lastDisc > 90_000) sustained++
+
+        if (sustained < 4) {
+          // Estable (o solo micro-churn) → resolver cualquier connection_unstable abierta
           await supabase.from('account_alerts')
             .update({ resolved_at: new Date().toISOString(), resolved_by: 'auto:connection_stable_again' })
             .eq('linkedin_account_id', acc.id)
             .eq('alert_type', 'connection_unstable')
             .is('resolved_at', null)
         }
-        if ((discCount ?? 0) >= 4) {
+        if (sustained >= 4) {
           _lastUnstableAlert.set(acc.id, Date.now())
           await supabase.from('account_alerts')
             .update({ resolved_at: new Date().toISOString(), resolved_by: 'auto:superseded' })
@@ -1163,10 +1301,10 @@ async function runConnectivityHealthCheck(connectedIds) {
             linkedin_account_id: acc.id,
             alert_type: 'connection_unstable',
             severity: 'warning',
-            message: `🔌 Extension de "${acc.label}" se desconecta seguido (${discCount} veces en 6h). Probable causa: "Continuar en segundo plano" DESACTIVADO en chrome://settings/system. Actívalo para conexión estable.`,
-            details: { disconnects_6h: discCount, likely_cause: 'background_mode_off', fix: 'chrome://settings/system → Continue running background apps = ON' },
+            message: `🔌 Extension de "${acc.label}" tuvo ${sustained} desconexiones REALES (>90s) en 6h. Posibles causas: laptop suspendiéndose, red inestable, o Chrome cerrándose. (El micro-churn normal del SW ya no se cuenta.)`,
+            details: { sustained_outages_6h: sustained, note: 'solo cuenta gaps >90s, no micro-churn MV3' },
           })
-          console.log(`[SCH-EXT] 🔌 ${acc.label}: conexión inestable (${discCount} disconnects/6h) — probable background mode off`)
+          console.log(`[SCH-EXT] 🔌 ${acc.label}: ${sustained} desconexiones reales (>90s) /6h`)
         }
       }
 
@@ -1376,7 +1514,20 @@ async function tick() {
       console.log(`[SCH-EXT] ${account.label} paused_until ${Math.round((pausedUntilMs-Date.now())/60000)}min — skip inbox/sent`)
       continue
     }
-    if (!isInboxHours(undefined, account.timezone)) continue  // fuera de inbox hours en TZ de cuenta
+    // v0.7.47: inbox hours override per-account (account_config.inbox_hours {start,end}). Null-safe → 8-21.
+    const ih = await getAccountConfigRaw(account.id, 'inbox_hours')
+    if (!isInboxHours(undefined, account.timezone, ih?.start ?? 8, ih?.end ?? 21)) continue  // fuera de inbox hours en TZ
+
+    // v0.7.45: deep sweep periódico (1×/día) ANTES del check normal. El check_inbox
+    // regular solo ve las top ~18 conversaciones → los inbounds de prospectos viejos
+    // quedan sepultados y sin responder (caso Daigo Tanaka, Alejandro Arena: escribieron
+    // pero nadie contestó). El deepScrape carga hasta 500 (scroll 30×) → captura sus
+    // threads → bridge auto-promueve → auto-reply. Si dispara, no encola el check normal.
+    const deepDispatched = await maybeDispatchDeepSweep(account)
+    if (deepDispatched) {
+      console.log(`[SCH-EXT]   🔍 deep sweep dispatched for ${account.label} (recupera inbounds sepultados)`)
+      continue
+    }
 
     const inboxRes = await tryInboxForAccount(account)
     if (inboxRes.dispatched) {

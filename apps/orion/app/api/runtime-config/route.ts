@@ -25,6 +25,7 @@ export function OPTIONS() {
 //   - bridge isPageError (lee page_errors_extra)
 export async function GET(req: NextRequest) {
   const key = req.nextUrl.searchParams.get("key")
+  const accountId = req.nextUrl.searchParams.get("account_id")  // v0.7.47: override per-cuenta
   const admin = createAdminClient() as any
 
   if (key) {
@@ -52,9 +53,30 @@ export async function GET(req: NextRequest) {
   for (const row of data ?? []) {
     flat[row.key] = row.value
   }
+
+  // v0.7.47: si ?account_id=, deep-merge account_config OVER global. Objetos (p.ej.
+  // phase_timeouts) se mergean por campo; escalares/arrays reemplazan. Sin account_id o
+  // sin filas → flat queda idéntico al global de hoy (consumidores globales intactos).
+  const lockedKeys: Record<string, boolean> = {}
+  if (accountId) {
+    const { data: accRows } = await admin
+      .from("account_config")
+      .select("key, value, locked")
+      .eq("account_id", accountId)
+    for (const r of accRows ?? []) {
+      const isObj = (x: any) => x && typeof x === "object" && !Array.isArray(x)
+      flat[r.key] = (isObj(r.value) && isObj(flat[r.key]))
+        ? { ...flat[r.key], ...r.value }
+        : r.value
+      if (r.locked) lockedKeys[r.key] = true
+    }
+  }
+
   return NextResponse.json({
     config: flat,
     fetched_at: new Date().toISOString(),
+    account_id: accountId ?? null,
+    locked: lockedKeys,
     keys: (data ?? []).map((r: any) => ({ key: r.key, updated_at: r.updated_at, updated_by: r.updated_by })),
   }, { headers: CORS })
 }

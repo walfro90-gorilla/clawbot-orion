@@ -45,6 +45,21 @@ setInterval(refreshCooldownLadder, 5 * 60_000).unref?.()
 
 export const QUARANTINE_AT_FAILURES = 5
 
+// v0.7.45: errores ESTRUCTURALES de send_invite — el perfil NO es invitable vía el
+// route (invite previo pendiente, fuera de red, solo-seguir, el modal nunca abre).
+// Reintentar 5× con backoff es desperdicio (caso Alejandro Luna: 5 fallos idénticos →
+// quarantine al 5to). Para estos cuarentenamos tras 3 fallos (tolera 1-2 render lentos
+// transitorios pero saca el lead malo de la cola mucho antes).
+const STRUCTURAL_INVITE_ERRORS = new Set([
+  'preload_modal_not_rendered',
+])
+export const QUARANTINE_AT_STRUCTURAL = 3
+function quarantineThresholdFor(errorCode) {
+  return STRUCTURAL_INVITE_ERRORS.has(String(errorCode ?? ''))
+    ? QUARANTINE_AT_STRUCTURAL
+    : QUARANTINE_AT_FAILURES
+}
+
 /**
  * Devuelve cuántos ms de cooldown aplicar tras N fallos consecutivos.
  * @param {number} failures - consecutive_failures POST-incremento (>=1).
@@ -112,7 +127,7 @@ export function computeNextLeadFailureState({ currentFailures = 0, outcome, erro
       last_failure_reason:  errorCode ? String(errorCode).slice(0, 100) : 'unknown',
       cooldown_until:       cooldownUntilIso,
     }
-    if (failures >= QUARANTINE_AT_FAILURES) {
+    if (failures >= quarantineThresholdFor(errorCode)) {
       update.quarantined_at = nowIso
     }
     return update

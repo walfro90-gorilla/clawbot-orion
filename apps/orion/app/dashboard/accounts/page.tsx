@@ -3,6 +3,7 @@ import { createAdminClient } from "@/lib/supabase/admin"
 import { redirect } from "next/navigation"
 import type { AccountToday } from "@clawbot/db-types"
 import { ExtensionPanel }   from "@/components/extension-panel"
+import { OnboardingActivatePanel } from "@/components/onboarding-activate-panel"
 
 async function updateAccount(formData: FormData) {
   "use server"
@@ -145,6 +146,7 @@ export default async function AccountsPage() {
               <div className="flex items-start justify-between">
                 <div>
                   <p className="text-gray-50 font-semibold">{a.label ?? "Sin etiqueta"}</p>
+                  <a href={`/dashboard/accounts/${a.account_id}/config`} className="inline-block text-xs text-blue-400 hover:text-blue-300 mt-0.5">⚙️ Centro de control</a>
                   <p className="text-gray-500 text-xs mt-0.5 truncate max-w-[240px]">
                     {a.linkedin_profile_url ?? "Sin URL"}
                   </p>
@@ -217,6 +219,11 @@ export default async function AccountsPage() {
                 initialApiKey={(raw as any)?.extension_api_key ?? null}
                 downloadBaseUrl="http://209.50.63.149/download"
               />
+
+              {/* Activación de onboarding — solo mientras la cuenta no esté activa */}
+              {a.status !== "active" && a.account_id && (
+                <OnboardingActivatePanel accountId={a.account_id} />
+              )}
 
               {/* Edit form */}
               <details className="group">

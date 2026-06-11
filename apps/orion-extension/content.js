@@ -401,9 +401,13 @@ async function loadRuntimeConfig() {
       console.log(`[Orion content] runtime_config cargado de cache (${Object.keys(_runtimeConfig).length} keys)`)
     }
     // Segundo: fetch fresh del server (no blocking — usa cache si falla)
-    const stored = await chrome.storage.local.get(['orion_url'])
+    const stored = await chrome.storage.local.get(['orion_url', 'account_id'])
     if (stored?.orion_url) {
-      const r = await fetch(`${stored.orion_url}/api/runtime-config`, { cache: 'no-store' }).catch(() => null)
+      // v0.7.47: account_id → el API mergea overrides per-cuenta. Sin account_id → URL global (idéntico).
+      const rcUrl = stored.account_id
+        ? `${stored.orion_url}/api/runtime-config?account_id=${encodeURIComponent(stored.account_id)}`
+        : `${stored.orion_url}/api/runtime-config`
+      const r = await fetch(rcUrl, { cache: 'no-store' }).catch(() => null)
       if (r?.ok) {
         const j = await r.json().catch(() => null)
         if (j?.config) {
@@ -1533,10 +1537,28 @@ async function checkInbox(payload = {}) {
   // Lo hacemos solo para conversaciones sin threadId (prioriza unread), capeado
   // y humanizado para no parecer bot.
   if (payload.captureThreads) {
+    // v0.7.43: priorizar conversaciones INBOUND (el contacto escribió último → necesitan
+    // thread_id para auto-reply) sobre outbound (ya respondimos). Antes ordenaba SOLO por
+    // unread, así que un inbound ya leído (unread=0, p.ej. el usuario lo abrió sin contestar)
+    // caía fuera del budget → su thread_id nunca se capturaba → quedaba como orphan sin
+    // respuesta (caso Bernardo / Pedro Ramírez / Natalia). Ahora: inbound primero, luego unread.
     const needCapture = conversations
       .filter(c => !c.threadId)
-      .sort((a, b) => (b.unread ?? 0) - (a.unread ?? 0))  // unread primero
-      .slice(0, Math.min(payload.maxCaptures ?? 12, 20))
+      .map(c => ({ c, inbound: isInboundSnippet(c.snippet) }))
+      .sort((a, b) =>
+        (Number(b.inbound) - Number(a.inbound)) ||         // inbound primero
+        ((b.c.unread ?? 0) - (a.c.unread ?? 0))            // luego unread
+      )
+      .map(x => x.c)
+      // v0.7.46 ANTI-THROTTLE: si la tab está OCULTA, Chrome throttlea los sleeps de cada
+      // captura (URL-wait + scroll + post-capture → 120-180s c/u en intensive throttling) →
+      // 1-2 capturas revientan el hard timeout (~207s) → check_inbox pierde TODO el scrape
+      // (replies/accepts incluidos), y NO emite micro_phases (se ve como cuelgue, fases:0).
+      // Bajo throttle SALTAMOS capturas: el scrape de convos (DOM sync) igual detecta
+      // replies/accepts; los thread_ids se capturan en el próximo check con foco o el deep
+      // sweep 1×/día. Una check_inbox que COMPLETA >> una que hace timeout y pierde todo.
+      .slice(0, document.hidden ? 0 : Math.min(payload.maxCaptures ?? 12, 20))
+    if (document.hidden) console.warn('[Orion content] captureThreads: tab OCULTA → SKIP capturas (anti-throttle); scrape igual corre')
     console.log(`[Orion content] captureThreads: ${needCapture.length} conversaciones sin threadId`)
     // v0.7.23 BUG-O: budget de tiempo. En horas pesadas CDMX cada capture toma
     // 11-12s (era 9s estimado) → 15 captures pueden exceder el hard timeout y
@@ -1674,6 +1696,41 @@ function textOf(el, ...selectors) {
   return null
 }
 
+// v0.7.43: detecta conversaciones GRUPALES (3+ personas) en la tarjeta del inbox.
+// Doble señal: (1) patrón del nombre — LinkedIn incluye "y tú"/"and you"/"y N más"/
+// "+N" o varios nombres separados por coma; (2) facepile con >1 avatar distinto.
+// Cualquiera de las dos dispara. Un 1:1 NUNCA muestra "y tú" ni stack de avatares.
+function detectGroupConversation(el, name) {
+  const n = (name ?? '').trim()
+  if (
+    /\sy\s+t[úu]\b/i.test(n) ||
+    /\sand\s+you\b/i.test(n) ||
+    /\sy\s+\d+\s+m[áa]s\b/i.test(n) ||
+    /\sand\s+\d+\s+other/i.test(n) ||
+    /,\s*\+\d+/.test(n) ||
+    (/,/.test(n) && /\s(?:y|and)\s/i.test(n))
+  ) return true
+  try {
+    const avatars = el.querySelectorAll(
+      '.msg-facepile-grid img, [class*="facepile"] img, .presence-entity__image, img[class*="presence-entity"]'
+    )
+    const srcs = new Set(
+      Array.from(avatars).map(a => a.getAttribute('src')).filter(Boolean)
+    )
+    if (srcs.size > 1) return true
+  } catch {}
+  return false
+}
+
+// v0.7.43: ¿el snippet de la conversación es INBOUND (el contacto escribió último)?
+// Outbound si arranca con "Tú:"/"Tu:"/"You:" (nosotros escribimos último). Usado para
+// priorizar la captura de thread_id hacia conversaciones que necesitan auto-reply.
+function isInboundSnippet(snippet) {
+  const s = (snippet ?? '').trim()
+  if (!s) return false
+  return !/^(\[?\s*t[úu]\s*\]?|you)\s*:/i.test(s)
+}
+
 function parseConversationItem(el) {
   try {
     // Nombre del lead
@@ -1797,6 +1854,14 @@ function parseConversationItem(el) {
       } catch {}
     }
 
+    // ── Conversación GRUPAL (3+ personas) ────────────────────────────────
+    // v0.7.43: LinkedIn nombra los grupos "A, B y tú" / "A, B y N más" / "A, +N"
+    // y muestra un facepile con múltiples avatares. NO son leads 1:1 — el
+    // auto-reply mezcla el contexto de varios participantes y confunde al AI
+    // (caso Yatin+Rajveer: respondió dirigiéndose al dueño de la cuenta con
+    // contexto de otra conversación). Se marcan isGroup → el bridge los skipea.
+    const isGroup = detectGroupConversation(el, name)
+
     return {
       name,
       snippet:    snippet ? snippet.slice(0, 250) : null,
@@ -1806,6 +1871,7 @@ function parseConversationItem(el) {
       threadUrl,
       profileUrl,
       profileUrn,     // v0.7.17: fallback URN para lookup server-side
+      isGroup,        // v0.7.43: true si es conversación grupal (3+ personas)
     }
   } catch (err) {
     console.warn('[Orion content] parse error:', err.message)
@@ -2802,6 +2868,31 @@ async function openThreadFromInbox(leadName, threadUrl) {
 
   const target = match?.target ?? null
   if (target) console.log(`[Orion content] openThreadFromInbox: matched by ${match.by}`)
+
+  // v0.7.46: FALLBACK — el thread no apareció en el inbox ni tras el scroll-retry (enterrado
+  // muy abajo, archivado, o la lista no lo renderiza). En vez de fallar con
+  // thread_not_found_in_inbox (el #1 error de send_followup: 8/14 fallos hoy), SPA-navegamos
+  // DIRECTO al thread URL. Preserva el context de content.js (pushState) y espera el composer.
+  // El check de thread_header downstream valida que sea el lead correcto → si el thread_id
+  // fuera stale, da thread_header_mismatch (NO manda al equivocado). Recupera FUs que morían.
+  if (!target && wantedThreadId) {
+    console.log(`[Orion content] openThreadFromInbox: no en lista (${items.length} items) → fallback SPA-nav directo al thread ${wantedThreadId.slice(0,16)}…`)
+    try {
+      window.__orionAllowSpaNav = true
+      history.pushState({}, '', `/messaging/thread/${wantedThreadId}/`)
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    } finally { window.__orionAllowSpaNav = false }
+    const t0 = Date.now()
+    while (Date.now() - t0 < 8000) {
+      if (document.querySelector('.msg-form__contenteditable, [class*="msg-form__contenteditable"]')) {
+        console.log('[Orion content] openThreadFromInbox: ✅ composer cargó via fallback directo')
+        await sleep(randInt(700, 1200))  // hidratación
+        return true
+      }
+      await sleep(300)
+    }
+    console.warn('[Orion content] openThreadFromInbox: fallback directo tampoco cargó composer')
+  }
 
   if (!target) {
     console.warn(`[Orion content] openThreadFromInbox: no encontré conv de "${leadName}" (thread_id=${wantedThreadId?.slice(0,20)}…) en ${items.length} items`)
@@ -4186,7 +4277,32 @@ async function humanTypeContentEditable(el, text, options = {}) {
       if ('.?,!¡¿\n'.includes(ch)) delay += randInt(60, 240)
       if (Math.random() < 0.07) delay += randInt(250, 600)
     }
+    // v0.7.46 ANTI-THROTTLE BULK FALLBACK — la causa #1 de exec_hard_timeout en
+    // send_followup: si la tab está OCULTA, Chrome ralentiza setTimeout (hasta 1/min
+    // tras 5min hidden = "intensive throttling") → teclear chunk a chunk cuelga 200s+
+    // (visto: typing_progress_26pct a 256s) → hard_timeout → el FU NO sale. Cuando la
+    // tab está oculta o un sleep se throttlea, insertamos el RESTO de golpe. La tab en
+    // background nadie la ve, así que el "typing humano" ya no aporta; lo crítico es que
+    // el FU SALGA. Con tab visible (foco v0.7.42 OK) se mantiene el typing humano normal.
+    const _restI = i + chunkSize
+    if (document.hidden && _restI < text.length) {
+      const rest = text.slice(_restI)
+      console.warn(`[Orion content] typing: tab OCULTA → bulk-insert ${rest.length} chars restantes (anti-throttle)`)
+      document.execCommand('insertText', false, rest)
+      charsTyped = total
+      if (progressCallback) { try { await progressCallback({ charsTyped, total, pct: 100 }) } catch {} }
+      break
+    }
+    const _sleepT0 = Date.now()
     await sleep(delay)
+    if ((Date.now() - _sleepT0) > 5000 && _restI < text.length) {
+      const rest = text.slice(_restI)
+      console.warn(`[Orion content] typing: throttle detectado (sleep ${Date.now() - _sleepT0}ms) → bulk-insert ${rest.length} chars`)
+      document.execCommand('insertText', false, rest)
+      charsTyped = total
+      if (progressCallback) { try { await progressCallback({ charsTyped, total, pct: 100 }) } catch {} }
+      break
+    }
   }
   el.dispatchEvent(new Event('input', { bubbles: true }))
 }

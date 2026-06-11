@@ -24,6 +24,7 @@ import { createClient } from '@supabase/supabase-js'
 import dotenv from 'dotenv'
 import { checkAndKillLeadIfStuck, checkAccountHealthAndPause } from './lib/extension-dispatch.js'
 import { isSystemLinkedInAccount } from './lib/system-accounts.js'
+import { isGroupConversationName } from './lib/group-conversation.js'
 import { applyLeadAttemptOutcome, isNonFaultError } from './lib/lead-failure.js'
 
 dotenv.config()
@@ -667,6 +668,28 @@ async function handleCommandResult(msg) {
     }
   }
 
+  // v0.7.48: thread ROTO en auto-reply/FU. thread_header_mismatch = el linkedin_thread_id
+  // capturado apunta a OTRA persona (el bot YA abortó para no mandar al equivocado, correcto).
+  // thread_editor_not_found = el thread abre sin editor (grupo/InMail/restringido o stale).
+  // Estos son comunes en inbounds recuperados por el deep sweep con captura imperfecta → el
+  // lead se queda 'replied' sin contestar. Fix: LIMPIAR el thread_id malo de la conversación →
+  // el próximo check_inbox/deep-sweep le re-captura el thread correcto (por nombre) y reintenta.
+  // El give-up lo acota la cuarentena (5 consecutive_failures) — no necesita contador propio.
+  if (action === 'send_followup' && (result?.error === 'thread_header_mismatch' || result?.error === 'thread_editor_not_found')) {
+    try {
+      const { data: cmd } = await supabase
+        .from('extension_commands').select('related_lead_id').eq('id', commandId).single()
+      if (cmd?.related_lead_id) {
+        await supabase.from('conversations')
+          .update({ linkedin_thread_id: null })
+          .eq('lead_id', cmd.related_lead_id)
+        console.log(`[bridge] 🧵 lead ${cmd.related_lead_id.slice(0,8)}: thread malo limpiado (${result.error}) → re-captura en próximo check_inbox`)
+      }
+    } catch (err) {
+      console.error(`[bridge] thread-reset handler failed:`, err.message)
+    }
+  }
+
   // v0.7.8: awaiting_response = LinkedIn aplica ban window al lead conectado
   // (banner "no has recibido respuesta aún" + composer/send disabled).
   // NO es error: lead está OK, solo hay que esperar. Marcamos status especial
@@ -778,11 +801,20 @@ async function ingestCheckSentInvites(commandId, pending, statedTotal = null) {
     return
   }
   // Normalizar urls de pending (LinkedIn agrega trailing slash, query params, etc.)
-  const normalize = (url) => (url || '')
-    .toLowerCase()
-    .replace(/^https?:\/\/(www\.)?linkedin\.com/, '')
-    .split('?')[0]
-    .replace(/\/$/, '')
+  // v0.7.46: + decodeURIComponent (acentos URL-encoded: /in/ra%C3%BAl-p%C3%A1ez ≠
+  // /in/raúl-páez) + strip de sufijo de locale (/in/slug/es, /en, /pt…). Sin esto, esas
+  // URLs no matcheaban el profileUrl del scrape → el lead PENDIENTE parecía ausente →
+  // falso 'connected' → FU → lead_not_first_degree (24/7d). Más matching solo reduce
+  // falsos-positivos; un accept real sigue ausente del pending sin importar el normalize.
+  const normalize = (url) => {
+    let u = (url || '').toLowerCase().split('?')[0]
+    try { u = decodeURIComponent(u) } catch {}
+    return u
+      .replace(/^https?:\/\/(www\.)?linkedin\.com/, '')
+      .replace(/\/$/, '')
+      .replace(/\/(es|en|pt|fr|de|it|nl|es-es|en-us|pt-br)$/, '')  // sufijo de locale
+      .replace(/\/$/, '')
+  }
   const pendingUrls = new Set(pending.map(p => normalize(p.profileUrl)))
   const pendingNames = new Set(pending.map(p => (p.name ?? '').toLowerCase().trim()))
 
@@ -1113,6 +1145,14 @@ async function ingestCheckInbox(commandId, conversations) {
     // sus notificaciones se tomaban como "reply", creaban orphans/leads y disparaban
     // auto-reply → thread_editor_not_found. No son personas contestables.
     if (isSystemLinkedInAccount(convo.name)) continue
+    // v0.7.43: NO ingestar conversaciones GRUPALES (3+ personas). El flag isGroup
+    // viene del content.js (facepile/nombre); isGroupConversationName es el respaldo
+    // server-side por si el flag no llegó. Son intros/referidos — el auto-reply
+    // mezcla el contexto de varios participantes y confunde al AI (caso Yatin+Rajveer).
+    if (convo.isGroup || isGroupConversationName(convo.name)) {
+      console.log(`[bridge] skip conversación grupal: "${convo.name}"`)
+      continue
+    }
     const scrapedLower = convo.name.toLowerCase().trim()
 
     // Match PRIMARIO por thread_id (fix 29-may-2026): si el scraped trae threadId
@@ -1287,13 +1327,23 @@ async function ingestCheckInbox(commandId, conversations) {
 
     // Si unread > 0 + snippet existe → posible reply nueva del lead
     // Identificar si el snippet es del lead (no nuestro "Tú: ...")
-    if (convo.unread > 0 && convo.snippet) {
+    // v0.7.44: detectar inbound aunque unread=0 (mensaje ya LEÍDO sin contestar — caso
+    // Bernardo: el usuario abrió el thread, unread=0, pero nunca le respondió). Antes esto
+    // exigía unread>0 → el lead seguía 'connected' → FU genérico sobre su mensaje real.
+    // Ahora detectamos por dirección del snippet + dedup por last_message_text para no
+    // re-marcar/re-insertar el mismo inbound en cada check_inbox.
+    if (convo.snippet) {
       const snippet = convo.snippet ?? ''
       // LinkedIn shows "Tú:" para outbound y "Nombre:" para inbound (a veces nada)
-      const isFromUser = /^(tú|tu|you)\s*:/i.test(snippet.trim())
+      const isFromUser = /^(\[?\s*tú\s*\]?|tu|you)\s*:/i.test(snippet.trim())
       const snippetTrimmed = snippet.replace(/^[^:]+:\s*/, '').trim()
 
-      if (!isFromUser) {
+      // dedup: ¿ya registramos este inbound? (evita spam de eventos con unread=0 recurrente)
+      const { data: prevConv } = await supabase
+        .from('conversations').select('last_message_text').eq('lead_id', lead.id).maybeSingle()
+      const alreadyRecorded = (prevConv?.last_message_text ?? '').trim() === snippetTrimmed.slice(0, 500).trim()
+
+      if (!isFromUser && snippetTrimmed.length > 0 && !alreadyRecorded) {
         // Es una reply REAL del lead — actualizar conversation + marcar replied
         const upsertData = {
           lead_id:             lead.id,
@@ -1619,5 +1669,10 @@ server.listen(PORT, () => {
 })
 
 setInterval(pollAndDispatch, POLL_INTERVAL_MS)
-setInterval(pingAll, 30_000)
+// v0.7.46: ping cada 20s (era 30s). MV3 mata el SW del extension a los ~30s idle; un
+// ping cada 30s era una carrera (podía llegar tras la muerte del SW). A 20s el SW recibe
+// el WS message dentro de su ventana idle → se mantiene VIVO mientras Chrome esté abierto.
+// Es el keepalive canónico de MV3 (actividad WebSocket extiende la vida del SW). Server-side,
+// sin tocar el extension ni reload. NO ayuda con laptop dormida (eso requiere config de OS).
+setInterval(pingAll, 20_000)
 setInterval(cleanupExpired, 30_000)  // reap zombies más rápido (antes 60s)

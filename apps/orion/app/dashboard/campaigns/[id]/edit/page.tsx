@@ -145,9 +145,19 @@ export default async function CampaignEditPage({ params }: { params: Promise<{ i
 
   return (
     <div className="p-4 sm:p-8 max-w-5xl mx-auto space-y-6">
+      {c.linkedin_account_id && (
+        <div className="flex items-center gap-2 px-4 py-3 bg-blue-500/10 border border-blue-500/40 rounded-xl text-sm">
+          <span className="text-blue-400">⚙️</span>
+          <p className="text-blue-200/90">
+            Toda la config (búsqueda, seguimientos, IA, <strong>template de mensaje</strong>, schedule, anti-ban) ahora vive en el{" "}
+            <a href={`/dashboard/accounts/${c.linkedin_account_id}/config?campaign=${c.id}`} className="underline font-semibold text-blue-300">Centro de Control de esta cuenta →</a>{" "}
+            Este editor queda solo para <strong>eliminar / reasignar</strong> la campaña.
+          </p>
+        </div>
+      )}
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-50">Editar campaña</h1>
+          <h1 className="text-2xl font-bold text-gray-50">Editar campaña <span className="text-sm font-normal text-gray-500">(avanzado)</span></h1>
           <p className="text-gray-400 text-sm mt-0.5">{c.name}</p>
         </div>
         {/* Delete */}

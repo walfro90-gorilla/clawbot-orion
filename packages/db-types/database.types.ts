@@ -1694,6 +1694,7 @@ export type Database = {
           id: string
           linkedin_account_id: string | null
           onboarded_at: string | null
+          onboarding_step: string | null
           role: string
         }
         Insert: {
@@ -1703,6 +1704,7 @@ export type Database = {
           id: string
           linkedin_account_id?: string | null
           onboarded_at?: string | null
+          onboarding_step?: string | null
           role?: string
         }
         Update: {
@@ -1712,6 +1714,7 @@ export type Database = {
           id?: string
           linkedin_account_id?: string | null
           onboarded_at?: string | null
+          onboarding_step?: string | null
           role?: string
         }
         Relationships: [

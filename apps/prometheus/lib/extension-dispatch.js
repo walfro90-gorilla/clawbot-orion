@@ -39,9 +39,11 @@ export function isBusinessHours(startHour = 9, endHour = 19, days = DEFAULT_DAYS
   return true
 }
 
-export function isInboxHours(days = ALL_DAYS, tz = DEFAULT_TZ) {
+// v0.7.47: start/end opcionales (override per-account via account_config.inbox_hours).
+// Defaults 8-21 → backward-compatible (sin override = idéntico a hoy).
+export function isInboxHours(days = ALL_DAYS, tz = DEFAULT_TZ, startHour = 8, endHour = 21) {
   const { mxHour, mxDay } = mxTime(tz)
-  return days.some(d => mxDay.includes(d)) && mxHour >= 8 && mxHour < 21
+  return days.some(d => mxDay.includes(d)) && mxHour >= startHour && mxHour < endHour
 }
 
 export function minutesSince(isoDate) {
@@ -507,10 +509,27 @@ export async function wasMessageRecentlySent(leadId, messageText, withinHours = 
 
 // ── Title whitelist/blacklist filter ─────────────────────────────────────────
 
+// v0.7.43: matching de BLACKLIST por PALABRA COMPLETA, no substring. Antes
+// `h.includes('intern')` rechazaba "Director International Revenue" (Jorge Perea)
+// porque "international" CONTIENE "intern"; igual `'hr'` matcheaba "CHRO". Eran
+// falsos positivos que filtraban leads válidos en silencio (Josh: no_leads_pass_
+// whitelist con candidatos buenos). Tratamos letras acentuadas como parte de la
+// palabra para no romper términos en español ("diseñador", etc.). El whitelist se
+// deja como substring (permisivo a propósito: "Director" debe cazar "Directores").
+const _WORD_CHARS = 'a-z0-9áéíóúñü'
+function blacklistHit(h, blacklist) {
+  return blacklist.some(b => {
+    const term = (b ?? '').toLowerCase().trim()
+    if (!term) return false
+    const esc = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    return new RegExp(`(^|[^${_WORD_CHARS}])${esc}([^${_WORD_CHARS}]|$)`, 'i').test(h)
+  })
+}
+
 export function passesTitleFilters(headline, whitelist = [], blacklist = []) {
   const h = (headline ?? '').toLowerCase()
   if (blacklist?.length) {
-    if (blacklist.some(b => h.includes(b.toLowerCase()))) return false
+    if (blacklistHit(h, blacklist)) return false
   }
   if (whitelist?.length) {
     // v0.7.7: si headline está vacío (search no scrapeó headline), PASS.
