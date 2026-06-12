@@ -34,7 +34,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
   // Restaurar campos de leads desde payload_before
   const before = audit.payload_before as Record<string, unknown>
-  const validFields = ["status", "replied_at", "dead_reason", "lockout_skip_count",
+  const validFields = ["status", "replied_at", "dead_reason", "lockout_skip_count", "followup_step",
     "last_followup_at", "last_followup2_at", "last_followup3_at", "last_followup4_at", "last_followup5_at",
     "cooldown_until", "quarantined_at", "consecutive_failures", "inmail_revert_count"]
   const restore: Record<string, unknown> = {}

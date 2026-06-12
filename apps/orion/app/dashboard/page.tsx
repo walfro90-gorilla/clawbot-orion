@@ -529,8 +529,7 @@ export default async function DashboardPage({
   const { data: convLeads } = await convQ
   const everInvited  = (convLeads ?? []).filter((l: any) => l.sent_at != null).length
   const everAccepted = (convLeads ?? []).filter((l: any) =>
-    ["connected", "follow_up_sent", "follow_up_sent_2", "follow_up_sent_3",
-      "follow_up_sent_4", "follow_up_sent_5", "replied", "meeting_booked"].includes(l.status ?? "")
+    ["connected", "follow_up_sent", "replied", "meeting_booked"].includes(l.status ?? "")
   ).length
   const everReplied  = (convLeads ?? []).filter((l: any) => l.replied_at != null).length
   const everMeetings = (convLeads ?? []).filter((l: any) => l.meeting_booked_at != null || l.status === "meeting_booked").length
@@ -1204,11 +1203,7 @@ const FUNNEL_STAGES = [
   { value: "pending",          label: "En cola",    icon: "⏳", color: "#64748b", indent: false },
   { value: "invite_sent",      label: "Invitados",  icon: "✉️", color: "#60a5fa", indent: false },
   { value: "connected",        label: "Conectados", icon: "🤝", color: "#34d399", indent: false },
-  { value: "follow_up_sent",   label: "FU1",        icon: "📨", color: "#818cf8", indent: false },
-  { value: "follow_up_sent_2", label: "FU2",        icon: "📩", color: "#c084fc", indent: false },
-  { value: "follow_up_sent_3", label: "FU3",        icon: "📬", color: "#e879f9", indent: false },
-  { value: "follow_up_sent_4", label: "FU4",        icon: "📮", color: "#f472b6", indent: false },
-  { value: "follow_up_sent_5", label: "FU5",        icon: "🔔", color: "#fb7185", indent: false },
+  { value: "follow_up_sent",   label: "Seguimiento", icon: "📨", color: "#818cf8", indent: false },
   { value: "replied",          label: "Respondió",  icon: "💬", color: "#fb923c", indent: false },
   { value: "_fm1",             label: "↳ FM1 Rapport",    icon: "🔵", color: "#60a5fa", indent: true },
   { value: "_fm2",             label: "↳ FM2 Profundizar", icon: "🟡", color: "#fbbf24", indent: true },
@@ -1232,9 +1227,7 @@ function PipelineFunnel({ counts, filtered, filterLabel }: {
   // Las sub-etapas FM también se comparan contra Invitados.
   const invitedBase = (counts["invite_sent"] ?? 0)
     + (counts["connected"] ?? 0)
-    + (counts["follow_up_sent"] ?? 0) + (counts["follow_up_sent_2"] ?? 0)
-    + (counts["follow_up_sent_3"] ?? 0) + (counts["follow_up_sent_4"] ?? 0)
-    + (counts["follow_up_sent_5"] ?? 0)
+    + (counts["follow_up_sent"] ?? 0)
     + (counts["replied"] ?? 0) + (counts["meeting_booked"] ?? 0) + dead
   // Para la barra: la etapa con más leads define la escala
   const maxVal = Math.max(...activeStages.filter(s => !s.value.startsWith("_fm")).map(s => counts[s.value] ?? 0), 1)
@@ -1244,8 +1237,7 @@ function PipelineFunnel({ counts, filtered, filterLabel }: {
   // etapas más avanzadas implican que pasaron por la actual).
   const stageOrder: Record<string, number> = {
     "invite_sent": 0, "connected": 1,
-    "follow_up_sent": 2, "follow_up_sent_2": 3, "follow_up_sent_3": 4,
-    "follow_up_sent_4": 5, "follow_up_sent_5": 6,
+    "follow_up_sent": 2,
     "replied": 7, "meeting_booked": 8,
   }
   function cohortReached(stage: string): number {

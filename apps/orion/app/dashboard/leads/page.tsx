@@ -111,11 +111,7 @@ export default async function LeadsPage({
   const SEQUENCE_STEPS = [
     { status: "invite_sent",       short: "Inv",  title: "Invitación enviada"     },
     { status: "connected",         short: "Cnx",  title: "Conexión aceptada"      },
-    { status: "follow_up_sent",    short: "FU1",  title: "Seguimiento 1 enviado"  },
-    { status: "follow_up_sent_2",  short: "FU2",  title: "Seguimiento 2 enviado"  },
-    { status: "follow_up_sent_3",  short: "FU3",  title: "Seguimiento 3 enviado"  },
-    { status: "follow_up_sent_4",  short: "FU4",  title: "Seguimiento 4 enviado"  },
-    { status: "follow_up_sent_5",  short: "FU5",  title: "Seguimiento 5 enviado"  },
+    { status: "follow_up_sent",    short: "FU",   title: "En seguimiento (el nº de paso vive en followup_step)" },
     { status: "awaiting_response", short: "Esp",  title: "Esperando reply (LinkedIn ban window)" },
     { status: "replied",           short: "Rep",  title: "Respondió"              },
     { status: "meeting_booked",    short: "Mtg",  title: "Reunión agendada"       },
@@ -124,8 +120,7 @@ export default async function LeadsPage({
   const STATUS_ORDER: Record<string, number> = {
     scraped: 0, pending: 0, processing: 0, disqualified: 0,
     invite_sent: 1, connected: 2,
-    follow_up_sent: 3, follow_up_sent_2: 4, follow_up_sent_3: 5,
-    follow_up_sent_4: 6, follow_up_sent_5: 7,
+    follow_up_sent: 3,
     awaiting_response: 8,
     replied: 9, meeting_booked: 10, dead: -1, failed: -1,
   }

@@ -46,6 +46,21 @@ async function createCampaign(formData: FormData) {
     return
   }
 
+  // v0.8 FU dinámico: sembrar el primer paso de la secuencia (campaign_followups).
+  // El admin puede agregar más pasos (hasta 20) en el editor de la campaña/cuenta.
+  const fuMsg = (formData.get("follow_up_message") as string) || null
+  if (fuMsg && fuMsg.trim()) {
+    await (admin as any).from("campaign_followups").insert({
+      campaign_id:  campaign.id,
+      step:         1,
+      message:      fuMsg,
+      delay_value:  Number(formData.get("follow_up_delay_days") || 3),
+      delay_unit:   "days",
+      jitter_hours: 0,
+      enabled:      true,
+    })
+  }
+
   // ── Create message template
   await admin.from("message_templates").insert({
     campaign_id:         campaign.id,

@@ -2,6 +2,7 @@ import { createAdminClient } from "@/lib/supabase/admin"
 import { redirect, notFound } from "next/navigation"
 import DeleteCampaignBtn from "@/components/delete-campaign-btn"
 import { CampaignTabs } from "@/components/campaign-tabs"
+import { FollowupSequenceEditor, type FollowupStep } from "@/components/followup-sequence-editor"
 
 // ── Server Actions ─────────────────────────────────────────────────────────────
 
@@ -48,15 +49,7 @@ async function saveCampaign(formData: FormData) {
       : ["lunes","martes","miércoles","jueves","viernes"],
     search_gap_hours:          Number(formData.get("search_gap_hours") || 20),
     search_2nd_degree_only:    formData.get("search_2nd_degree_only") === "true",
-    follow_up_message:           (formData.get("follow_up_message") as string) || null,
-    follow_up_step2_message:     (formData.get("follow_up_step2_message") as string) || null,
-    follow_up_step2_delay_hours: Number(formData.get("follow_up_step2_delay_hours") || 15),
-    follow_up_step3_message:     (formData.get("follow_up_step3_message") as string) || null,
-    follow_up_step3_delay_hours: Number(formData.get("follow_up_step3_delay_hours") || 28),
-    follow_up_step4_message:     (formData.get("follow_up_step4_message") as string) || null,
-    follow_up_step4_delay_hours: Number(formData.get("follow_up_step4_delay_hours") || 96),
-    follow_up_step5_message:     (formData.get("follow_up_step5_message") as string) || null,
-    follow_up_step5_delay_hours: Number(formData.get("follow_up_step5_delay_hours") || 84),
+    // v0.8 FU dinámico: los mensajes/delays por paso viven ahora en campaign_followups (abajo).
     followup_tone_directive:     (formData.get("followup_tone_directive") as string) || null,
     auto_dead_after_days:        Number(formData.get("auto_dead_after_days") || 21),
     fm1_example_reply:           (formData.get("fm1_example_reply") as string) || null,
@@ -110,6 +103,37 @@ async function saveCampaign(formData: FormData) {
     }
   }
 
+  // v0.8 FU dinámico: reemplazar la secuencia de seguimientos (tabla campaign_followups).
+  const fuJson = formData.get("followup_steps_json")
+  if (typeof fuJson === "string" && fuJson.length > 0) {
+    let parsed: any[] = []
+    try { parsed = JSON.parse(fuJson) } catch { parsed = [] }
+    const clean = parsed
+      .filter((s: any) => (s?.message && String(s.message).trim()) || Number(s?.delay_value) > 0)
+      .slice(0, 20)
+      .map((s: any, i: number) => ({
+        campaign_id:  id,
+        step:         i + 1,
+        message:      s?.message && String(s.message).trim() ? String(s.message) : null,
+        delay_value:  Number.isFinite(Number(s?.delay_value)) ? Number(s.delay_value) : 0,
+        delay_unit:   s?.delay_unit === "days" ? "days" : "hours",
+        jitter_hours: Number.isFinite(Number(s?.jitter_hours)) ? Number(s.jitter_hours) : 0,
+        enabled:      s?.enabled !== false,
+      }))
+    await admin.from("campaign_followups").delete().eq("campaign_id", id)
+    if (clean.length) {
+      const { error: fuErr } = await admin.from("campaign_followups").insert(clean)
+      if (fuErr) { console.error(`[saveCampaign] campaign_followups failed: ${fuErr.message}`); errors.push(`followups: ${fuErr.message}`) }
+    }
+    // Compat: espejar el paso 1 a las columnas legacy (monitor/next-actions leen el forecast de FU1)
+    const s1 = clean.find(s => s.step === 1)
+    await admin.from("campaigns").update({
+      follow_up_message:     s1?.message ?? null,
+      follow_up_delay_days:  s1 && s1.delay_unit === "days"  ? s1.delay_value : null,
+      follow_up_delay_hours: s1 && s1.delay_unit === "hours" ? s1.delay_value : null,
+    }).eq("id", id)
+  }
+
   if (errors.length > 0) {
     // Si hubo errores, NO redirect ciego. Throw para que Next.js error.tsx muestre el problema.
     throw new Error(`saveCampaign falló: ${errors.join(" | ")}`)
@@ -142,6 +166,20 @@ export default async function CampaignEditPage({ params }: { params: Promise<{ i
 
   const t = templates?.[0] ?? null
   const toComma = (arr: string[] | null) => (arr ?? []).join(", ")
+
+  // v0.8 FU dinámico: secuencia de seguimientos (1..20) desde campaign_followups
+  const { data: fuRows } = await (admin as any)
+    .from("campaign_followups")
+    .select("step, message, delay_value, delay_unit, jitter_hours, enabled")
+    .eq("campaign_id", id)
+    .order("step", { ascending: true })
+  const fuSteps: FollowupStep[] = (fuRows ?? []).map((r: any) => ({
+    message:      r.message ?? "",
+    delay_value:  Number(r.delay_value ?? 0),
+    delay_unit:   r.delay_unit === "days" ? "days" : "hours",
+    jitter_hours: Number(r.jitter_hours ?? 0),
+    enabled:      r.enabled !== false,
+  }))
 
   return (
     <div className="p-4 sm:p-8 max-w-5xl mx-auto space-y-6">
@@ -519,9 +557,9 @@ NUNCA uses el cargo/título como si fuera el nombre de una empresa.`}
           {/* ╚═══════════════════════════════════════════════════════════════╝ */}
           <div className="space-y-6">
             <Section title="Seguimiento automático" icon="💬"
-              description="Hasta 5 pasos de seguimiento automáticos. Cada paso se envía solo una vez por lead; si el lead responde en cualquier momento sale de la secuencia. Déjalo vacío para desactivarlo.">
+              description="De 1 a 20 pasos de seguimiento automáticos. Cada paso se envía solo una vez por lead; si el lead responde en cualquier momento sale de la secuencia. Agrega o elimina pasos con los botones de abajo.">
               <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-4 text-xs text-amber-300 space-y-1">
-                <p>FU1 se envía en el siguiente tick (~30 min) tras aceptar la conexión. FU2-5 respetan el delay en horas configurado desde el envío del paso anterior.</p>
+                <p>FU1 se envía en el siguiente tick (~30 min) tras aceptar la conexión. Los siguientes respetan el delay configurado desde el envío del paso anterior.</p>
               </div>
 
               {/* Tono de seguimientos — instrucción que guía la personalización con IA */}
@@ -535,84 +573,8 @@ NUNCA uses el cargo/título como si fuera el nombre de una empresa.`}
                 </Field>
               </div>
 
-              {/* Step 1 */}
-              <div className="space-y-3">
-                <p className="text-gray-400 text-xs font-semibold uppercase tracking-wide">Seguimiento 1 — tras conectar</p>
-                <Field label="Mensaje de seguimiento 1"
-                  hint="Se envía en el primer tick después de que el lead acepta la conexión. Usa [Nombre] para personalizar.">
-                  <textarea name="follow_up_message" rows={3}
-                    defaultValue={c.follow_up_message ?? ""}
-                    placeholder="Hola [Nombre], gracias por conectar. ¿Tienes 15 min esta semana para conversar?"
-                    className={inp} />
-                </Field>
-              </div>
-
-              {/* Step 2 */}
-              <div className="space-y-3 pt-2 border-t border-gray-800">
-                <p className="text-gray-400 text-xs font-semibold uppercase tracking-wide">Seguimiento 2 — {(c as any).follow_up_step2_delay_hours ?? 15}h después del FU1 — opcional</p>
-                <Field label="Mensaje de seguimiento 2"
-                  hint="Se envía si no hubo respuesta tras el delay configurado. Déjalo vacío para desactivar.">
-                  <textarea name="follow_up_step2_message" rows={3}
-                    defaultValue={(c as any).follow_up_step2_message ?? ""}
-                    placeholder="Hola de nuevo [Nombre]. Sé que estás ocupado — ¿te viene bien 15 min esta semana?"
-                    className={inp} />
-                </Field>
-                <Field label="Horas de espera desde FU1" hint="Default: 15h">
-                  <input name="follow_up_step2_delay_hours" type="number" min="6" max="240"
-                    defaultValue={(c as any).follow_up_step2_delay_hours ?? 15} className={inp} />
-                </Field>
-              </div>
-
-              {/* Step 3 */}
-              <div className="space-y-3 pt-2 border-t border-gray-800">
-                <p className="text-gray-400 text-xs font-semibold uppercase tracking-wide">Seguimiento 3 — {(c as any).follow_up_step3_delay_hours ?? 28}h después del FU2 — opcional</p>
-                <Field label="Mensaje de seguimiento 3"
-                  hint="Déjalo vacío para desactivar.">
-                  <textarea name="follow_up_step3_message" rows={3}
-                    defaultValue={(c as any).follow_up_step3_message ?? ""}
-                    placeholder="[Nombre], ¿pudiste ver mi mensaje anterior? Solo quiero asegurarme de que llegó."
-                    className={inp} />
-                </Field>
-                <Field label="Horas de espera desde FU2" hint="Default: 28h">
-                  <input name="follow_up_step3_delay_hours" type="number" min="12" max="480"
-                    defaultValue={(c as any).follow_up_step3_delay_hours ?? 28} className={inp} />
-                </Field>
-              </div>
-
-              {/* Step 4 */}
-              <div className="space-y-3 pt-2 border-t border-gray-800">
-                <p className="text-gray-400 text-xs font-semibold uppercase tracking-wide">Seguimiento 4 — {(c as any).follow_up_step4_delay_hours ?? 96}h después del FU3 — opcional</p>
-                <Field label="Mensaje de seguimiento 4"
-                  hint="Déjalo vacío para desactivar. Recomendado: cambio de ángulo (nuevo argumento o caso de éxito).">
-                  <textarea name="follow_up_step4_message" rows={3}
-                    defaultValue={(c as any).follow_up_step4_message ?? ""}
-                    placeholder="[Nombre], le ayudamos a [empresa similar] a conseguir X en 30 días. ¿Aplica en tu caso?"
-                    className={inp} />
-                </Field>
-                <Field label="Horas de espera desde FU3" hint="Default: 96h (~4 días)">
-                  <input name="follow_up_step4_delay_hours" type="number" min="24" max="720"
-                    defaultValue={(c as any).follow_up_step4_delay_hours ?? 96} className={inp} />
-                </Field>
-              </div>
-
-              {/* Step 5 — Closing */}
-              <div className="space-y-3 pt-2 border-t border-gray-800">
-                <p className="text-gray-400 text-xs font-semibold uppercase tracking-wide">Cierre (FU5) — {(c as any).follow_up_step5_delay_hours ?? 84}h después del FU4 — opcional</p>
-                <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-3 text-xs text-amber-300">
-                  Último intento. Tono de bajo compromiso — sin presión. Después de este paso, el lead puede marcarse como dead automáticamente.
-                </div>
-                <Field label="Mensaje de cierre"
-                  hint="Breve y sin presión. Déjalo vacío para desactivar.">
-                  <textarea name="follow_up_step5_message" rows={3}
-                    defaultValue={(c as any).follow_up_step5_message ?? ""}
-                    placeholder="[Nombre], entiendo que no es el momento. Queda la puerta abierta — si en algún momento tiene sentido conversar, aquí estaré."
-                    className={inp} />
-                </Field>
-                <Field label="Horas de espera desde FU4" hint="Default: 84h (~3.5 días)">
-                  <input name="follow_up_step5_delay_hours" type="number" min="24" max="720"
-                    defaultValue={(c as any).follow_up_step5_delay_hours ?? 84} className={inp} />
-                </Field>
-              </div>
+              {/* v0.8 FU dinámico: editor de secuencia 1..20 (respaldado por campaign_followups) */}
+              <FollowupSequenceEditor initialSteps={fuSteps} />
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <Field label="Días hasta marcar como Perdido" hint="Días tras el último follow-up sin respuesta para auto-marcar como dead. Default: 21.">

@@ -81,6 +81,29 @@ Estrategia actual:
 - inbox.js usa: `'reply_received'`
 - batch.js usa: `'invite_sent'`
 
+### Follow-ups dinámicos (v0.8 — 2026-06-12)
+
+Los FU ya **no están hardcodeados a 5**. Cada campaña define **1..20 pasos** en la tabla
+`campaign_followups (campaign_id, step, message, delay_value, delay_unit, jitter_hours, enabled)`.
+El nº de filas habilitadas = nº de seguimientos.
+
+- **Progreso del lead**: columna `leads.followup_step` (contador, default 0). TODOS los leads en
+  cadena de FU comparten el status genérico `follow_up_sent` (ya **no** existen `follow_up_sent_2..5`
+  en uso; siguen válidos en el constraint sólo por compat/rollback). El paso lo lleva el contador.
+- **Motor** (`scheduler-extension.js` → `loadFollowupSteps()` + `tryFollowupsForCampaign()`):
+  próximo paso = `followup_step + 1`. `prevTime = followup_step===0 ? connected_at : last_followup_at`.
+  Si no hay fila para el paso siguiente → secuencia agotada (lead se queda en `follow_up_sent`,
+  lo barre `auto_dead_after_days`). Hay un solo timestamp: `last_followup_at`.
+- **Ingest** (`extension-bridge.js`): al confirmarse un FU → `status='follow_up_sent'`,
+  `followup_step = payload.step`, `last_followup_at = now`. El evento se registra con
+  `event_type='follow_up_sent'` (genérico).
+- **Admin panel**: editor dinámico `components/followup-sequence-editor.tsx` (cap 20) en el tab
+  Seguimientos del Centro de Control (`accounts/[id]/config`) y en `campaigns/[id]/edit`. Guarda
+  reemplazando filas de `campaign_followups` (server action). Config por **campaña activa** de la cuenta.
+- **Legacy NO usado**: columnas `campaigns.follow_up_step2..5_*` / `leads.last_followup2..5_at` siguen
+  existiendo pero el motor ya no las lee (se conservan para rollback). `scheduler.js`/`followup.js`/
+  `worker.js`/`batch.js` son legacy y NO corren.
+
 ### Generación de mensajes (ai.js + worker.js)
 
 - **Modelo**: Gemini 2.5 Flash (temperatura 0.9)
@@ -131,6 +154,7 @@ Estrategia actual:
 | `campaigns` | Campañas vinculadas a cuentas |
 | `leads` | Leads con profile_data JSON, status, ai_message |
 | `message_templates` | Templates de mensaje por campaña (Gemini rules) |
+| `campaign_followups` | Secuencia de FU por campaña (1..20 pasos: message, delay, unit, jitter, enabled) — v0.8 |
 | `conversations` | Conversaciones activas con leads |
 | `conversation_events` | Historial mensaje a mensaje |
 | `scheduler_log` | Registro de cada tick/job |
@@ -140,9 +164,11 @@ Estrategia actual:
 ### Estado de leads
 
 ```
-pending → invite_sent → connected → replied
-                    ↘ failed / disqualified
+pending → invite_sent → connected → follow_up_sent (followup_step 1..N) → replied
+                    ↘ failed / disqualified            ↘ dead (auto_dead_after_days)
 ```
+`follow_up_sent` es genérico para toda la cadena de FU; el paso vive en `leads.followup_step`.
+Secuencia configurable por campaña en `campaign_followups` (1..20). Ver §3 "Follow-ups dinámicos".
 
 ---
 

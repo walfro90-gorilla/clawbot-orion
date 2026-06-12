@@ -71,16 +71,9 @@ export const FIELDS: ConfigField[] = [
 
   // ── Seguimientos ───────────────────────────────────────────────────────────
   { key: "follow_up_paused", store: "campaign", type: "bool", tab: "seguimientos", label: "Pausar seguimientos" },
-  { key: "follow_up_message", store: "campaign", type: "textarea", tab: "seguimientos", label: "FU1 — mensaje" },
-  { key: "follow_up_delay_days", store: "campaign", type: "int", tab: "seguimientos", label: "FU1 — delay (días)", bounds: { hardMin: 0 } },
-  { key: "follow_up_step2_message", store: "campaign", type: "textarea", tab: "seguimientos", label: "FU2 — mensaje" },
-  { key: "follow_up_step2_delay_hours", store: "campaign", type: "int", tab: "seguimientos", label: "FU2 — delay (h)", bounds: { hardMin: 1 } },
-  { key: "follow_up_step3_message", store: "campaign", type: "textarea", tab: "seguimientos", label: "FU3 — mensaje" },
-  { key: "follow_up_step3_delay_hours", store: "campaign", type: "int", tab: "seguimientos", label: "FU3 — delay (h)", bounds: { hardMin: 1 } },
-  { key: "follow_up_step4_message", store: "campaign", type: "textarea", tab: "seguimientos", label: "FU4 — mensaje" },
-  { key: "follow_up_step4_delay_hours", store: "campaign", type: "int", tab: "seguimientos", label: "FU4 — delay (h)", bounds: { hardMin: 1 } },
-  { key: "follow_up_step5_message", store: "campaign", type: "textarea", tab: "seguimientos", label: "FU5 — mensaje" },
-  { key: "follow_up_step5_delay_hours", store: "campaign", type: "int", tab: "seguimientos", label: "FU5 — delay (h)", bounds: { hardMin: 1 } },
+  // v0.8 FU dinámico: los mensajes/delays de cada paso (1..20) ya NO son campos fijos.
+  // Se editan en el componente <FollowupSequenceEditor> (tab Seguimientos), respaldado
+  // por la tabla campaign_followups. Ver config/page.tsx (server action saveAccountConfig).
   { key: "followup_tone_directive", store: "campaign", type: "textarea", tab: "seguimientos", label: "Directiva de tono de FU (Gemini)" },
   { key: "auto_dead_after_days", store: "campaign", type: "int", tab: "seguimientos", label: "Auto-dead sin respuesta (días)", bounds: { hardMin: 1 } },
   { key: "auto_reply_mode", store: "campaign", type: "enum", tab: "seguimientos", label: "Modo de auto-respuesta",

@@ -137,7 +137,6 @@ export default async function CampaignsPage() {
       batch_paused, search_paused, follow_up_paused,
       daily_invite_target, min_batch_gap_min, min_pending_threshold,
       last_batch_at, last_searched_at, last_followup_at,
-      follow_up_message, follow_up_step2_message,
       linkedin_account_id,
       linkedin_accounts (
         id, label, status, warmup_status, inbox_paused, inbox_gap_min
@@ -178,6 +177,18 @@ export default async function CampaignsPage() {
   }
 
   const campaigns = (camps ?? []) as any[]
+
+  // v0.8 FU dinámico: # de pasos de seguimiento configurados por campaña
+  const fuCountByCampaign: Record<string, number> = {}
+  const campIds = campaigns.map(c => c.id)
+  if (campIds.length > 0) {
+    const { data: fuRows } = await (admin as any)
+      .from("campaign_followups")
+      .select("campaign_id")
+      .in("campaign_id", campIds)
+      .eq("enabled", true)
+    for (const r of fuRows ?? []) fuCountByCampaign[r.campaign_id] = (fuCountByCampaign[r.campaign_id] ?? 0) + 1
+  }
 
   return (
     <div className="p-4 sm:p-8 space-y-6">
@@ -313,8 +324,10 @@ export default async function CampaignsPage() {
                   icon="📨"
                   riskWhenActive={risk === "high" ? "high" : "medium"}
                   description={fuPaused
-                    ? "Pausados — FU1 y FU2 detenidos"
-                    : c.follow_up_message ? "Activos — FU1" + (c.follow_up_step2_message ? " + FU2" : "") : "Sin mensaje configurado"}
+                    ? `Pausados — ${fuCountByCampaign[c.id] ?? 0} paso(s) detenidos`
+                    : (fuCountByCampaign[c.id] ?? 0) > 0
+                      ? `Activos — ${fuCountByCampaign[c.id]} seguimiento${(fuCountByCampaign[c.id] ?? 0) === 1 ? "" : "s"}`
+                      : "Sin seguimientos configurados"}
                 />
                 {/* Inbox toggle — account level */}
                 <form action={toggleInboxPause}>

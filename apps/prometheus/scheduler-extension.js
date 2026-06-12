@@ -407,13 +407,25 @@ function substituteTemplate(template, lead, account) {
   return out
 }
 
-const FU_STEPS = [
-  { num: 1, statusFrom: ['connected'],          statusTo: 'follow_up_sent',   delayField: 'follow_up_delay_days',         delayUnit: 'days',  tplField: 'follow_up_message',         lastField: 'last_followup_at' },
-  { num: 2, statusFrom: ['follow_up_sent'],     statusTo: 'follow_up_sent_2', delayField: 'follow_up_step2_delay_hours', delayUnit: 'hours', tplField: 'follow_up_step2_message',  lastField: 'last_followup2_at' },
-  { num: 3, statusFrom: ['follow_up_sent_2'],   statusTo: 'follow_up_sent_3', delayField: 'follow_up_step3_delay_hours', delayUnit: 'hours', tplField: 'follow_up_step3_message',  lastField: 'last_followup3_at' },
-  { num: 4, statusFrom: ['follow_up_sent_3'],   statusTo: 'follow_up_sent_4', delayField: 'follow_up_step4_delay_hours', delayUnit: 'hours', tplField: 'follow_up_step4_message',  lastField: 'last_followup4_at' },
-  { num: 5, statusFrom: ['follow_up_sent_4'],   statusTo: 'follow_up_sent_5', delayField: 'follow_up_step5_delay_hours', delayUnit: 'hours', tplField: 'follow_up_step5_message',  lastField: 'last_followup5_at' },
-]
+// v0.8 FU dinámico: la secuencia de follow-ups ya no está hardcodeada a 5 pasos.
+// Cada campaña define 1..20 pasos en la tabla campaign_followups. El "paso" en el
+// que va un lead se lleva en leads.followup_step (contador), NO en el status —
+// todos los leads en cadena de FU comparten el status genérico 'follow_up_sent'.
+//   próximo paso a enviar = followup_step + 1
+//   prevTime = followup_step === 0 ? connected_at : last_followup_at
+export async function loadFollowupSteps(campaignId) {
+  const { data, error } = await supabase
+    .from('campaign_followups')
+    .select('step, message, delay_value, delay_unit, jitter_hours, enabled')
+    .eq('campaign_id', campaignId)
+    .eq('enabled', true)
+    .order('step', { ascending: true })
+  if (error) {
+    console.error(`[SCH-EXT] loadFollowupSteps failed campaign=${campaignId?.slice(0,8)}: ${error.message}`)
+    return []
+  }
+  return data ?? []
+}
 
 // v0.7.8: status terminal-pero-revivible que el scheduler NUNCA debe dispatchear
 // como FU. El sweep diario (sweepAwaitingResponseTimeout) los mata si pasan 21d
@@ -457,7 +469,7 @@ async function sweepAwaitingResponseTimeout() {
   return { swept }
 }
 
-async function tryFollowupsForCampaign(campaign, account) {
+export async function tryFollowupsForCampaign(campaign, account) {
   if (campaign.follow_up_paused) {
     return { skipped: true, reason: 'follow_up_paused' }
   }
@@ -475,7 +487,9 @@ async function tryFollowupsForCampaign(campaign, account) {
   // grande en FU1 starve a los FUs avanzados. Leads más profundos en el funnel
   // están más cerca de meeting → progresarlos primero tiene mayor ROI.
   // Más Fisher-Yates shuffle ligero para humanización (no siempre mismo orden).
-  const stepsOrdered = [...FU_STEPS].reverse()
+  const fuSteps = await loadFollowupSteps(campaign.id)
+  if (fuSteps.length === 0) return { skipped: true, reason: 'no_followup_steps_configured' }
+  const stepsOrdered = [...fuSteps].reverse()
   if (Math.random() < 0.3) {  // 30% de ticks: random shuffle (anti-pattern detection)
     for (let i = stepsOrdered.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1))
@@ -484,22 +498,17 @@ async function tryFollowupsForCampaign(campaign, account) {
   }
 
   for (const step of stepsOrdered) {
-    const template = campaign[step.tplField]
+    const stepNum = step.step
+    const statusFromArr = stepNum === 1 ? ['connected'] : ['follow_up_sent']
+    const prevTimeField = stepNum === 1 ? 'connected_at' : 'last_followup_at'
+    const template = step.message
     const hasAiFallback = !!campaign.gemini_system_prompt &&
                           campaign.gemini_system_prompt.trim().length > 20
     if (!template && !hasAiFallback) continue  // ni template ni gemini prompt → skip
 
-    // FU1 puede usar follow_up_delay_hours (override) o follow_up_delay_days.
-    // Si el campo HOURS está set en la campaña, lo preferimos sobre días.
-    let delay
-    let effectiveUnit
-    if (step.num === 1 && campaign.follow_up_delay_hours != null) {
-      delay = campaign.follow_up_delay_hours
-      effectiveUnit = 'hours'
-    } else {
-      delay = campaign[step.delayField]
-      effectiveUnit = step.delayUnit
-    }
+    // Delay y unidad vienen de la fila de campaign_followups (días u horas).
+    const delay = step.delay_value
+    const effectiveUnit = step.delay_unit
     if (!delay && delay !== 0) continue  // sin delay = step deshabilitado
 
     // ¿Cuánto tiempo desde el último step para este lead?
@@ -510,16 +519,15 @@ async function tryFollowupsForCampaign(campaign, account) {
     // step2-5 ahora aplican un % del delay base (jitter_pct_fu_delay desde
     // runtime_config, default 0.35). Evita ZERO jitter en FU2-5 sin schema change.
     const jitterPctFu = await readRuntimeNumber('jitter_pct_fu_delay', 0.35, account.id)
-    const stepJitterHours = step.num === 1
-      ? (campaign.follow_up_jitter_hours ?? 0)
-      : Math.max(campaign[`follow_up_step${step.num}_jitter_hours`] ?? 0, delay * jitterPctFu)
+    const stepJitterHours = stepNum === 1
+      ? (step.jitter_hours ?? 0)
+      : Math.max(step.jitter_hours ?? 0, delay * jitterPctFu)
     const jitterHours = stepJitterHours
     const jitterMs = jitterHours * 3_600_000
     // Query usa el cutoff INFERIOR (más laxo) para traer candidates;
     // el filter individual por lead después aplica el jitter exacto
     const cutoffMs = baseCutoffMs - jitterMs
     const cutoffIso = new Date(Date.now() - cutoffMs).toISOString()
-    const prevTimeField = step.num === 1 ? 'connected_at' : FU_STEPS[step.num - 2].lastField
 
     // Safety gate: skip leads cuya prev step timestamp es muy antigua
     // (típicamente leads históricos de batches viejos). Por default 30 días.
@@ -531,19 +539,20 @@ async function tryFollowupsForCampaign(campaign, account) {
     // el lead conectado NO tiene thread hasta que enviemos el primer mensaje.
     // Sub-Fase 3.8: content.js maneja ambos casos (compose-new desde perfil
     // si no hay thread, o reply en thread si existe).
-    // v0.7.8: defensa adicional — aunque .in('status', step.statusFrom) ya excluye
+    // v0.7.8: defensa adicional — aunque .in('status', statusFromArr) ya excluye
     // awaiting_response por construcción (no aparece en ningún statusFrom), añadimos
-    // un guard explícito por si alguien edita FU_STEPS y mete un status erróneo.
-    const safeStatusFrom = step.statusFrom.filter(s => !FU_DISPATCH_EXCLUDED_STATUSES.includes(s))
+    // un guard explícito por si la derivación de statusFromArr mete un status erróneo.
+    const safeStatusFrom = statusFromArr.filter(s => !FU_DISPATCH_EXCLUDED_STATUSES.includes(s))
     if (safeStatusFrom.length === 0) continue
     const nowIsoForCooldown = new Date().toISOString()
     const { data: due } = await supabase
       .from('leads')
-      .select(`id, full_name, linkedin_url, status, profile_data, ${prevTimeField},
+      .select(`id, full_name, linkedin_url, status, followup_step, profile_data, ${prevTimeField},
                consecutive_failures, cooldown_until, quarantined_at, last_attempt_at,
                lockout_skip_count,
                conversations(linkedin_thread_id, linkedin_account_id)`)
       .eq('campaign_id', campaign.id)
+      .eq('followup_step', stepNum - 1)
       .in('status', safeStatusFrom)
       .lt(prevTimeField, cutoffIso)
       .gte(prevTimeField, tooOldIso)
@@ -631,11 +640,11 @@ async function tryFollowupsForCampaign(campaign, account) {
     if (template && hasAiFallback) {
       // ★ MODO HÍBRIDO: template como intención + Gemini personaliza al lead
       const persRes = await personalizeFollowupMessage(
-        campaign, lead, template, step.num, account.cal_com_url ?? null,
+        campaign, lead, template, stepNum, account.cal_com_url ?? null,
         { toneDirective: campaign.followup_tone_directive ?? undefined }
       )
       if (persRes.error) {
-        console.warn(`[SCH-EXT]   AI personalize failed (FU${step.num}): ${persRes.error} — fallback a template literal`)
+        console.warn(`[SCH-EXT]   AI personalize failed (FU${stepNum}): ${persRes.error} — fallback a template literal`)
         message = substituteTemplate(template, lead, account)
       } else {
         message = persRes.message
@@ -645,7 +654,7 @@ async function tryFollowupsForCampaign(campaign, account) {
       message = substituteTemplate(template, lead, account)
     } else if (hasAiFallback) {
       // Solo AI, sin template → gen completo
-      const aiRes = await generateLinkedInMessage(campaign, lead, `follow_up_${step.num}`)
+      const aiRes = await generateLinkedInMessage(campaign, lead, `follow_up_${stepNum}`)
       if (aiRes.error) {
         // v0.7.13 P0-2: si Gemini falla, NO skipear silencio — usar safe template.
         // Antes esto causaba que leads de campañas AI-only nunca recibieran FU
@@ -660,7 +669,7 @@ async function tryFollowupsForCampaign(campaign, account) {
             severity: String(aiRes.error).includes('403') ? 'critical' : 'warning',
             phase_name: null,
             account_id: account.id,
-            details: { error: String(aiRes.error).slice(0, 500), step: step.num, lead_name: lead.full_name },
+            details: { error: String(aiRes.error).slice(0, 500), step: stepNum, lead_name: lead.full_name },
           })
         } catch {}
       } else {
@@ -674,7 +683,7 @@ async function tryFollowupsForCampaign(campaign, account) {
     // resolver ("[Nombre]", "[menciona algo]", "{nombre}"). Si se cuela, saltamos
     // este lead este tick (mejor no enviar que enviar basura). Se reintenta luego.
     if (hasLeftoverPlaceholder(message)) {
-      console.warn(`[SCH-EXT] 🚫 FU${step.num} a ${lead.full_name} BLOQUEADO por placeholder sin resolver: ${message.match(/\[[^\]]*\]|\{[^}]*\}/)?.[0]?.slice(0,40)}`)
+      console.warn(`[SCH-EXT] 🚫 FU${stepNum} a ${lead.full_name} BLOQUEADO por placeholder sin resolver: ${message.match(/\[[^\]]*\]|\{[^}]*\}/)?.[0]?.slice(0,40)}`)
       continue
     }
 
@@ -705,8 +714,8 @@ async function tryFollowupsForCampaign(campaign, account) {
     const navUrl = threadUrl ?? profileUrl
 
     if (DRY_RUN) {
-      console.log(`[SCH-EXT] DRY_RUN FU${step.num} → "${lead.full_name}" (${navUrl}) thread=${!!threadId}`)
-      return { dispatched: false, dryRun: true, step: step.num }
+      console.log(`[SCH-EXT] DRY_RUN FU${stepNum} → "${lead.full_name}" (${navUrl}) thread=${!!threadId}`)
+      return { dispatched: false, dryRun: true, step: stepNum }
     }
 
     // Content dedup: si ya enviamos este mismo texto a este lead en últimas 4h,
@@ -715,8 +724,9 @@ async function tryFollowupsForCampaign(campaign, account) {
     if (await wasMessageRecentlySent(lead.id, message, 4)) {
       console.warn(`[SCH-EXT]   ⚠️  FU dedup: mensaje idéntico ya enviado a ${lead.full_name} en últimas 4h — forzando advance status`)
       await supabase.from('leads').update({
-        status: step.statusTo,
-        [step.lastField]: new Date().toISOString(),
+        status: 'follow_up_sent',
+        followup_step: stepNum,
+        last_followup_at: new Date().toISOString(),
       }).eq('id', lead.id)
       return { skipped: true, reason: 'content_dedup', leadName: lead.full_name }
     }
@@ -800,25 +810,25 @@ async function tryFollowupsForCampaign(campaign, account) {
         .select('id', { count: 'exact', head: true })
         .eq('related_lead_id', lead.id)
         .eq('action', 'send_followup')
-        .eq('payload->>step', String(step.num))
+        .eq('payload->>step', String(stepNum))
         .in('status', ['pending', 'dispatched', 'completed'])
         .gte('created_at', dedupCutoff)
       if ((dupCount ?? 0) > 0) {
-        console.warn(`[SCH-EXT]   ⏭️  step-dedup ${lead.full_name} FU${step.num} — ${dupCount}× cmds últimas 48h, skip`)
+        console.warn(`[SCH-EXT]   ⏭️  step-dedup ${lead.full_name} FU${stepNum} — ${dupCount}× cmds últimas 48h, skip`)
         continue
       }
     }
 
-    const cmdId = await dispatchFollowup(account, lead, step.num, message, threadUrl, profileUrl)
+    const cmdId = await dispatchFollowup(account, lead, stepNum, message, threadUrl, profileUrl)
     if (!cmdId) continue
 
     await logJob({
-      campaignId: campaign.id, accountId: account.id, jobType: `followup_${step.num}`,
+      campaignId: campaign.id, accountId: account.id, jobType: `followup_${stepNum}`,
       status: 'dispatched',
-      details: { commandId: cmdId, leadId: lead.id, step: step.num, threadUrl },
+      details: { commandId: cmdId, leadId: lead.id, step: stepNum, threadUrl },
     })
 
-    return { dispatched: 1, step: step.num, commandId: cmdId, leadName: lead.full_name }
+    return { dispatched: 1, step: stepNum, commandId: cmdId, leadName: lead.full_name }
   }
 
   return { skipped: true, reason: 'no_followups_due' }
@@ -826,7 +836,7 @@ async function tryFollowupsForCampaign(campaign, account) {
 
 // ── Auto-reply trigger (3.6) ─────────────────────────────────────────────────
 // Cuando un lead responde, el ingest lo marca status='replied' y la cadena FU
-// se pausa automáticamente (porque FU_STEPS solo procesa connected/follow_up_sent_*).
+// se pausa automáticamente (porque el motor de FU solo procesa status connected/follow_up_sent).
 // Este trigger detecta esos replied y genera una respuesta AI personalizada.
 
 async function tryAutoReplyForCampaign(campaign, account) {
@@ -855,7 +865,7 @@ async function tryAutoReplyForCampaign(campaign, account) {
   const nowIsoForCooldown = new Date().toISOString()
   const { data: replied } = await supabase
     .from('leads')
-    .select(`id, full_name, replied_at, profile_data, linkedin_url,
+    .select(`id, full_name, replied_at, profile_data, linkedin_url, followup_step,
              consecutive_failures, cooldown_until, quarantined_at, last_attempt_at,
              conversations!inner(id, linkedin_thread_id, last_message_text, last_message_at, linkedin_account_id)`)
     .eq('campaign_id', campaign.id)
@@ -973,17 +983,14 @@ async function tryAutoReplyForCampaign(campaign, account) {
     // Identificar el ÚLTIMO FU template que se envió a este lead → pasarlo como
     // "intención previa" para que el AI mantenga coherencia con el mensaje de
     // seguimiento en el que la conversación está, mientras responde al historial.
-    const lastFuEvent = [...(events ?? [])]
-      .reverse()
-      .find(e => /^follow_up_sent/.test(e.event_type ?? ''))
-    let lastFuStepNum = null
-    if (lastFuEvent) {
-      const m = lastFuEvent.event_type.match(/follow_up_sent(?:_(\d))?/)
-      lastFuStepNum = m ? (m[1] ? parseInt(m[1]) : 1) : null
+    // v0.8 FU dinámico: el paso lo lleva lead.followup_step (contador), y el template
+    // de ese paso vive en campaign_followups (no en columnas fijas de la campaña).
+    const lastFuStepNum = lead.followup_step && lead.followup_step > 0 ? lead.followup_step : null
+    let lastFuTemplate = null
+    if (lastFuStepNum) {
+      const fuSteps = await loadFollowupSteps(campaign.id)
+      lastFuTemplate = fuSteps.find(s => s.step === lastFuStepNum)?.message ?? null
     }
-    const lastFuTemplate = lastFuStepNum
-      ? campaign[`follow_up_${lastFuStepNum === 1 ? '' : 'step' + lastFuStepNum + '_'}message`]
-      : null
 
     // Generar respuesta vía AI con conversation history + cal_url + FU template guía
     const aiType = `fm_reply_${fmStep}`
@@ -1122,7 +1129,13 @@ async function maybeDispatchDeepSweep(account) {
     }, { expiresInMinutes: 25 })
     if (!id) return false
     map[account.id] = new Date().toISOString()
-    await supabase.from('runtime_config').upsert({ key: 'deep_sweep_last', value: map }, { onConflict: 'key' })
+    // v0.7.50 BUG FIX: runtime_config.updated_by es NOT NULL sin default. El upsert original
+    // solo mandaba {key, value} → violaba el constraint → FALLABA SILENCIOSO (error no chequeado)
+    // → el row deep_sweep_last NUNCA se creaba → lastMs=0 SIEMPRE → deep sweep en LOOP cada tick
+    // → starvaba check_sent_invites (las aceptaciones no se detectaban → leads sin FU1).
+    const { error: dsErr } = await supabase.from('runtime_config')
+      .upsert({ key: 'deep_sweep_last', value: map, updated_by: 'scheduler:deep_sweep' }, { onConflict: 'key' })
+    if (dsErr) { console.warn(`[SCH-EXT]   deep_sweep_last upsert falló: ${dsErr.message}`); return false }
     return true
   } catch (e) {
     console.warn(`[SCH-EXT]   deep sweep falló para ${account.label}: ${e.message}`)
@@ -1374,7 +1387,7 @@ async function tick() {
       fm1_example_reply, fm2_example_reply, fm3_example_reply,
       min_pending_threshold, daily_invite_target, min_batch_gap_min, search_gap_hours,
       schedule_start_hour, schedule_end_hour, schedule_days,
-      last_searched_at, last_batch_at,
+      last_searched_at, last_batch_at, last_search_keyword_idx,
       last_followup_at, last_followup2_at, last_followup3_at, last_followup4_at, last_followup5_at,
       follow_up_message, follow_up_delay_days, follow_up_delay_hours,
       follow_up_step2_message, follow_up_step2_delay_hours,
@@ -1529,17 +1542,24 @@ async function tick() {
       continue
     }
 
+    // v0.7.50: check_sent_invites tiene PRIORIDAD cuando está DUE. Antes corría DESPUÉS del
+    // inbox y, como el inbox dispatcha cada inbox_gap (15-30min), lo STARVABA por días — las
+    // aceptaciones quedaban sin detectar → leads stuck en invite_sent → SIN FU1 (caso 8-jun:
+    // 8 personas aceptaron y nunca recibieron mensaje). Como su gap (90min) >> inbox gap,
+    // preempta el inbox solo de vez en cuando (impacto mínimo en la responsividad de replies).
+    // Un solo comando por tab por tick (restricción de serialización del SW).
+    const sentDue = minutesSince(account.last_sent_invites_check_at) >= (account.sent_invites_gap_min ?? 360)
+    if (sentDue) {
+      const sentRes = await tryCheckSentInvitesForAccount(account)
+      if (sentRes.dispatched) {
+        console.log(`[SCH-EXT]   ✅ check_sent_invites dispatched for ${account.label} (prioridad — detecta aceptaciones)`)
+        continue
+      }
+    }
+
     const inboxRes = await tryInboxForAccount(account)
     if (inboxRes.dispatched) {
       console.log(`[SCH-EXT]   ✅ inbox dispatched for ${account.label}`)
-    }
-
-    // No despachar dos comandos al mismo tab en el mismo tick
-    if (inboxRes.dispatched) continue
-
-    const sentRes = await tryCheckSentInvitesForAccount(account)
-    if (sentRes.dispatched) {
-      console.log(`[SCH-EXT]   ✅ check_sent_invites dispatched for ${account.label}`)
     }
   }
 
@@ -1597,4 +1617,6 @@ process.on('unhandledRejection', (reason) => {
   process.exit(1)
 })
 
-run()
+// Auto-arranque salvo en modo test (un harness puede importar funciones sin arrancar el loop).
+// pm2 no setea SCHED_NO_AUTORUN → corre normal.
+if (process.env.SCHED_NO_AUTORUN !== 'true') run()

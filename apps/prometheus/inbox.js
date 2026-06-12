@@ -123,8 +123,7 @@ async function loadActiveLeads() {
     `)
     .in('status', [
       'invite_sent', 'connected', 'replied',
-      'follow_up_sent', 'follow_up_sent_2', 'follow_up_sent_3',
-      'follow_up_sent_4', 'follow_up_sent_5',
+      'follow_up_sent',
       'meeting_booked',
     ])
     .eq('campaigns.linkedin_account_id', ACCOUNT_ID)
@@ -252,8 +251,7 @@ async function generateDraftAsync(lead, inboundMessageText, replyModeOverride = 
         .in('event_type', [
           'invite_sent', 'message_sent',
           'reply_received', 'reply_sent',
-          'follow_up_sent', 'follow_up_sent_2', 'follow_up_sent_3',
-          'follow_up_sent_4', 'follow_up_sent_5',
+          'follow_up_sent',
         ])
         .order('sent_at', { ascending: true })
       conversationHistory = events ?? []

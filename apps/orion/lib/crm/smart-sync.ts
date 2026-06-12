@@ -19,8 +19,8 @@
 //      → mark replied, conserva replied_at
 //
 //   4. Si status='connected' AND outbound >= 1 AND inbound = 0 (drift real):
-//      → mark follow_up_sent_N donde N = min(outbound_count, 5)
-//      → backfill last_followupK_at desde conversation_events.sent_at
+//      → status = 'follow_up_sent' (genérico) + followup_step = min(outbound_count, 20)
+//      → backfill last_followup_at desde el último conversation_events.sent_at
 //
 //   5. Si nada aplica: NO ACTION (no debería verse en lista de drift).
 
@@ -37,6 +37,7 @@ export type LeadOracleRow = {
   last_followup3_at: string | null
   last_followup4_at: string | null
   last_followup5_at: string | null
+  followup_step?: number | null   // puede no venir del view v_crm_lead_list (se escribe, no se lee para decidir)
   outbound_count: number
   inbound_count: number
   last_outbound_at: string | null
@@ -103,15 +104,15 @@ export function decideSyncAction(lead: LeadOracleRow): SyncDecision {
   }
 
   // Caso 4: drift real (status=connected, outbound>=1, inbound=0, sin respuesta del lead)
+  // v0.8 FU dinámico: status genérico 'follow_up_sent' + contador followup_step (1..20).
   if (lead.status === "connected" && outCount >= 1 && inCount === 0) {
-    const newStep = Math.min(outCount, 5)
-    const newStatus = newStep === 1 ? "follow_up_sent" : `follow_up_sent_${newStep}`
+    const newStep = Math.min(outCount, 20)
     return {
       kind: "advance_followup",
-      new_status: newStatus,
+      new_status: "follow_up_sent",
       new_step: newStep,
-      update: { status: newStatus },
-      reason: `db_linkedin_drift: ${outCount} outbound enviados sin avance. Marcar ${newStatus} y backfill timestamps.`,
+      update: { status: "follow_up_sent", followup_step: newStep },
+      reason: `db_linkedin_drift: ${outCount} outbound enviados sin avance. Marcar follow_up_sent (paso ${newStep}) y backfill last_followup_at.`,
     }
   }
 
@@ -132,11 +133,8 @@ export async function applySyncDecision(
   const before: Record<string, unknown> = {
     status: lead.status,
     replied_at: lead.replied_at,
+    followup_step: lead.followup_step,
     last_followup_at: lead.last_followup_at,
-    last_followup2_at: lead.last_followup2_at,
-    last_followup3_at: lead.last_followup3_at,
-    last_followup4_at: lead.last_followup4_at,
-    last_followup5_at: lead.last_followup5_at,
   }
 
   if (decision.kind === "noop") {
@@ -145,7 +143,9 @@ export async function applySyncDecision(
 
   let update = { ...decision.update } as Record<string, unknown>
 
-  // Para advance_followup: backfill last_followupN_at desde conversation_events
+  // Para advance_followup: backfill last_followup_at desde el ÚLTIMO outbound real.
+  // v0.8 FU dinámico: un solo timestamp (last_followup_at) + el contador followup_step
+  // (ya seteado en decision.update). Ya no se escriben columnas last_followupN_at.
   if (decision.kind === "advance_followup" && lead.conversation_id) {
     const { data: events } = await admin
       .from("conversation_events")
@@ -154,14 +154,8 @@ export async function applySyncDecision(
       .eq("direction", "outbound")
       .order("sent_at", { ascending: true })
 
-    if (events && events.length > 0) {
-      const cap = Math.min(events.length, 5)
-      for (let i = 0; i < cap; i++) {
-        const field = i === 0 ? "last_followup_at" : `last_followup${i + 1}_at`
-        if (!lead[field as keyof LeadOracleRow]) {
-          update[field] = events[i].sent_at
-        }
-      }
+    if (events && events.length > 0 && !lead.last_followup_at) {
+      update.last_followup_at = events[events.length - 1].sent_at
     }
   }
 

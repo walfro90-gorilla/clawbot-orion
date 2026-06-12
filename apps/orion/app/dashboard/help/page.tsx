@@ -63,8 +63,7 @@ export default function HelpPage() {
             ["⏳", "En cola (pending/scraped)", "Lead encontrado por el buscador, esperando que el sistema envíe la invitación."],
             ["✉️", "Invitado (invite_sent)", "Se envió la invitación de conexión con mensaje personalizado."],
             ["🤝", "Conectado (connected)", "Aceptó la invitación. Aún no ha respondido mensajes. Aquí inician los seguimientos."],
-            ["📨", "FU1 (follow_up_sent)", "Se envió el primer seguimiento. Sigue sin responder."],
-            ["📩", "FU2 (follow_up_sent_2)", "Se envió el segundo seguimiento."],
+            ["📨", "Seguimiento (follow_up_sent)", "Está en la secuencia de seguimientos (1 a 20 pasos). El nº de paso actual vive en followup_step."],
             ["💬", "Respondió (replied)", "El lead envió un mensaje. La IA toma el control de la conversación."],
             ["📅", "Reunión (meeting_booked)", "Se agendó una reunión por Cal.com."],
             ["💀", "Perdido (dead)", "No respondió después de todos los seguimientos. Se archiva automáticamente."],
@@ -188,18 +187,18 @@ export default function HelpPage() {
             <tbody className="divide-y divide-gray-800">
               <tr>
                 <td className="py-2 pr-4 font-semibold text-purple-400">FU1</td>
-                <td className="py-2 pr-4 text-gray-300">Status <em>connected</em> + silencio ≥ follow_up_delay_days</td>
-                <td className="py-2 text-gray-400">Default: 3 días</td>
+                <td className="py-2 pr-4 text-gray-300">Status <em>connected</em> (followup_step=0) + silencio ≥ delay del paso 1</td>
+                <td className="py-2 text-gray-400">Configurable por campaña</td>
               </tr>
               <tr>
-                <td className="py-2 pr-4 font-semibold text-purple-400">FU2</td>
-                <td className="py-2 pr-4 text-gray-300">Status <em>follow_up_sent</em> + silencio ≥ follow_up_step2_delay_days</td>
-                <td className="py-2 text-gray-400">Default: 12 días</td>
+                <td className="py-2 pr-4 font-semibold text-purple-400">FU N (2..20)</td>
+                <td className="py-2 pr-4 text-gray-300">Status <em>follow_up_sent</em> con followup_step = N−1 + silencio ≥ delay del paso N</td>
+                <td className="py-2 text-gray-400">Editable en el Centro de Control (1 a 20 pasos)</td>
               </tr>
               <tr>
-                <td className="py-2 pr-4 font-semibold text-purple-400">FU3 (Ghost job)</td>
-                <td className="py-2 pr-4 text-gray-300">Status <em>follow_up_sent_2</em> + silencio ≥ follow_up_step3_delay_days</td>
-                <td className="py-2 text-gray-400">Default: 21 días → luego se marca dead</td>
+                <td className="py-2 pr-4 font-semibold text-purple-400">Cierre</td>
+                <td className="py-2 pr-4 text-gray-300">Sin más pasos configurados + <em>auto_dead_after_days</em></td>
+                <td className="py-2 text-gray-400">Se marca dead automáticamente</td>
               </tr>
             </tbody>
           </table>

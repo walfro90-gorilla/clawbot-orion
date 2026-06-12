@@ -5,6 +5,7 @@ import { CampaignTabs } from "@/components/campaign-tabs"
 import { FIELDS, TABS, FIELD_BY_KEY, type ConfigField } from "@/lib/config-fields"
 import { validateAccountConfig } from "@/lib/config-validation"
 import { PRESETS } from "@/lib/config-presets"
+import { FollowupSequenceEditor, type FollowupStep } from "@/components/followup-sequence-editor"
 
 export const dynamic = "force-dynamic"
 
@@ -61,6 +62,43 @@ async function saveAccountConfig(formData: FormData) {
   if (campaignId && Object.keys(campaignUpd).length) {
     const { error } = await admin.from("campaigns").update(campaignUpd).eq("id", campaignId)
     if (error) throw new Error("campaigns: " + error.message)
+  }
+
+  // v0.8 FU dinámico: reemplazar la secuencia de seguimientos (tabla campaign_followups).
+  // El editor envía followup_steps_json (siempre presente cuando hay campaña, porque
+  // CampaignTabs mantiene todos los tabs en el DOM). Renumeramos 1..N por posición.
+  const fuJson = formData.get("followup_steps_json")
+  if (campaignId && typeof fuJson === "string" && fuJson.length > 0) {
+    let parsed: any[] = []
+    try { parsed = JSON.parse(fuJson) } catch { parsed = [] }
+    const clean = parsed
+      .filter((s: any) => (s?.message && String(s.message).trim()) || Number(s?.delay_value) > 0)
+      .slice(0, 20)
+      .map((s: any, i: number) => ({
+        campaign_id:  campaignId,
+        step:         i + 1,
+        message:      s?.message && String(s.message).trim() ? String(s.message) : null,
+        delay_value:  Number.isFinite(Number(s?.delay_value)) ? Number(s.delay_value) : 0,
+        delay_unit:   s?.delay_unit === "days" ? "days" : "hours",
+        jitter_hours: Number.isFinite(Number(s?.jitter_hours)) ? Number(s.jitter_hours) : 0,
+        enabled:      s?.enabled !== false,
+      }))
+    await admin.from("campaign_followups").delete().eq("campaign_id", campaignId)
+    if (clean.length) {
+      const { error: fuErr } = await admin.from("campaign_followups").insert(clean)
+      if (fuErr) throw new Error("campaign_followups: " + fuErr.message)
+    }
+    // Compat: espejar el paso 1 a las columnas legacy (monitor/next-actions las leen para el forecast de FU1)
+    const s1 = clean.find(s => s.step === 1)
+    await admin.from("campaigns").update({
+      follow_up_message:     s1?.message ?? null,
+      follow_up_delay_days:  s1 && s1.delay_unit === "days"  ? s1.delay_value : null,
+      follow_up_delay_hours: s1 && s1.delay_unit === "hours" ? s1.delay_value : null,
+    }).eq("id", campaignId)
+    await admin.from("account_config_audit").insert({
+      account_id: accountId, actor_id: user?.id ?? null, actor_email: user?.email ?? null,
+      key: "followup_sequence", payload_after: { steps: clean.length }, source: "manual",
+    })
   }
 
   // Template de mensaje (foldeado al Centro — upsert por template_id o campaign_id)
@@ -206,6 +244,22 @@ export default async function AccountConfigPage({ params, searchParams }: { para
     const { data: tmpls } = await admin.from("message_templates").select("*").eq("campaign_id", campaign.id).eq("is_active", true).limit(1)
     template = (tmpls ?? [])[0] ?? null
   }
+  // v0.8 FU dinámico: secuencia de seguimientos (1..20) desde campaign_followups
+  let fuSteps: FollowupStep[] = []
+  if (campaign) {
+    const { data: fuRows } = await admin
+      .from("campaign_followups")
+      .select("step, message, delay_value, delay_unit, jitter_hours, enabled")
+      .eq("campaign_id", campaign.id)
+      .order("step", { ascending: true })
+    fuSteps = (fuRows ?? []).map((r: any) => ({
+      message:      r.message ?? "",
+      delay_value:  Number(r.delay_value ?? 0),
+      delay_unit:   r.delay_unit === "days" ? "days" : "hours",
+      jitter_hours: Number(r.jitter_hours ?? 0),
+      enabled:      r.enabled !== false,
+    }))
+  }
   const { data: acRows } = await admin.from("account_config").select("key, value, locked, source, updated_at").eq("account_id", id)
   const acMap: Record<string, any> = {}
   for (const r of acRows ?? []) acMap[r.key] = r.value
@@ -233,6 +287,11 @@ export default async function AccountConfigPage({ params, searchParams }: { para
           )
         })}
       </div>
+      {tab.key === "seguimientos" && campaign && (
+        <div className="mt-2 pt-4 border-t border-gray-800">
+          <FollowupSequenceEditor initialSteps={fuSteps} />
+        </div>
+      )}
       {tab.key === "ia" && campaign && (
         <div className="mt-2 pt-4 border-t border-gray-800 space-y-3">
           <input type="hidden" name="template_present" value="1" />

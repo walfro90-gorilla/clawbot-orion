@@ -848,19 +848,29 @@ async function ingestCheckSentInvites(commandId, pending, statedTotal = null) {
     if (isPending(lead)) continue  // sigue pendiente → no aceptado
 
     // Ausente del pending. ¿Dentro de la ventana capturada?
-    if (incomplete) {
+    // v0.7.50: detección AGRESIVA de aceptaciones VIEJAS. El boundary salta las invites
+    // bajo la ventana (parcial) como "ambiguas" → las aceptaciones viejas nunca se detectaban
+    // (caso 8-jun). PERO un invite pendiente >OLD_ACCEPT_DAYS que está AUSENTE del /sent/ casi
+    // seguro fue aceptado (LinkedIn las muestra newest-first; las viejas-pendientes seguirían
+    // ahí). Si fuera falso positivo (sigue 2º grado), el FU falla con lead_not_first_degree →
+    // se flaggea detected_not_first_degree → excluido de futuros checks (sin loop) y SIN mandar
+    // mensaje al equivocado (no se puede mensajear a un no-conectado). Riesgo asimétrico OK.
+    const OLD_ACCEPT_DAYS = 10
+    const isOldEnoughToAssumeAccept = (Date.now() - sentMs) > OLD_ACCEPT_DAYS * 86_400_000
+    if (incomplete && !isOldEnoughToAssumeAccept) {
       if (boundaryTime === null || sentMs <= boundaryTime) {
-        skippedAmbiguous++  // más viejo que la ventana / sin boundary → ambiguo, no marcar
+        skippedAmbiguous++  // reciente pero bajo la ventana → ambiguo, no marcar
         continue
       }
     }
-    // Seguro concluir accept: scrape completo, o lead más nuevo que el boundary.
+    // Seguro concluir accept: scrape completo, lead más nuevo que el boundary, o invite viejo.
     const { error } = await supabase.from('leads').update({
       status: 'connected', connected_at: new Date().toISOString(),
     }).eq('id', lead.id)
     if (!error) {
       accepted++
-      console.log(`[bridge] ✅ Accept detectado: ${lead.full_name} (invite_sent → connected)`)
+      const via = (incomplete && isOldEnoughToAssumeAccept) ? ' [viejo>10d, agresivo]' : ''
+      console.log(`[bridge] ✅ Accept detectado: ${lead.full_name} (invite_sent → connected)${via}`)
     }
   }
   console.log(`[bridge] check_sent_invites ingest: ${accepted} accepts de ${invitedLeads.length} invite_sent (${skippedAmbiguous} ambiguos saltados por ventana)`)
@@ -948,20 +958,17 @@ async function ingestSendFollowup(commandId, result) {
   const kind = cmd.payload?.kind ?? 'follow_up'
   const isReply = kind === 'reply'
 
+  // v0.8 FU dinámico: todos los pasos comparten el status genérico 'follow_up_sent';
+  // el paso lo lleva el contador leads.followup_step + el timestamp único last_followup_at.
   let statusValue = null
-  let timestampField = null
   if (!isReply) {
     const step = cmd.payload?.step ?? 1
-    statusValue = step === 1 ? 'follow_up_sent'
-                : step === 2 ? 'follow_up_sent_2'
-                : step === 3 ? 'follow_up_sent_3'
-                : step === 4 ? 'follow_up_sent_4'
-                : 'follow_up_sent_5'
-    timestampField = step === 1 ? 'last_followup_at' : `last_followup${step}_at`
+    statusValue = 'follow_up_sent'
 
     await supabase.from('leads').update({
-      status: statusValue,
-      [timestampField]: new Date().toISOString(),
+      status:        'follow_up_sent',
+      followup_step: step,
+      last_followup_at: new Date().toISOString(),
       // v0.7.13 P0-4: reset lockout_skip_count en cada FU exitoso —
       // un FU que SÍ logró enviarse "limpia" el historial de lockouts.
       lockout_skip_count: 0,
@@ -993,7 +1000,7 @@ async function ingestSendFollowup(commandId, result) {
 
     if (conv?.id) {
       // Constraint-safe values:
-      //   event_type ∈ {invite_sent, follow_up_sent[_2..5], reply_sent, message_sent, ...}
+      //   event_type ∈ {invite_sent, follow_up_sent, reply_sent, message_sent, ...}  (FU genérico; el paso vive en leads.followup_step)
       //   sent_via   ∈ {orion, orion_auto, orion_manual, linkedin_*}
       const eventType = isReply ? 'reply_sent' : statusValue
       const { error: evErr } = await supabase.from('conversation_events').insert({
@@ -1127,8 +1134,7 @@ async function ingestCheckInbox(commandId, conversations) {
     .from('leads')
     .select('id, full_name, status, linkedin_url, campaigns!inner(linkedin_account_id)')
     .eq('campaigns.linkedin_account_id', cmd.account_id)
-    .in('status', ['invite_sent', 'connected', 'follow_up_sent', 'follow_up_sent_2',
-                   'follow_up_sent_3', 'follow_up_sent_4', 'follow_up_sent_5', 'replied'])
+    .in('status', ['invite_sent', 'connected', 'follow_up_sent', 'replied'])
 
   if (!leads || leads.length === 0) {
     console.log(`[bridge] ingest: no active leads for account ${cmd.account_id.slice(0,8)}`)
@@ -1361,7 +1367,7 @@ async function ingestCheckInbox(commandId, conversations) {
           .single()
 
         // Marcar lead como 'replied' si venía de la cadena FU (pausa FU automática)
-        const fuStatuses = ['invite_sent','connected','follow_up_sent','follow_up_sent_2','follow_up_sent_3','follow_up_sent_4','follow_up_sent_5']
+        const fuStatuses = ['invite_sent','connected','follow_up_sent']
         if (fuStatuses.includes(lead.status)) {
           await supabase.from('leads').update({
             status: 'replied',
