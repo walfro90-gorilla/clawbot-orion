@@ -73,7 +73,7 @@ async function saveAccountConfig(formData: FormData) {
     try { parsed = JSON.parse(fuJson) } catch { parsed = [] }
     const clean = parsed
       .filter((s: any) => (s?.message && String(s.message).trim()) || Number(s?.delay_value) > 0)
-      .slice(0, 20)
+      .slice(0, 30)
       .map((s: any, i: number) => ({
         campaign_id:  campaignId,
         step:         i + 1,

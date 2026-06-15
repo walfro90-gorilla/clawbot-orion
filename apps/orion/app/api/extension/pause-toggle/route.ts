@@ -35,9 +35,16 @@ export async function POST(req: NextRequest) {
   }
 
   const newValue = typeof desired === "boolean" ? desired : !account.extension_paused
+  // v0.8 observabilidad: etiquetar el ORIGEN de la pausa para no dejar "pausers
+  // silenciosos" (reason=NULL que se confunde con el circuit breaker). El caller
+  // (extensión Chrome o dashboard) puede mandar body.reason; default neutro.
+  // Al despausar se limpia el reason. Hace VISIBLE de dónde viene cada pausa.
+  const reason = newValue
+    ? (typeof body.reason === "string" && body.reason ? body.reason.slice(0, 64) : "manual_toggle")
+    : null
   const { error } = await admin
     .from("linkedin_accounts")
-    .update({ extension_paused: newValue })
+    .update({ extension_paused: newValue, extension_paused_reason: reason })
     .eq("id", accountId)
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500, headers: CORS })

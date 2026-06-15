@@ -15,7 +15,7 @@ export interface FollowupStep {
   enabled: boolean
 }
 
-const MAX_STEPS = 20
+const MAX_STEPS = 30
 
 const inp =
   "w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-50 placeholder-gray-500 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"

@@ -30,6 +30,7 @@ async function createUser(formData: FormData) {
       role:                role || "user",
       company_name:        company || null,
       linkedin_account_id: linkedAccountId || null,
+      onboarding_step:     "done",   // el wizard self-serve es SOLO para clientes vía createClientFull
     })
 
     // Sync linkedin_accounts.user_id so RLS policies work correctly.

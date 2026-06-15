@@ -457,12 +457,16 @@ async function handleCommandResult(msg) {
           extension_paused_reason: `banner_${code}`,
         }).eq('id', acctId)
         if (upErr) console.error(`[bridge] banner critical update failed: ${upErr.message}`)
+        // v0.8 FIX: columnas correctas de account_alerts (antes usaba account_id/code/metadata
+        // inexistentes + faltaba alert_type NOT NULL → el insert FALLABA silencioso → la cuenta
+        // se pausaba por banner SIN alerta visible = "pauser silencioso").
         const { error: alErr } = await supabase.from('account_alerts').insert({
-          account_id: acctId,
+          linkedin_account_id: acctId,
+          alert_type: `banner_${code}`,
           severity: 'critical',
-          code: `banner_${code}`,
           message: `LinkedIn security checkpoint (${code}). Account paused ${pauseHrs}h until ${pauseUntil}.`,
-          metadata: { textSignal: result.textSignal, selectorSignal: result.selectorSignal, commandId },
+          details: { textSignal: result.textSignal, selectorSignal: result.selectorSignal, commandId },
+          auto_paused: true,
         })
         if (alErr) console.error(`[bridge] banner critical alert insert failed: ${alErr.message}`)
       } else if (acctId && sev === 'warning') {
@@ -474,11 +478,11 @@ async function handleCommandResult(msg) {
         }).eq('id', acctId)
         if (upErr) console.error(`[bridge] banner warning update failed: ${upErr.message}`)
         const { error: alErr } = await supabase.from('account_alerts').insert({
-          account_id: acctId,
+          linkedin_account_id: acctId,
+          alert_type: `banner_${code}`,
           severity: 'warning',
-          code: `banner_${code}`,
           message: `LinkedIn rate/limit warning (${code}). Cooldown 30min until ${cooldownUntil}.`,
-          metadata: { textSignal: result.textSignal, selectorSignal: result.selectorSignal, commandId },
+          details: { textSignal: result.textSignal, selectorSignal: result.selectorSignal, commandId },
         })
         if (alErr) console.error(`[bridge] banner warning alert insert failed: ${alErr.message}`)
       }
@@ -1366,7 +1370,11 @@ async function ingestCheckInbox(commandId, conversations) {
           .select('id, linkedin_thread_id')
           .single()
 
-        // Marcar lead como 'replied' si venía de la cadena FU (pausa FU automática)
+        // Marcar lead como 'replied' si venía de la cadena FU (pausa FU automática).
+        // v0.8 FIX: si YA estaba 'replied' (RE-REPLY — el contacto volvió a escribir),
+        // refrescar replied_at=now. Antes solo se seteaba en la 1ra respuesta, así que un
+        // contacto que se callaba >7d y volvía a escribir se quedaba con replied_at viejo →
+        // caía fuera de la ventana fm_max_age del auto-reply → sin respuesta (caso Daniel).
         const fuStatuses = ['invite_sent','connected','follow_up_sent']
         if (fuStatuses.includes(lead.status)) {
           await supabase.from('leads').update({
@@ -1374,6 +1382,8 @@ async function ingestCheckInbox(commandId, conversations) {
             replied_at: new Date().toISOString(),
           }).eq('id', lead.id)
           console.log(`[bridge] 💬 Reply detectado: ${lead.full_name} → status='replied' (FU pausado)`)
+        } else if (lead.status === 'replied') {
+          await supabase.from('leads').update({ replied_at: new Date().toISOString() }).eq('id', lead.id)
         }
 
         // Registrar event inbound

@@ -19,9 +19,20 @@ export default async function DashboardLayout({
   const admin = createAdminClient()
   const { data: profile } = await admin
     .from("profiles")
-    .select("email, role, linkedin_account_id, onboarded_at")
+    .select("email, role, linkedin_account_id, onboarded_at, onboarding_step")
     .eq("id", user.id)
     .single()
+
+  // Onboarding gate (null-safe): un user nuevo con cuenta y onboarding pendiente va al wizard
+  // self-serve (vive en /onboarding, fuera de este layout → sin loop). Usuarios existentes
+  // tienen onboarding_step='done' (backfill) o null → nunca caen aquí. Admin/viewer tampoco.
+  if (
+    profile?.role === "user" &&
+    profile?.onboarding_step === "pending" &&
+    profile?.linkedin_account_id
+  ) {
+    redirect("/onboarding")
+  }
 
   // Cargar alertas + conteos en paralelo (incluye auto-learning insights y visual tickets)
   const isAdmin = profile?.role === "god_admin" || profile?.role === "admin"

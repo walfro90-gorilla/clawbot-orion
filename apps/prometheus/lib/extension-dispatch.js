@@ -596,6 +596,18 @@ export async function dispatchSearch(account, campaign, keywords) {
   const locationArr = locationStr
     .split(',').map(s => s.trim()).filter(Boolean)
 
+  // v0.7.49: ROTACIÓN DE GEOGRAFÍA — si la campaña tiene MÚLTIPLES ubicaciones, cada búsqueda
+  // usa UNA sola (rotando por el mismo idx que la keyword). Así cada país tiene su page-1
+  // FRESCO en cada vuelta, en vez de combinar todos en una page-1 que se repite y se agota.
+  // Con 1 ubicación = no-op (Wal y cualquier campaña single-location quedan idénticas).
+  // geoUrn (background.js) filtra server-side el país correcto; el post-filter de content.js
+  // matchea el nombre en el idioma del UI (por eso se usan nombres en español para cuentas es-MX).
+  let rotatedLocations = locationArr
+  if (locationArr.length > 1) {
+    const locIdx = (campaign.last_search_keyword_idx ?? 0) % locationArr.length
+    rotatedLocations = [locationArr[locIdx]]
+  }
+
   // v0.7.26 BUSCAR POR EMPRESA (opción C): si la campaña tiene search_company_names,
   // la empresa va DENTRO de los keywords ("Director General Softtek"). LinkedIn
   // full-text search indexa la empresa actual aunque NO esté en el headline, así
@@ -618,7 +630,7 @@ export async function dispatchSearch(account, campaign, keywords) {
   return dispatchCommand(account.id, 'search', {
     campaignId:       campaign.id,
     keywords:         finalKeywords,
-    locations:        locationArr.length ? locationArr : null,  // ARRAY para post-filter + geoUrn lookup
+    locations:        rotatedLocations.length ? rotatedLocations : null,  // 1 país rotado (geoUrn + post-filter)
     location:         locationStr || null,                       // legacy single-string (ignorado en URL builder)
     secondDegreeOnly: campaign.search_2nd_degree_only !== false,
     minEmployees:     campaign.search_min_employees ?? null,

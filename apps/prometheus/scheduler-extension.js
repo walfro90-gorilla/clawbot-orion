@@ -874,10 +874,14 @@ async function tryAutoReplyForCampaign(campaign, account) {
     .gte('replied_at', tooOldIso)  // ★ safety: no procesar replies >7d
     .is('quarantined_at', null)
     .or(`cooldown_until.is.null,cooldown_until.lt.${nowIsoForCooldown}`)
-    .order('consecutive_failures', { ascending: true })
-    .order('last_attempt_at', { ascending: true, nullsFirst: true })
+    // v0.8 P1 FIX: replied_at DESC PRIMARIO (replies más recientes = los sin-contestar).
+    // Antes consecutive_failures/last_attempt_at dominaban → con backlog grande de
+    // contestados (Wal: 61 replied/7d), el limit(10) devolvía solo CONTESTADOS y los
+    // sin-contestar quedaban enterrados → gate 'no_replies_due' eterno → leads sin respuesta.
+    // Límite 40 para cubrir el set reciente; el filtro in-memory descarta los ya contestados.
     .order('replied_at', { ascending: false })
-    .limit(10)
+    .order('consecutive_failures', { ascending: true })
+    .limit(40)
 
   if (!replied || replied.length === 0) {
     return { skipped: true, reason: 'no_replies_pending' }
@@ -1257,11 +1261,15 @@ async function runConnectivityHealthCheck(connectedIds) {
       }
 
       if (acc.extension_paused) continue
-      // Check business hours en TZ del usuario
-      // BUG fix: isBusinessHours espera días como strings ('lunes'..'viernes'),
-      // no como numbers. Pasamos undefined → usa DEFAULT_DAYS internamente.
+      // Check "debería estar online" en TZ del usuario.
+      // v0.8 FIX: antes isBusinessHours(9,19,undefined) → días default lun-vie + ventana
+      // 9-19 → NO alertaba offline en SÁBADO/DOMINGO ni 6-9/19-21, aunque las cuentas
+      // ahora corren 6-21h LOS 7 DÍAS (el gate de dispatch sí usa campaign.schedule_days).
+      // Resultado: si el Chrome del cliente moría un finde, nadie se enteraba. Ampliado a
+      // 7 días + 6-21h para que la caída SÍ genere ext_offline_business_hours (debounce 60min).
       const tz = acc.timezone ?? 'America/Mexico_City'
-      const inBH = isBusinessHours(9, 19, undefined, tz)
+      const ALL_DAYS_7 = ['lunes','martes','miércoles','jueves','viernes','sábado','domingo']
+      const inBH = isBusinessHours(6, 21, ALL_DAYS_7, tz)
       if (!inBH) continue
 
       // ── Detector de CONEXIÓN INESTABLE (infiere background mode OFF) ──

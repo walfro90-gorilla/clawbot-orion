@@ -7,7 +7,7 @@ import { useState, useEffect, useCallback } from "react"
 // activas (onboarding en progreso). Una vez activa, muestra el estado final.
 type Checklist = Record<string, boolean>
 
-export function OnboardingActivatePanel({ accountId }: { accountId: string }) {
+export function OnboardingActivatePanel({ accountId, redirectTo }: { accountId: string; redirectTo?: string }) {
   const [state, setState]       = useState<any>(null)
   const [activating, setActive] = useState(false)
   const [msg, setMsg]           = useState<string | null>(null)
@@ -36,6 +36,7 @@ export function OnboardingActivatePanel({ accountId }: { accountId: string }) {
       const j = await r.json()
       if (r.ok && j.ok) {
         setMsg("✅ Cuenta activada — el scheduler la procesará en el próximo tick.")
+        if (redirectTo) { window.location.href = redirectTo; return }
       } else {
         setMsg("⚠️ " + (j.missing ? "Falta: " + j.missing.join(", ") : j.error ?? "No se pudo activar"))
       }
