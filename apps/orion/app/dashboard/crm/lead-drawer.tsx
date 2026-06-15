@@ -72,8 +72,13 @@ export function LeadDrawer({
       <aside className="fixed right-0 top-0 bottom-0 w-full md:w-[55%] lg:w-[50%] bg-gray-950 border-l border-gray-800 z-50 overflow-y-auto">
         <header className="sticky top-0 bg-gray-950 border-b border-gray-800 px-5 py-3 flex items-center justify-between z-10">
           <div>
-            <h2 className="font-bold text-lg">
+            <h2 className="font-bold text-lg flex items-center gap-2">
               {data?.lead?.full_name ?? "Cargando…"}
+              {data?.lead?.automation_paused && (
+                <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                  ⏸️ AUTOMATIZACIÓN PAUSADA
+                </span>
+              )}
             </h2>
             {data?.lead && (
               <div className="text-xs text-gray-400 mt-0.5">
@@ -145,6 +150,12 @@ export function LeadDrawer({
             {/* 4. ACTIONS */}
             {isAdmin && (
               <section className="flex flex-wrap gap-2">
+                <ActionBtn
+                  onClick={() => action(`/api/crm/lead/${leadId}/toggle-automation`)}
+                  disabled={acting}
+                  cls={data.lead.automation_paused ? "bg-green-800 hover:bg-green-700" : "bg-amber-800 hover:bg-amber-700"}>
+                  {data.lead.automation_paused ? "▶️ Reanudar automatización" : "⏸️ Pausar automatización"}
+                </ActionBtn>
                 <ActionBtn onClick={() => action(`/api/crm/lead/${leadId}/reset-skip`)} disabled={acting}
                   cls="bg-orange-800 hover:bg-orange-700">Reset skip</ActionBtn>
                 <ActionBtn onClick={() => action(`/api/crm/lead/${leadId}/mark-replied`)} disabled={acting}

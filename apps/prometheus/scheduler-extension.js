@@ -554,6 +554,7 @@ export async function tryFollowupsForCampaign(campaign, account) {
       .eq('campaign_id', campaign.id)
       .eq('followup_step', stepNum - 1)
       .in('status', safeStatusFrom)
+      .eq('automation_paused', false)   // v0.8 pausa por contacto: excluir leads pausados manualmente
       .lt(prevTimeField, cutoffIso)
       .gte(prevTimeField, tooOldIso)
       .not('linkedin_url', 'is', null)  // necesitamos URL del perfil
@@ -834,6 +835,31 @@ export async function tryFollowupsForCampaign(campaign, account) {
   return { skipped: true, reason: 'no_followups_due' }
 }
 
+// v0.8 — Guard anti-loop de auto-reply (caso Martina Meniconi / InMail Arbolus).
+// Algunos "inbound" NO son respuestas humanas: InMails/notificaciones automáticas
+// (ej "InMail Arbolus - Oportunidad...") y mensajes borrados se re-capturan en cada
+// inbox check como un "reply" nuevo → el gate cree que hay algo sin contestar → manda
+// otra respuesta → loop infinito (Martina recibió 25 msgs). Filtramos por CONTENIDO
+// del último inbound + rompe-loops por conteo de outbound. Ver incident memory.
+const AUTO_REPLY_LOOP_CAP = 8  // outbound máx a un hilo antes de declararlo loop y matar el lead
+
+function isDeletedInboundMessage(text) {
+  const t = (text || '').toLowerCase()
+  return t.includes('se ha eliminado este mensaje')
+      || t.includes('mensaje eliminado')
+      || t.includes('this message was deleted')
+      || t.includes('message was deleted')
+}
+
+function isAutomatedInboundMessage(text) {
+  const t = (text || '').trim()
+  if (!t) return false
+  // Solo si EMPIEZA con "InMail" (prefijo de notificación de LinkedIn). No matcheamos
+  // "inmail" a media frase para no matar a un humano que escriba "vi tu InMail".
+  if (/^inmail\b/i.test(t)) return true
+  return false
+}
+
 // ── Auto-reply trigger (3.6) ─────────────────────────────────────────────────
 // Cuando un lead responde, el ingest lo marca status='replied' y la cadena FU
 // se pausa automáticamente (porque el motor de FU solo procesa status connected/follow_up_sent).
@@ -871,6 +897,7 @@ async function tryAutoReplyForCampaign(campaign, account) {
     .eq('campaign_id', campaign.id)
     .eq('conversations.linkedin_account_id', account.id)
     .eq('status', 'replied')
+    .eq('automation_paused', false)   // v0.8 pausa por contacto: excluir leads pausados manualmente
     .gte('replied_at', tooOldIso)  // ★ safety: no procesar replies >7d
     .is('quarantined_at', null)
     .or(`cooldown_until.is.null,cooldown_until.lt.${nowIsoForCooldown}`)
@@ -927,7 +954,7 @@ async function tryAutoReplyForCampaign(campaign, account) {
 
     const { data: lastInbound } = await supabase
       .from('conversation_events')
-      .select('sent_at')
+      .select('sent_at, content')
       .eq('conversation_id', conv.id)
       .eq('direction', 'inbound')
       .order('sent_at', { ascending: false })
@@ -937,6 +964,36 @@ async function tryAutoReplyForCampaign(campaign, account) {
     const lastInboundAt = lastInbound?.sent_at ? new Date(lastInbound.sent_at).getTime() : 0
     const lastOutAt = lastOutbound?.sent_at ? new Date(lastOutbound.sent_at).getTime() : 0
     if (lastOutAt >= lastInboundAt) continue  // ya respondimos a este reply (>= por seguridad)
+
+    // v0.8 FIX (Martina Meniconi): NO auto-responder a inbound AUTOMÁTICOS.
+    const lastInText = (lastInbound?.content || '').trim()
+    if (isDeletedInboundMessage(lastInText)) {
+      console.log(`[SCH-EXT]   ⏭️  AI reply skip ${lead.full_name} — último inbound es mensaje borrado`)
+      continue  // no respondemos a un borrado; no matamos el lead (puede reenviar)
+    }
+    if (isAutomatedInboundMessage(lastInText)) {
+      await supabase.from('leads')
+        .update({ status: 'dead', dead_reason: 'inbound_automated_inmail' })
+        .eq('id', lead.id)
+      console.log(`[SCH-EXT]   🚫 ${lead.full_name} → dead: inbound automático/InMail (no es respuesta humana)`)
+      continue
+    }
+    // Rompe-loops de seguridad: un humano real no deja que le mandemos AUTO_REPLY_LOOP_CAP
+    // respuestas a un mismo hilo sin avanzar. Si pasa, es un loop → matar el lead.
+    const { count: convOutbound } = await supabase
+      .from('conversation_events')
+      .select('id', { count: 'exact', head: true })
+      .eq('conversation_id', conv.id)
+      .eq('direction', 'outbound')
+    if ((convOutbound ?? 0) >= AUTO_REPLY_LOOP_CAP) {
+      // PAUSAR (no matar): puede ser una conversación real atascada. Reversible y
+      // visible en CRM (badge "AUTOMATIZACIÓN PAUSADA") para que el humano revise.
+      await supabase.from('leads')
+        .update({ automation_paused: true, automation_paused_at: new Date().toISOString() })
+        .eq('id', lead.id)
+      console.log(`[SCH-EXT]   🛑 ${lead.full_name} → automation_paused: auto-reply loop (${convOutbound} outbound a un hilo) — revisar en CRM`)
+      continue
+    }
 
     // Lead-level dedup: si hay cmd en flight para este lead, skip (evita doble-reply)
     if (await hasInFlightCommand(lead.id, 'send_followup')) {
