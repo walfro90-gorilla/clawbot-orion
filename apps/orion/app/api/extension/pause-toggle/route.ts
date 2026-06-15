@@ -23,7 +23,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "accountId and apiKey required" }, { status: 400, headers: CORS })
   }
 
-  const admin = createAdminClient()
+  // `as any`: extension_paused_reason existe en la DB pero los tipos generados
+  // están stale (mismo caso que automation_paused en el CRM). NO borres el
+  // labeling de reason para callar el type error — regenera los tipos o deja el
+  // cast. Ese labeling es el fix de los "pausers silenciosos" (reason=NULL).
+  const admin = createAdminClient() as any
   const { data: account } = await admin
     .from("linkedin_accounts")
     .select("id, extension_paused, extension_api_key")
