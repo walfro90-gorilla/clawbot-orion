@@ -2,11 +2,12 @@ import { createAdminClient } from "@/lib/supabase/admin"
 import { redirect, notFound } from "next/navigation"
 import DeleteCampaignBtn from "@/components/delete-campaign-btn"
 import { CampaignTabs } from "@/components/campaign-tabs"
+import { CampaignEditForm } from "@/components/campaign-edit-form"
 import { FollowupSequenceEditor, type FollowupStep } from "@/components/followup-sequence-editor"
 
 // ── Server Actions ─────────────────────────────────────────────────────────────
 
-async function saveCampaign(formData: FormData) {
+async function saveCampaign(formData: FormData): Promise<{ error: string } | void> {
   "use server"
   // `as any`: followup_tone_directive es una columna nueva aún no en los tipos generados.
   const admin = createAdminClient() as any
@@ -135,10 +136,12 @@ async function saveCampaign(formData: FormData) {
   }
 
   if (errors.length > 0) {
-    // Si hubo errores, NO redirect ciego. Throw para que Next.js error.tsx muestre el problema.
-    throw new Error(`saveCampaign falló: ${errors.join(" | ")}`)
+    // Si hubo errores, NO redirect ciego. Devolvemos el error para que el form
+    // cliente lo muestre inline en el modal de confirmación (sin throw → error.tsx).
+    return { error: errors.join(" | ") }
   }
-  redirect("/dashboard/campaigns")
+  const savedName = (formData.get("name") as string) || "La campaña"
+  redirect(`/dashboard/campaigns?saved=${encodeURIComponent(savedName)}`)
 }
 
 async function deleteCampaign(formData: FormData) {
@@ -166,6 +169,15 @@ export default async function CampaignEditPage({ params }: { params: Promise<{ i
 
   const t = templates?.[0] ?? null
   const toComma = (arr: string[] | null) => (arr ?? []).join(", ")
+
+  // id de cuenta → etiqueta legible, para que el summary de cambios muestre el
+  // nombre de la cuenta y no un UUID.
+  const accountLabels: Record<string, string> = { "": "Sin cuenta" }
+  for (const a of accounts ?? []) {
+    accountLabels[a.id] = a.label
+      ?? a.linkedin_profile_url?.replace("https://www.linkedin.com/in/", "@")
+      ?? a.id
+  }
 
   // v0.8 FU dinámico: secuencia de seguimientos (1..20) desde campaign_followups
   const { data: fuRows } = await (admin as any)
@@ -206,7 +218,7 @@ export default async function CampaignEditPage({ params }: { params: Promise<{ i
         />
       </div>
 
-      <form action={saveCampaign} className="space-y-6">
+      <CampaignEditForm action={saveCampaign} accountLabels={accountLabels}>
         <input type="hidden" name="campaign_id" value={c.id} />
         {t && <input type="hidden" name="template_id" value={t.id} />}
 
@@ -725,19 +737,7 @@ Qué bien que lo mencionas. Justo ese es el problema que más escucho en empresa
             </Section>
           </div>
         </CampaignTabs>
-
-        {/* ── ACTIONS — siempre visibles fuera de las tabs ───────────────── */}
-        <div className="flex gap-3 pt-2 sticky bottom-0 -mx-4 sm:-mx-8 px-4 sm:px-8 py-4 bg-gray-950/95 backdrop-blur border-t border-gray-800 z-10">
-          <button type="submit"
-            className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 text-white  font-semibold text-sm rounded-lg transition-colors">
-            Guardar cambios
-          </button>
-          <a href="/dashboard/campaigns"
-            className="px-6 py-2.5 bg-gray-800 hover:bg-gray-700 text-gray-300 font-medium text-sm rounded-lg transition-colors">
-            Cancelar
-          </a>
-        </div>
-      </form>
+      </CampaignEditForm>
     </div>
   )
 }

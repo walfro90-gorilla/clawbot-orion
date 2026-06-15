@@ -4,6 +4,7 @@ import { createAdminClient } from "@/lib/supabase/admin"
 import { getSessionUser } from "@/lib/auth/role"
 import { redirect } from "next/navigation"
 import Link from "next/link"
+import { SaveSuccessToast } from "@/components/save-success-toast"
 
 // ── Server Actions ─────────────────────────────────────────────────────────────
 
@@ -121,7 +122,9 @@ const RISK_COLOR: Record<string, string> = {
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 
-export default async function CampaignsPage() {
+export default async function CampaignsPage({ searchParams }: { searchParams: Promise<Record<string, string>> }) {
+  const sp       = await searchParams
+  const savedName = sp.saved ?? null
   const supabase = await createClient()
   const admin    = createAdminClient()
   const me       = await getSessionUser()
@@ -192,6 +195,9 @@ export default async function CampaignsPage() {
 
   return (
     <div className="p-4 sm:p-8 space-y-6">
+      {savedName && (
+        <SaveSuccessToast message={`Campaña «${savedName}» actualizada con éxito.`} />
+      )}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-50">Campañas</h1>
