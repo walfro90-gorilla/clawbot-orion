@@ -45,8 +45,10 @@ export function LeadDrawer({
     return () => window.removeEventListener("keydown", onKey)
   }, [onClose])
 
-  const action = async (endpoint: string, body?: any) => {
-    if (!isAdmin) return alert("Solo admin puede ejecutar esta acción")
+  const action = async (endpoint: string, body?: any, opts?: { allowOwner?: boolean }) => {
+    // allowOwner: acciones no-destructivas (ej. pausar automatización) que el dueño
+    // de la cuenta puede ejecutar sobre SUS contactos. La API valida el ownership.
+    if (!isAdmin && !opts?.allowOwner) return alert("Solo admin puede ejecutar esta acción")
     if (acting) return
     setActing(true)
     try {
@@ -148,28 +150,34 @@ export function LeadDrawer({
             </section>
 
             {/* 4. ACTIONS */}
-            {isAdmin && (
-              <section className="flex flex-wrap gap-2">
-                <ActionBtn
-                  onClick={() => action(`/api/crm/lead/${leadId}/toggle-automation`)}
-                  disabled={acting}
-                  cls={data.lead.automation_paused ? "bg-green-800 hover:bg-green-700" : "bg-amber-800 hover:bg-amber-700"}>
-                  {data.lead.automation_paused ? "▶️ Reanudar automatización" : "⏸️ Pausar automatización"}
-                </ActionBtn>
-                <ActionBtn onClick={() => action(`/api/crm/lead/${leadId}/reset-skip`)} disabled={acting}
-                  cls="bg-orange-800 hover:bg-orange-700">Reset skip</ActionBtn>
-                <ActionBtn onClick={() => action(`/api/crm/lead/${leadId}/mark-replied`)} disabled={acting}
-                  cls="bg-green-800 hover:bg-green-700">Mark replied</ActionBtn>
-                <ActionBtn onClick={() => {
-                  const reason = prompt("Razón para mark dead?")
-                  if (reason) action(`/api/crm/lead/${leadId}/mark-dead`, { dead_reason: reason })
-                }} disabled={acting} cls="bg-red-800 hover:bg-red-700">Mark dead</ActionBtn>
-                {data.lead.linkedin_url && (
-                  <a href={data.lead.linkedin_url} target="_blank" rel="noopener noreferrer"
-                    className="px-3 py-1.5 bg-blue-800 hover:bg-blue-700 rounded text-xs">↗ LinkedIn</a>
-                )}
-              </section>
-            )}
+            <section className="flex flex-wrap gap-2">
+              {/* Pausar/Reanudar automatización — disponible para el DUEÑO de la cuenta
+                  (no solo admin). La API (authorize "user" + ownership) valida que solo
+                  pueda tocar SUS propios contactos. */}
+              <ActionBtn
+                onClick={() => action(`/api/crm/lead/${leadId}/toggle-automation`, undefined, { allowOwner: true })}
+                disabled={acting}
+                cls={data.lead.automation_paused ? "bg-green-800 hover:bg-green-700" : "bg-amber-800 hover:bg-amber-700"}>
+                {data.lead.automation_paused ? "▶️ Reanudar automatización" : "⏸️ Pausar automatización"}
+              </ActionBtn>
+              {data.lead.linkedin_url && (
+                <a href={data.lead.linkedin_url} target="_blank" rel="noopener noreferrer"
+                  className="px-3 py-1.5 bg-blue-800 hover:bg-blue-700 rounded text-xs">↗ LinkedIn</a>
+              )}
+              {/* Acciones destructivas — solo admin */}
+              {isAdmin && (
+                <>
+                  <ActionBtn onClick={() => action(`/api/crm/lead/${leadId}/reset-skip`)} disabled={acting}
+                    cls="bg-orange-800 hover:bg-orange-700">Reset skip</ActionBtn>
+                  <ActionBtn onClick={() => action(`/api/crm/lead/${leadId}/mark-replied`)} disabled={acting}
+                    cls="bg-green-800 hover:bg-green-700">Mark replied</ActionBtn>
+                  <ActionBtn onClick={() => {
+                    const reason = prompt("Razón para mark dead?")
+                    if (reason) action(`/api/crm/lead/${leadId}/mark-dead`, { dead_reason: reason })
+                  }} disabled={acting} cls="bg-red-800 hover:bg-red-700">Mark dead</ActionBtn>
+                </>
+              )}
+            </section>
 
             {/* 5. DIFF SUCCESS vs FAIL */}
             {(data.diff.success_cmd || data.diff.fail_cmd) && (

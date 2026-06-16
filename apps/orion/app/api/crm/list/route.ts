@@ -23,6 +23,18 @@ export async function GET(req: NextRequest) {
   // Scope: si user (level 2) tiene linkedin_account_id, forzar ese filtro
   const scopedAccountId = auth.level < 3 ? auth.accountId : accountIdQ
 
+  // Fail-closed: un restringido (level<3) SIN cuenta vinculada NO puede ver nada.
+  // Sin este guard, scopedAccountId=null saltaría el .eq de abajo (fail-open) y la
+  // query via admin client (ignora RLS) devolvería leads de TODAS las cuentas.
+  if (auth.level < 3 && !scopedAccountId) {
+    return NextResponse.json({
+      leads: [], total: 0, page, limit,
+      stage_counts: {}, health_counts: { healthy: 0 },
+      scope: { account_id: null, role: auth.role },
+      fetched_at: new Date().toISOString(),
+    })
+  }
+
   let q = (auth.admin as any).from("v_crm_lead_list").select("*", { count: "exact" })
   if (scopedAccountId) q = q.eq("linkedin_account_id", scopedAccountId)
   if (statusFilter) q = q.eq("status", statusFilter)

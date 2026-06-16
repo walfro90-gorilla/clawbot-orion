@@ -23,6 +23,16 @@ export default async function DashboardLayout({
     .eq("id", user.id)
     .single()
 
+  // SEGURIDAD multi-tenant (fail-closed): un usuario restringido (user/viewer) DEBE tener
+  // una cuenta LinkedIn vinculada. Sin ella, el scoping por linkedin_account_id de las
+  // páginas se SALTARÍA (patrón `if (cuenta) filtrar(...)` fail-open, + admin client que
+  // ignora RLS) → vería datos de TODAS las cuentas. Por eso, si un restringido no tiene
+  // cuenta, NO entra al dashboard. (Admin/god_admin con cuenta NULL = global por diseño.)
+  const isRestricted = profile?.role === "user" || profile?.role === "viewer"
+  if (isRestricted && !profile?.linkedin_account_id) {
+    redirect("/no-account")
+  }
+
   // Onboarding gate (null-safe): un user nuevo con cuenta y onboarding pendiente va al wizard
   // self-serve (vive en /onboarding, fuera de este layout → sin loop). Usuarios existentes
   // tienen onboarding_step='done' (backfill) o null → nunca caen aquí. Admin/viewer tampoco.
@@ -43,7 +53,7 @@ export default async function DashboardLayout({
       .is("resolved_at", null)
       .order("created_at", { ascending: false })
       .limit(20),
-    profile?.role === "user" && profile?.linkedin_account_id
+    isRestricted && profile?.linkedin_account_id
       ? admin
           .from("conversations")
           .select("id", { count: "exact", head: true })

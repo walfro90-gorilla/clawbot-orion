@@ -6,6 +6,7 @@ import { FIELDS, TABS, FIELD_BY_KEY, type ConfigField } from "@/lib/config-field
 import { validateAccountConfig } from "@/lib/config-validation"
 import { PRESETS } from "@/lib/config-presets"
 import { FollowupSequenceEditor, type FollowupStep } from "@/components/followup-sequence-editor"
+import { DirtyAwareForm } from "@/components/dirty-aware-form"
 
 export const dynamic = "force-dynamic"
 
@@ -385,17 +386,17 @@ export default async function AccountConfigPage({ params, searchParams }: { para
       </div>
 
       {/* Form principal: 🧱 Operación + Anti-ban = CUENTA · 🔍 Búsqueda + 💬 Seguimientos + 🧠 IA = CAMPAÑA seleccionada */}
-      <form action={saveAccountConfig}>
+      <DirtyAwareForm
+        action={saveAccountConfig}
+        footerClassName="sticky bottom-0 mt-6 -mx-8 px-8 py-3 bg-gray-950/90 backdrop-blur border-t border-gray-800 flex items-center gap-3"
+        footerExtra={<p className="text-xs text-gray-500 mr-auto">Vaciar un campo de &quot;Anti-ban avanzado&quot; lo revierte al valor global (reactiva auto-learning).</p>}
+      >
         <input type="hidden" name="account_id" value={account.id} />
         <input type="hidden" name="campaign_id" value={campaign?.id ?? ""} />
         <CampaignTabs tabs={TABS.map(t => ({ key: t.key, label: t.label, icon: "" }))} defaultTab="operacion">
           {tabChildren}
         </CampaignTabs>
-        <div className="sticky bottom-0 mt-6 -mx-8 px-8 py-3 bg-gray-950/90 backdrop-blur border-t border-gray-800 flex items-center justify-between">
-          <p className="text-xs text-gray-500">Vaciar un campo de "Anti-ban avanzado" lo revierte al valor global (reactiva auto-learning).</p>
-          <button type="submit" className="px-5 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg text-sm font-semibold text-white">Guardar configuración</button>
-        </div>
-      </form>
+      </DirtyAwareForm>
 
       {/* Auditoría */}
       {audit && audit.length > 0 && (

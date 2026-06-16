@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useRef, useEffect } from "react"
 import { ExtensionPanel } from "./extension-panel"
 import { OnboardingActivatePanel } from "./onboarding-activate-panel"
 
@@ -29,6 +29,35 @@ export function OnboardingWizard({
   const [step, setStep] = useState(0)
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+
+  // dirty-state del form de campaña (paso 3) — mismo patrón que los demás forms.
+  // En un wizard NO bloqueamos "continuar" si la campaña ya tiene keywords (cliente
+  // que regresa); el cliente nuevo debe llenar el required para habilitar el botón.
+  const formRef = useRef<HTMLFormElement>(null)
+  const initialRef = useRef<string | null>(null)
+  const dirtyTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [dirty, setDirty] = useState(false)
+  const hasKeywords = (campaign?.search_keywords ?? []).length > 0
+  function serializeForm(form: HTMLFormElement): string {
+    const fd = new FormData(form)
+    const parts: string[] = []
+    for (const [k, v] of fd.entries()) if (typeof v === "string") parts.push(`${k}=${v}`)
+    return parts.sort().join("")
+  }
+  useEffect(() => {
+    if (step === 2 && formRef.current && initialRef.current == null) {
+      initialRef.current = serializeForm(formRef.current)
+    }
+    if (step !== 2) { initialRef.current = null; setDirty(false) }
+  }, [step])
+  function recheckDirty() {
+    if (dirtyTimer.current) clearTimeout(dirtyTimer.current)
+    dirtyTimer.current = setTimeout(() => {
+      const form = formRef.current
+      if (!form || initialRef.current == null) return
+      setDirty(serializeForm(form) !== initialRef.current)
+    }, 60)
+  }
 
   async function saveCampaign(form: HTMLFormElement) {
     setSaving(true); setErr(null)
@@ -117,7 +146,7 @@ export function OnboardingWizard({
 
           {/* ── Paso 3: Campaña ── */}
           {step === 2 && (
-            <form onSubmit={(e) => { e.preventDefault(); saveCampaign(e.currentTarget) }} className="space-y-4">
+            <form ref={formRef} onSubmit={(e) => { e.preventDefault(); saveCampaign(e.currentTarget) }} onInput={recheckDirty} onChange={recheckDirty} className="space-y-4">
               <p className="text-gray-300 text-sm">Define a quién quieres contactar. Puedes afinar todo después desde el panel.</p>
               <div className="space-y-1">
                 <label className="block text-xs text-gray-400 font-medium">Keywords de búsqueda * <span className="text-gray-600">(separadas por coma)</span></label>
@@ -145,10 +174,15 @@ export function OnboardingWizard({
                   placeholder="Soy consultor B2B, tono cercano y directo, sin lenguaje corporativo." className={inp} />
               </div>
               {err && <p className="text-xs text-red-400">{err}</p>}
-              <button type="submit" disabled={saving}
-                className="px-5 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white text-sm font-semibold rounded-lg transition-colors">
-                {saving ? "Guardando…" : "Guardar y continuar"}
-              </button>
+              <div className="flex items-center gap-3">
+                <button type="submit" disabled={saving || (!dirty && !hasKeywords)}
+                  className="px-5 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:cursor-not-allowed text-white text-sm font-semibold rounded-lg transition-colors">
+                  {saving ? "Guardando…" : "Guardar y continuar"}
+                </button>
+                <span className={`text-xs ${dirty ? "text-blue-300/80" : "text-gray-500"}`}>
+                  {saving ? "" : dirty ? "Cambios sin guardar." : "No hay cambios por guardar."}
+                </span>
+              </div>
             </form>
           )}
 

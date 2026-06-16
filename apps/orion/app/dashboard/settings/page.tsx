@@ -1,6 +1,7 @@
 import { createClient } from "@/lib/supabase/server"
 import { createAdminClient } from "@/lib/supabase/admin"
 import { redirect } from "next/navigation"
+import { DirtyAwareForm } from "@/components/dirty-aware-form"
 
 async function saveSettings(formData: FormData) {
   "use server"
@@ -145,7 +146,7 @@ export default async function SettingsPage({
           )}
 
           {/* Cal.com section */}
-          <form action={saveSettings} className="space-y-5 pt-1 border-t border-gray-700">
+          <DirtyAwareForm action={saveSettings} className="space-y-5 pt-1 border-t border-gray-700">
             <input type="hidden" name="account_id" value={account.id} />
 
             {/* Cal.com */}
@@ -213,13 +214,7 @@ export default async function SettingsPage({
               <p className="text-gray-600 text-xs mt-1.5">Deja vacío para usar el default automático por temperatura.</p>
             </div>
 
-            <button
-              type="submit"
-              className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 text-white  text-sm font-medium rounded-lg transition-colors"
-            >
-              Guardar configuración
-            </button>
-          </form>
+          </DirtyAwareForm>
         </div>
       ) : (
         <div className="bg-gray-900 border border-gray-700 rounded-xl p-8 text-center">
