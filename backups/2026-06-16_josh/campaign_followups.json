@@ -1,0 +1,62 @@
+[
+ {
+  "id": "0e0a23e2-46b0-413e-bdca-f412f8bfef6b",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "step": 1,
+  "message": "Hola [Nombre], un gusto conectar. Me dedico a temas de negocio y tecnología, y me gusta sumar a mi red a líderes con trayectorias como la tuya. Quería saludarte, presentarme y quedar en contacto. ¡Un saludo!",
+  "delay_value": 0,
+  "delay_unit": "hours",
+  "jitter_hours": 0.033,
+  "enabled": true,
+  "created_at": "2026-06-12T21:53:04.938514+00:00",
+  "updated_at": "2026-06-12T21:53:04.938514+00:00"
+ },
+ {
+  "id": "09756c79-3dbc-4c81-bde0-8db17e2b149c",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "step": 2,
+  "message": "Hola [Nombre], espero que todo muy bien. Seguimos en contacto por aquí — si en algún momento quieres intercambiar ideas o platicar sobre lo que estás liderando, con todo gusto. Un saludo.",
+  "delay_value": 72,
+  "delay_unit": "hours",
+  "jitter_hours": 0,
+  "enabled": true,
+  "created_at": "2026-06-12T21:53:04.938514+00:00",
+  "updated_at": "2026-06-12T21:53:04.938514+00:00"
+ },
+ {
+  "id": "e5a399ec-5b36-4000-826d-51519f1a08b2",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "step": 3,
+  "message": "Hola [Nombre], paso a saludarte y mantener el contacto. Si en algún momento quieres conversar de tecnología o de lo que estás liderando, aquí estoy. Saludos.",
+  "delay_value": 120,
+  "delay_unit": "hours",
+  "jitter_hours": 0,
+  "enabled": true,
+  "created_at": "2026-06-12T21:53:04.938514+00:00",
+  "updated_at": "2026-06-12T21:53:04.938514+00:00"
+ },
+ {
+  "id": "768091d3-9a50-4b6a-9b09-1ce0b2bfda79",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "step": 4,
+  "message": "Hola [Nombre], espero que tu semana vaya bien. Sin más intención que saludarte y recordarte que quedo a la orden para lo que necesites. Un abrazo.",
+  "delay_value": 96,
+  "delay_unit": "hours",
+  "jitter_hours": 0,
+  "enabled": true,
+  "created_at": "2026-06-12T21:53:04.938514+00:00",
+  "updated_at": "2026-06-12T21:53:04.938514+00:00"
+ },
+ {
+  "id": "f110868b-3e8d-4404-8be8-0626628eaf81",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "step": 5,
+  "message": "Hola [Nombre], un último saludo para mantener el contacto. Fue un gusto conectar; me quedo por aquí para cuando surja algo en lo que podamos colaborar o conversar. Saludos.",
+  "delay_value": 84,
+  "delay_unit": "hours",
+  "jitter_hours": 0,
+  "enabled": true,
+  "created_at": "2026-06-12T21:53:04.938514+00:00",
+  "updated_at": "2026-06-12T21:53:04.938514+00:00"
+ }
+]

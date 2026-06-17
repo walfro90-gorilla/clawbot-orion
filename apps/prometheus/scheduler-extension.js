@@ -1398,7 +1398,7 @@ async function runConnectivityHealthCheck(connectedIds) {
       await supabase.from('account_connectivity_log').insert({
         linkedin_account_id: acc.id,
         event_type:          'health_check_offline',
-        details:             { tz, business_hours: '9-19' },
+        details:             { tz, business_hours: '6-21' },
       })
       // Resolve duplicate antes de crear nueva
       await supabase.from('account_alerts')
@@ -1410,7 +1410,7 @@ async function runConnectivityHealthCheck(connectedIds) {
         linkedin_account_id: acc.id,
         alert_type: 'ext_offline_business_hours',
         severity:   'warning',
-        message:    `⚠️ Extension de "${acc.label}" no conectada durante horario laboral (${tz}, 9-19h). Abre Chrome y haz click en la extensión.`,
+        message:    `⚠️ Extension de "${acc.label}" no conectada durante horario laboral (${tz}, 6-21h, 7 días). Abre Chrome y haz click en la extensión.`,
         details:    { tz },
       })
       console.log(`[SCH-EXT] ⚠️  Health check: ${acc.label} offline durante BH (${tz})`)

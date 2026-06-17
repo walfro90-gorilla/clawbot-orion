@@ -1,0 +1,471 @@
+[
+ {
+  "id": "0fa215e3-f838-45c4-977c-363703b0c45b",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "search_type": "linkedin_people",
+  "filters": {
+   "title": null,
+   "keywords": "Director Finanzas Mexico",
+   "location": null
+  },
+  "target_count": 5,
+  "found_count": 5,
+  "status": "completed",
+  "started_at": "2026-04-04T01:25:52.359+00:00",
+  "completed_at": "2026-04-04T01:26:14.385+00:00",
+  "error_log": null,
+  "created_at": "2026-04-04T01:25:53.20626+00:00",
+  "updated_at": "2026-04-04T01:26:14.464526+00:00"
+ },
+ {
+  "id": "f8163f46-e3c4-4faf-8095-a64bab28dc8f",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "search_type": "linkedin_people",
+  "filters": {
+   "title": null,
+   "keywords": "Director Finanzas Mexico",
+   "location": "Mexico"
+  },
+  "target_count": 25,
+  "found_count": 21,
+  "status": "completed",
+  "started_at": "2026-04-04T16:02:00.543+00:00",
+  "completed_at": "2026-04-04T16:02:35.348+00:00",
+  "error_log": null,
+  "created_at": "2026-04-04T16:02:00.777163+00:00",
+  "updated_at": "2026-04-04T16:02:35.407011+00:00"
+ },
+ {
+  "id": "5c158b3f-96fb-426a-9847-822ab16f9edf",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "search_type": "linkedin_people",
+  "filters": {
+   "title": null,
+   "keywords": "Director Finanzas Mexico",
+   "location": "Mexico"
+  },
+  "target_count": 25,
+  "found_count": 10,
+  "status": "completed",
+  "started_at": "2026-04-08T23:31:56.709+00:00",
+  "completed_at": "2026-04-08T23:32:27.84+00:00",
+  "error_log": null,
+  "created_at": "2026-04-08T23:31:56.784692+00:00",
+  "updated_at": "2026-04-08T23:32:27.894703+00:00"
+ },
+ {
+  "id": "21603367-fc31-4a85-b849-fdd3fb8e4085",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "search_type": "linkedin_people",
+  "filters": {
+   "title": null,
+   "keywords": "Director Finanzas Mexico",
+   "location": "Mexico"
+  },
+  "target_count": 25,
+  "found_count": 2,
+  "status": "completed",
+  "started_at": "2026-04-09T20:08:51.037+00:00",
+  "completed_at": "2026-04-09T20:10:13.781+00:00",
+  "error_log": null,
+  "created_at": "2026-04-09T20:08:51.105253+00:00",
+  "updated_at": "2026-04-09T20:10:13.857166+00:00"
+ },
+ {
+  "id": "38215571-9402-413c-8e84-c89b1b511f3b",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "search_type": "linkedin_people",
+  "filters": {
+   "title": null,
+   "keywords": "Director Finanzas Mexico",
+   "location": "Mexico"
+  },
+  "target_count": 25,
+  "found_count": 0,
+  "status": "completed",
+  "started_at": "2026-04-10T16:12:00.465+00:00",
+  "completed_at": "2026-04-10T16:13:10.534+00:00",
+  "error_log": null,
+  "created_at": "2026-04-10T16:12:00.700193+00:00",
+  "updated_at": "2026-04-10T16:13:10.602122+00:00"
+ },
+ {
+  "id": "abd32e2e-e7bf-420d-9f24-17ced6a66503",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "search_type": "linkedin_people",
+  "filters": {
+   "title": null,
+   "keywords": "Director Finanzas Mexico",
+   "location": "Mexico"
+  },
+  "target_count": 25,
+  "found_count": 0,
+  "status": "running",
+  "started_at": "2026-04-13T15:22:08.908+00:00",
+  "completed_at": null,
+  "error_log": null,
+  "created_at": "2026-04-13T15:22:09.132508+00:00",
+  "updated_at": "2026-04-13T15:22:09.132508+00:00"
+ },
+ {
+  "id": "12ae632a-a471-46d5-9b58-f2efdd16eb9a",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "search_type": "linkedin_people",
+  "filters": {
+   "title": null,
+   "keywords": "Director Finanzas Mexico",
+   "location": "Mexico"
+  },
+  "target_count": 25,
+  "found_count": 0,
+  "status": "running",
+  "started_at": "2026-04-14T15:21:56.268+00:00",
+  "completed_at": null,
+  "error_log": null,
+  "created_at": "2026-04-14T15:21:56.334038+00:00",
+  "updated_at": "2026-04-14T15:21:56.334038+00:00"
+ },
+ {
+  "id": "e890dc38-d5b1-47ab-abe5-304a7bcbbc63",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "search_type": "linkedin_people",
+  "filters": {
+   "title": null,
+   "keywords": "Director Finanzas Mexico",
+   "location": "Mexico"
+  },
+  "target_count": 25,
+  "found_count": 0,
+  "status": "running",
+  "started_at": "2026-04-15T23:29:48.749+00:00",
+  "completed_at": null,
+  "error_log": null,
+  "created_at": "2026-04-15T23:29:48.80674+00:00",
+  "updated_at": "2026-04-15T23:29:48.80674+00:00"
+ },
+ {
+  "id": "46a23621-375b-4712-a53a-a8626024a2d9",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "search_type": "linkedin_people",
+  "filters": {
+   "title": null,
+   "keywords": "Director Finanzas Mexico",
+   "location": "Mexico"
+  },
+  "target_count": 25,
+  "found_count": 0,
+  "status": "running",
+  "started_at": "2026-04-15T23:56:06.245+00:00",
+  "completed_at": null,
+  "error_log": null,
+  "created_at": "2026-04-15T23:56:06.314804+00:00",
+  "updated_at": "2026-04-15T23:56:06.314804+00:00"
+ },
+ {
+  "id": "5c5744cc-15c4-4d2c-a758-c96400547b12",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "search_type": "linkedin_people",
+  "filters": {
+   "title": null,
+   "keywords": "Director Finanzas Mexico",
+   "location": "Mexico"
+  },
+  "target_count": 25,
+  "found_count": 6,
+  "status": "completed",
+  "started_at": "2026-04-15T23:55:28.415+00:00",
+  "completed_at": "2026-04-15T23:56:36.785+00:00",
+  "error_log": null,
+  "created_at": "2026-04-15T23:55:28.538389+00:00",
+  "updated_at": "2026-04-15T23:56:36.849323+00:00"
+ },
+ {
+  "id": "db7c77cc-69de-4aaf-8832-57a18d71a2b6",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "search_type": "linkedin_people",
+  "filters": {
+   "title": null,
+   "keywords": "Director General",
+   "location": "Mexico"
+  },
+  "target_count": 25,
+  "found_count": 23,
+  "status": "completed",
+  "started_at": "2026-04-16T19:57:47.308+00:00",
+  "completed_at": "2026-04-16T19:59:30.734+00:00",
+  "error_log": null,
+  "created_at": "2026-04-16T19:57:47.363652+00:00",
+  "updated_at": "2026-04-16T19:59:30.795971+00:00"
+ },
+ {
+  "id": "9a6b3e13-c085-4380-8c4c-57c1068e3212",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "search_type": "linkedin_people",
+  "filters": {
+   "title": null,
+   "keywords": "Director General",
+   "location": "Mexico"
+  },
+  "target_count": 25,
+  "found_count": 1,
+  "status": "completed",
+  "started_at": "2026-04-17T16:18:30.726+00:00",
+  "completed_at": "2026-04-17T16:20:19.408+00:00",
+  "error_log": null,
+  "created_at": "2026-04-17T16:18:30.793308+00:00",
+  "updated_at": "2026-04-17T16:20:19.464271+00:00"
+ },
+ {
+  "id": "27763c77-5c49-4c54-9eb6-e8aa1b695b91",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "search_type": "linkedin_people",
+  "filters": {
+   "title": null,
+   "keywords": "Director General",
+   "location": "Mexico"
+  },
+  "target_count": 25,
+  "found_count": 2,
+  "status": "completed",
+  "started_at": "2026-04-20T15:04:42.997+00:00",
+  "completed_at": "2026-04-20T15:06:03.895+00:00",
+  "error_log": null,
+  "created_at": "2026-04-20T15:04:43.203846+00:00",
+  "updated_at": "2026-04-20T15:06:03.956054+00:00"
+ },
+ {
+  "id": "2d2d0193-ca6b-4cff-a8b9-3b3ba251d40b",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "search_type": "linkedin_people",
+  "filters": {
+   "title": null,
+   "keywords": "Director General",
+   "location": "Mexico"
+  },
+  "target_count": 25,
+  "found_count": 2,
+  "status": "completed",
+  "started_at": "2026-04-21T15:36:51.114+00:00",
+  "completed_at": "2026-04-21T15:38:25.282+00:00",
+  "error_log": null,
+  "created_at": "2026-04-21T15:36:51.322199+00:00",
+  "updated_at": "2026-04-21T15:38:25.380732+00:00"
+ },
+ {
+  "id": "53e3c24d-4651-4f57-8400-ced6816a58be",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "search_type": "linkedin_people",
+  "filters": {
+   "title": null,
+   "keywords": "Director General",
+   "location": "Mexico"
+  },
+  "target_count": 25,
+  "found_count": 3,
+  "status": "completed",
+  "started_at": "2026-04-22T15:11:50.389+00:00",
+  "completed_at": "2026-04-22T15:13:37.807+00:00",
+  "error_log": null,
+  "created_at": "2026-04-22T15:11:50.441651+00:00",
+  "updated_at": "2026-04-22T15:13:37.926956+00:00"
+ },
+ {
+  "id": "9c6b3ff9-eafa-4487-b3f3-6e6211bddd10",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "search_type": "linkedin_people",
+  "filters": {
+   "title": null,
+   "keywords": "Director General",
+   "location": "Mexico"
+  },
+  "target_count": 25,
+  "found_count": 0,
+  "status": "completed",
+  "started_at": "2026-04-23T15:01:33.724+00:00",
+  "completed_at": "2026-04-23T15:03:10.177+00:00",
+  "error_log": null,
+  "created_at": "2026-04-23T15:01:33.788196+00:00",
+  "updated_at": "2026-04-23T15:03:10.240728+00:00"
+ },
+ {
+  "id": "eac9f9eb-33b3-4197-8184-f827496da0c2",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "search_type": "linkedin_people",
+  "filters": {
+   "title": null,
+   "keywords": "Director General",
+   "location": "Mexico"
+  },
+  "target_count": 25,
+  "found_count": 2,
+  "status": "completed",
+  "started_at": "2026-04-24T15:34:15.617+00:00",
+  "completed_at": "2026-04-24T15:35:57.049+00:00",
+  "error_log": null,
+  "created_at": "2026-04-24T15:34:15.664167+00:00",
+  "updated_at": "2026-04-24T15:35:57.090678+00:00"
+ },
+ {
+  "id": "4bdd4264-e8a9-453b-bb5f-bf140e773d2b",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "search_type": "linkedin_people",
+  "filters": {
+   "title": null,
+   "keywords": "Director General",
+   "location": "Mexico"
+  },
+  "target_count": 25,
+  "found_count": 1,
+  "status": "completed",
+  "started_at": "2026-04-25T21:58:41.1+00:00",
+  "completed_at": "2026-04-25T22:00:19.068+00:00",
+  "error_log": null,
+  "created_at": "2026-04-25T21:58:41.297382+00:00",
+  "updated_at": "2026-04-25T22:00:19.119494+00:00"
+ },
+ {
+  "id": "4d521c75-cba6-4007-bfdb-486b14cd223d",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "search_type": "linkedin_people",
+  "filters": {
+   "title": null,
+   "keywords": "Director General",
+   "location": "Mexico"
+  },
+  "target_count": 25,
+  "found_count": 1,
+  "status": "completed",
+  "started_at": "2026-04-26T17:59:06.46+00:00",
+  "completed_at": "2026-04-26T18:00:31.08+00:00",
+  "error_log": null,
+  "created_at": "2026-04-26T17:59:06.67735+00:00",
+  "updated_at": "2026-04-26T18:00:31.122631+00:00"
+ },
+ {
+  "id": "5100fdf6-95ea-41f4-8c32-5584184191c3",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "search_type": "linkedin_people",
+  "filters": {
+   "title": null,
+   "keywords": "Director General",
+   "location": "Mexico"
+  },
+  "target_count": 25,
+  "found_count": 0,
+  "status": "completed",
+  "started_at": "2026-04-27T15:16:12.218+00:00",
+  "completed_at": "2026-04-27T15:17:28.756+00:00",
+  "error_log": null,
+  "created_at": "2026-04-27T15:16:12.291364+00:00",
+  "updated_at": "2026-04-27T15:17:28.811879+00:00"
+ },
+ {
+  "id": "20dbe46d-b2b1-432e-b8bc-6fb710db33e3",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "search_type": "linkedin_people",
+  "filters": {
+   "title": null,
+   "keywords": "Director General",
+   "location": "Mexico"
+  },
+  "target_count": 25,
+  "found_count": 2,
+  "status": "completed",
+  "started_at": "2026-04-28T15:22:42.039+00:00",
+  "completed_at": "2026-04-28T15:24:07.297+00:00",
+  "error_log": null,
+  "created_at": "2026-04-28T15:22:42.10136+00:00",
+  "updated_at": "2026-04-28T15:24:07.382732+00:00"
+ },
+ {
+  "id": "755a2ebc-91ef-48d3-92aa-db4d2738cee8",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "search_type": "linkedin_people",
+  "filters": {
+   "title": null,
+   "keywords": "Director General",
+   "location": "Mexico"
+  },
+  "target_count": 25,
+  "found_count": 0,
+  "status": "completed",
+  "started_at": "2026-04-29T15:21:42.669+00:00",
+  "completed_at": "2026-04-29T15:23:01.375+00:00",
+  "error_log": null,
+  "created_at": "2026-04-29T15:21:42.716445+00:00",
+  "updated_at": "2026-04-29T15:23:01.441536+00:00"
+ },
+ {
+  "id": "1f2dc58a-cfc0-4978-81ea-f6f4d322c2bb",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "search_type": "linkedin_people",
+  "filters": {
+   "title": null,
+   "keywords": "Director General",
+   "location": "Mexico City, Monterrey, Guadalajara, Mexico"
+  },
+  "target_count": 50,
+  "found_count": 0,
+  "status": "running",
+  "started_at": "2026-04-29T20:19:48.373+00:00",
+  "completed_at": null,
+  "error_log": null,
+  "created_at": "2026-04-29T20:19:48.439381+00:00",
+  "updated_at": "2026-04-29T20:19:48.439381+00:00"
+ },
+ {
+  "id": "51d420ff-8634-49b8-aca5-6680c12c821f",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "search_type": "linkedin_people",
+  "filters": {
+   "title": null,
+   "keywords": "Director General",
+   "location": "Mexico City, Monterrey, Guadalajara, Mexico"
+  },
+  "target_count": 50,
+  "found_count": 0,
+  "status": "running",
+  "started_at": "2026-04-29T20:20:36.802+00:00",
+  "completed_at": null,
+  "error_log": null,
+  "created_at": "2026-04-29T20:20:36.954267+00:00",
+  "updated_at": "2026-04-29T20:20:36.954267+00:00"
+ },
+ {
+  "id": "b47a88c4-4c8b-4e81-8411-f971926b2b04",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "search_type": "linkedin_people",
+  "filters": {
+   "title": null,
+   "keywords": "Director General",
+   "location": "Mexico City, Monterrey, Guadalajara, Mexico"
+  },
+  "target_count": 50,
+  "found_count": 46,
+  "status": "completed",
+  "started_at": "2026-04-29T20:39:44.399+00:00",
+  "completed_at": "2026-04-29T20:51:31.244+00:00",
+  "error_log": null,
+  "created_at": "2026-04-29T20:39:44.463462+00:00",
+  "updated_at": "2026-04-29T20:51:31.305691+00:00"
+ },
+ {
+  "id": "fae37652-4f40-407c-abc3-15a4e7469791",
+  "campaign_id": "8eda7e17-00db-431b-b67e-7cbdcbf6fc94",
+  "search_type": "linkedin_people",
+  "filters": {
+   "title": null,
+   "keywords": "Director General",
+   "location": "Mexico City, Monterrey, Guadalajara, Mexico",
+   "secondDegreeOnly": true
+  },
+  "target_count": 50,
+  "found_count": 34,
+  "status": "completed",
+  "started_at": "2026-05-05T22:01:20.898+00:00",
+  "completed_at": "2026-05-05T22:05:37.727+00:00",
+  "error_log": null,
+  "created_at": "2026-05-05T22:01:20.959916+00:00",
+  "updated_at": "2026-05-05T22:05:37.787162+00:00"
+ }
+]
