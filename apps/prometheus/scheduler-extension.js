@@ -143,6 +143,10 @@ async function logJob({ campaignId, accountId, jobType, status, skipReason, lead
   })
 }
 
+// IO: motivo de skip por campaña, para loguear a scheduler_log SOLO en transiciones
+// (no en cada tick). Memoria del proceso; al reiniciar se acepta un re-log inicial.
+const lastSkipReason = new Map()
+
 // ── Search trigger ───────────────────────────────────────────────────────────
 // Dispara search si: !search_paused + gap respetado + pending_leads bajo + connected
 
@@ -1481,7 +1485,9 @@ async function tick() {
   }
 
   console.log(`[SCH-EXT] ${campaigns.length} campañas activas`)
-  await logJob({ jobType: 'tick', status: 'started', details: { campaigns: campaigns.length, connected: connectedIds.size } })
+  // IO: no persistimos un row 'tick started' por tick (288/día de ruido; el heartbeat
+  // ya registra liveness). Solo consola.
+  console.log(`[SCH-EXT] tick: ${campaigns.length} campañas, ${connectedIds.size} conectadas`)
 
   // v0.7.8: sweep de awaiting_response → dead tras 21d sin volver al pipeline.
   // Barato (1 query indexada, límite 200), no necesita gate ni cuenta — corre 1× por tick.
@@ -1531,10 +1537,16 @@ async function tick() {
     const skipReason = await checkCampaignActiveGates(campaign, account)
     if (skipReason) {
       console.log(`[SCH-EXT] "${campaign.name}" — gate skip: ${skipReason}`)
-      await logJob({ campaignId: campaign.id, accountId: account.id, jobType: 'tick',
-        status: 'skipped', skipReason })
+      // IO: antes se insertaba un row 'skipped' por campaña EN CADA tick (~864/día del
+      // mismo skip repetido). Ahora solo logueamos cuando el motivo CAMBIA (transición).
+      if (lastSkipReason.get(campaign.id) !== skipReason) {
+        lastSkipReason.set(campaign.id, skipReason)
+        await logJob({ campaignId: campaign.id, accountId: account.id, jobType: 'tick',
+          status: 'skipped', skipReason })
+      }
       continue
     }
+    lastSkipReason.delete(campaign.id)  // campaña volvió a estar activa → su próximo skip se re-loguea
 
     console.log(`[SCH-EXT] ━━ "${campaign.name}" (${account.label}) ━━`)
 

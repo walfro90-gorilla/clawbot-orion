@@ -1204,24 +1204,38 @@ async function ingestCheckInbox(commandId, conversations) {
           : { linkedin_account_id: cmd.account_id, scraped_name: convo.name }
         const { data: existing } = await supabase
           .from('orphan_conversations')
-          .select('id, occurrence_count')
+          .select('id, occurrence_count, snippet, unread_count, last_activity_label, linkedin_thread_id, linkedin_profile_url, last_seen_at')
           .match(orphanKey)
           .maybeSingle()
         if (existing) {
-          // BUG fix: el UPDATE original no persistía linkedin_thread_id ni
-          // linkedin_profile_url cuando un sweep posterior los capturaba (orphan
-          // existía sin thread_id, nuevo sweep tiene thread_id → quedaba sin
-          // persistir → auto-promote nunca disparaba). Ahora los actualizamos
-          // si vienen no-null en el sweep actual.
-          await supabase.from('orphan_conversations').update({
-            occurrence_count: (existing.occurrence_count ?? 1) + 1,
-            last_seen_at: new Date().toISOString(),
-            snippet: convo.snippet ?? null,
-            unread_count: convo.unread ?? 0,
-            last_activity_label: convo.lastActivity ?? null,
-            ...(convo.threadId ? { linkedin_thread_id: convo.threadId } : {}),
-            ...(convo.threadUrl ? { linkedin_profile_url: convo.threadUrl } : {}),
-          }).eq('id', existing.id)
+          // IO FIX (Disk IO budget): este UPDATE corría en CADA inbox sweep para
+          // CADA orphan → 61k updates NON-HOT (last_seen_at está indexado en
+          // idx_orphan_status_seen), el #1 consumidor de Disk IO de la instancia.
+          // Ahora solo escribimos si algo MATERIAL cambió, o si last_seen_at quedó
+          // viejo (>1h) para refrescar liveness. Mantiene el BUG fix de persistir
+          // thread_id/profile_url cuando un sweep posterior los captura.
+          const newSnippet = convo.snippet ?? null
+          const newUnread  = convo.unread ?? 0
+          const newLabel   = convo.lastActivity ?? null
+          const lastSeenMs = existing.last_seen_at ? Date.parse(existing.last_seen_at) : 0
+          const stale      = Date.now() - lastSeenMs > 3_600_000
+          const changed =
+            newSnippet !== (existing.snippet ?? null) ||
+            newUnread  !== (existing.unread_count ?? 0) ||
+            newLabel   !== (existing.last_activity_label ?? null) ||
+            (convo.threadId  && convo.threadId  !== existing.linkedin_thread_id) ||
+            (convo.threadUrl && convo.threadUrl !== existing.linkedin_profile_url)
+          if (changed || stale) {
+            await supabase.from('orphan_conversations').update({
+              occurrence_count: (existing.occurrence_count ?? 1) + 1,
+              last_seen_at: new Date().toISOString(),
+              snippet: newSnippet,
+              unread_count: newUnread,
+              last_activity_label: newLabel,
+              ...(convo.threadId ? { linkedin_thread_id: convo.threadId } : {}),
+              ...(convo.threadUrl ? { linkedin_profile_url: convo.threadUrl } : {}),
+            }).eq('id', existing.id)
+          }
         } else {
           await supabase.from('orphan_conversations').insert({
             linkedin_account_id: cmd.account_id,
