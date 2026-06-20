@@ -233,26 +233,37 @@ export default async function AccountConfigPage({ params, searchParams }: { para
   const sp = await searchParams
   const admin = createAdminClient() as any
 
-  const { data: account } = await admin.from("linkedin_accounts").select("*").eq("id", id).maybeSingle()
+  // PERF: estas 5 queries solo dependen de `id` → 1 round-trip en paralelo
+  // (antes eran 5 awaits secuenciales ≈ 5×~100ms en free-tier).
+  const [
+    { data: account },
+    { data: campaigns },
+    { data: acRows },
+    { data: gRows },
+    { data: audit },
+  ] = await Promise.all([
+    admin.from("linkedin_accounts").select("*").eq("id", id).maybeSingle(),
+    admin.from("campaigns").select("*").eq("linkedin_account_id", id).order("is_active", { ascending: false }).order("created_at", { ascending: false }),
+    admin.from("account_config").select("key, value, locked, source, updated_at").eq("account_id", id),
+    admin.from("runtime_config").select("key, value"),
+    admin.from("account_config_audit").select("key, actor_email, source, created_at, payload_after").eq("account_id", id).order("created_at", { ascending: false }).limit(8),
+  ])
   if (!account) notFound()
-  // Todas las campañas de la cuenta (campañas anidadas) + selección por ?campaign=
-  const { data: campaigns } = await admin.from("campaigns").select("*").eq("linkedin_account_id", id).order("is_active", { ascending: false }).order("created_at", { ascending: false })
+
+  // Selección de campaña por ?campaign= (o activa / primera)
   const selectedCampaignId = sp.campaign || (campaigns ?? []).find((c: any) => c.is_active)?.id || (campaigns ?? [])[0]?.id || null
   const campaign = (campaigns ?? []).find((c: any) => c.id === selectedCampaignId) ?? null
-  // Template de mensaje del campaign seleccionado (foldeado al Centro — tabla message_templates)
+
+  // PERF: template + secuencia FU dependen de la campaña seleccionada → 2do (y último)
+  // round-trip, también en paralelo.
   let template: any = null
-  if (campaign) {
-    const { data: tmpls } = await admin.from("message_templates").select("*").eq("campaign_id", campaign.id).eq("is_active", true).limit(1)
-    template = (tmpls ?? [])[0] ?? null
-  }
-  // v0.8 FU dinámico: secuencia de seguimientos (1..20) desde campaign_followups
   let fuSteps: FollowupStep[] = []
   if (campaign) {
-    const { data: fuRows } = await admin
-      .from("campaign_followups")
-      .select("step, message, delay_value, delay_unit, jitter_hours, enabled")
-      .eq("campaign_id", campaign.id)
-      .order("step", { ascending: true })
+    const [{ data: tmpls }, { data: fuRows }] = await Promise.all([
+      admin.from("message_templates").select("*").eq("campaign_id", campaign.id).eq("is_active", true).limit(1),
+      admin.from("campaign_followups").select("step, message, delay_value, delay_unit, jitter_hours, enabled").eq("campaign_id", campaign.id).order("step", { ascending: true }),
+    ])
+    template = (tmpls ?? [])[0] ?? null
     fuSteps = (fuRows ?? []).map((r: any) => ({
       message:      r.message ?? "",
       delay_value:  Number(r.delay_value ?? 0),
@@ -261,13 +272,11 @@ export default async function AccountConfigPage({ params, searchParams }: { para
       enabled:      r.enabled !== false,
     }))
   }
-  const { data: acRows } = await admin.from("account_config").select("key, value, locked, source, updated_at").eq("account_id", id)
+
   const acMap: Record<string, any> = {}
   for (const r of acRows ?? []) acMap[r.key] = r.value
-  const { data: gRows } = await admin.from("runtime_config").select("key, value")
   const global: Record<string, any> = {}
   for (const r of gRows ?? []) global[r.key] = r.value
-  const { data: audit } = await admin.from("account_config_audit").select("key, actor_email, source, created_at, payload_after").eq("account_id", id).order("created_at", { ascending: false }).limit(8)
 
   const tabChildren = TABS.map(tab => (
     <div key={tab.key} className="space-y-4">
