@@ -77,13 +77,19 @@ export async function getConnectedAccountIds() {
   }
   try {
     const ctrl = new AbortController()
+    // v0.8: el timeout cubre TAMBIÉN el r.json() — antes se hacía clearTimeout ANTES
+    // de leer el body, así que si el bridge respondía headers pero el body se estancaba,
+    // r.json() colgaba indefinido → cuelgue del tick → watchdog hard-kill.
     const t = setTimeout(() => ctrl.abort(), 3000)
-    const r = await fetch(BRIDGE_HEALTH_URL, { signal: ctrl.signal })
-    clearTimeout(t)
-    const j = await r.json()
-    const ids = new Set((j.connected_accounts ?? []).map(a => a.accountId))
-    _healthCache = { ts: now, data: ids }
-    return ids
+    try {
+      const r = await fetch(BRIDGE_HEALTH_URL, { signal: ctrl.signal })
+      const j = await r.json()
+      const ids = new Set((j.connected_accounts ?? []).map(a => a.accountId))
+      _healthCache = { ts: now, data: ids }
+      return ids
+    } finally {
+      clearTimeout(t)
+    }
   } catch (err) {
     console.warn(`[ext-dispatch] bridge health check failed: ${err.message}`)
     return new Set()

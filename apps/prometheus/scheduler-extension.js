@@ -31,7 +31,10 @@ import { sweepQuarantineTimeout } from './lib/lead-failure.js'
 dotenv.config()
 
 const TICK_INTERVAL_MS = parseInt(process.env.TICK_INTERVAL_MS ?? '300000')  // 5 min default
-const TICK_TIMEOUT_MS  = parseInt(process.env.TICK_TIMEOUT_MS  ?? '240000')  // 4 min: máx un tick
+const TICK_TIMEOUT_MS  = parseInt(process.env.TICK_TIMEOUT_MS  ?? '240000')  // 4 min: umbral del watchdog (HARD kill) — backstop si el soft falla
+// v0.8: timeout SOFT del tick (withTimeout) — MÁS CORTO que el watchdog para que el tick
+// aborte SOLO (graceful, sin restart) antes del hard-kill. Cubre cualquier cuelgue (DB/bridge/Gemini).
+const TICK_SOFT_TIMEOUT_MS = parseInt(process.env.TICK_SOFT_TIMEOUT_MS ?? '120000')  // 2 min
 const HUNG_TIMEOUT_MS  = parseInt(process.env.HUNG_TIMEOUT_MS  ?? '600000')  // 10 min: watchdog mata el proceso
 const MAX_DAILY_MESSAGES = parseInt(process.env.MAX_DAILY_MESSAGES ?? '30')  // FU+FM combinado por cuenta/día
 const DRY_RUN = process.env.DRY_RUN === 'true'
@@ -106,6 +109,7 @@ async function readStressTestLock() {
 // tick, mata el proceso y deja que PM2 lo restartee.
 let lastTickAt = Date.now()
 let tickInFlight = false
+let tickStartedAt = 0  // v0.8: timestamp de cuándo arrancó el tick ACTUAL (el watchdog mide ESTO)
 
 function watchdog() {
   const sinceTick = Date.now() - lastTickAt
@@ -113,9 +117,14 @@ function watchdog() {
     console.error(`[SCH-EXT] 🔴 WATCHDOG: scheduler hung — sin tick desde hace ${Math.floor(sinceTick/1000)}s. Matando proceso para que PM2 reinicie.`)
     process.exit(1)
   }
-  // Si hay un tick que lleva más de TICK_TIMEOUT_MS in-flight, también es señal
-  if (tickInFlight && sinceTick > TICK_TIMEOUT_MS) {
-    console.error(`[SCH-EXT] 🔴 WATCHDOG: tick en flight desde hace ${Math.floor(sinceTick/1000)}s (>${TICK_TIMEOUT_MS/1000}s). Matando proceso.`)
+  // v0.8 FIX: medir cuánto lleva corriendo el tick ACTUAL (Date.now()-tickStartedAt),
+  // NO sinceTick (que es tiempo desde el último tick COMPLETADO ≈ el intervalo de 300s).
+  // El bug previo: como intervalo(300s) > TICK_TIMEOUT(240s), todo tick arrancaba ya
+  // "vencido" (sinceTick~298>240) → un tick lento (30-40s por IO) quedaba en vuelo lo
+  // suficiente para que el watchdog le cayera y lo matara, creyendo que estaba colgado.
+  const tickRunningMs = tickInFlight ? Date.now() - tickStartedAt : 0
+  if (tickInFlight && tickRunningMs > TICK_TIMEOUT_MS) {
+    console.error(`[SCH-EXT] 🔴 WATCHDOG: tick en flight desde hace ${Math.floor(tickRunningMs/1000)}s (>${TICK_TIMEOUT_MS/1000}s). Matando proceso.`)
     process.exit(1)
   }
 }
@@ -1652,8 +1661,9 @@ async function runTickSafely() {
   }
   tickInFlight = true
   const start = Date.now()
+  tickStartedAt = start  // v0.8: el watchdog mide cuánto lleva ESTE tick, no sinceTick
   try {
-    await withTimeout(tick(), TICK_TIMEOUT_MS, 'tick')
+    await withTimeout(tick(), TICK_SOFT_TIMEOUT_MS, 'tick')
     lastTickAt = Date.now()
     const dur = Date.now() - start
     if (dur > 30_000) console.warn(`[SCH-EXT] ⚠️  tick lento: ${dur}ms`)

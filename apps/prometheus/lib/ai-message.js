@@ -37,7 +37,7 @@ const TYPE_RULES = {
     ],
   },
   follow_up_1: {
-    maxChars: 700,
+    maxChars: 280, // v0.8: cap typing-safe (mensajes largos reventaban el typing_complete timeout)
     description: 'primer mensaje de follow-up después de aceptar la conexión',
     rules: [
       'Esta persona acaba de aceptar tu invitación. Saluda casualmente.',
@@ -47,7 +47,7 @@ const TYPE_RULES = {
     ],
   },
   follow_up_2: {
-    maxChars: 700,
+    maxChars: 280, // v0.8: cap typing-safe
     description: 'segundo follow-up — la persona no respondió al primero',
     rules: [
       'Ya enviaste un primer mensaje sin respuesta. No insistas pero recuérdale el contexto.',
@@ -56,7 +56,7 @@ const TYPE_RULES = {
     ],
   },
   follow_up_3: {
-    maxChars: 700,
+    maxChars: 280, // v0.8: cap typing-safe
     description: 'tercer follow-up — último intento amistoso',
     rules: [
       'Ya enviaste 2 mensajes sin respuesta. Esta es la última vez que escribes.',
@@ -65,18 +65,18 @@ const TYPE_RULES = {
     ],
   },
   follow_up_4: {
-    maxChars: 700,
+    maxChars: 280, // v0.8: cap typing-safe
     description: 'cuarto follow-up — solo si el cliente lo configuró',
     rules: ['Persistencia estratégica. Aporta algo NUEVO y relevante.'],
   },
   follow_up_5: {
-    maxChars: 700,
+    maxChars: 280, // v0.8: cap typing-safe
     description: 'quinto y último follow-up',
     rules: ['Cierre formal y educado. "Si no es buen momento, todo bien."'],
   },
   // ── NUEVO Sub-Fase 3.8: respuestas contextuales (cuando lead nos escribe) ──
   fm_reply_1: {
-    maxChars: 700,
+    maxChars: 320, // v0.8: cap typing-safe (sin link de cal en este reply)
     description: 'PRIMERA respuesta al lead. Él te escribió, ahora le contestas.',
     rules: [
       'CRITICO: el lead te ESCRIBIÓ algo. Lee atentamente su mensaje y responde DIRECTAMENTE a lo que dijo.',
@@ -88,7 +88,7 @@ const TYPE_RULES = {
     ],
   },
   fm_reply_2: {
-    maxChars: 700,
+    maxChars: 400, // v0.8: cap typing-safe (deja espacio para el link de cal)
     description: 'SEGUNDA respuesta al lead. La conversación está activa. Mueve hacia la cita.',
     rules: [
       'El lead siguió la conversación contigo. Es buen momento de ser más directo.',
@@ -99,7 +99,7 @@ const TYPE_RULES = {
     ],
   },
   fm_reply_3: {
-    maxChars: 700,
+    maxChars: 400, // v0.8: cap typing-safe (deja espacio para el link de cal)
     description: 'TERCERA respuesta — cierre. Pregunta directa por fecha.',
     rules: [
       'Ya hubo intercambio. Es momento de cerrar con pregunta directa.',

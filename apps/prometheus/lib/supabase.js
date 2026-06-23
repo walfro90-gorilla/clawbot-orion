@@ -12,8 +12,31 @@ if (!key || key.includes('your_service')) {
   throw new Error('[DB] SUPABASE_SERVICE_ROLE_KEY not set in .env');
 }
 
+// v0.8 fix #2a: fetch con timeout (AbortController). Sin esto, una query colgada
+// (Supabase saturado de IO) cuelga el tick del scheduler >240s → el watchdog mata el
+// proceso (restart duro ~cada 2h). Con timeout, la query aborta rápido → postgrest
+// devuelve { data:null, error } → el tick lo trata como vacío y SIGUE, sin hard-kill.
+// Cubre TODAS las queries (también mata las "lecturas flaky"). Configurable por env.
+const QUERY_TIMEOUT_MS = parseInt(process.env.SUPABASE_QUERY_TIMEOUT_MS ?? '20000');
+
+function fetchWithTimeout(input, init = {}) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(
+    () => ctrl.abort(new Error(`supabase_query_timeout_${QUERY_TIMEOUT_MS}ms`)),
+    QUERY_TIMEOUT_MS
+  );
+  // Respeta un AbortSignal externo (p.ej. .abortSignal() de supabase) encadenándolo.
+  const external = init.signal;
+  if (external) {
+    if (external.aborted) ctrl.abort(external.reason);
+    else external.addEventListener('abort', () => ctrl.abort(external.reason), { once: true });
+  }
+  return fetch(input, { ...init, signal: ctrl.signal }).finally(() => clearTimeout(timer));
+}
+
 export const supabase = createClient(url, key, {
   auth: { persistSession: false },
+  global: { fetch: fetchWithTimeout },
 });
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
