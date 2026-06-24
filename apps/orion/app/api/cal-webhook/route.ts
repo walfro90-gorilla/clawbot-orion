@@ -17,11 +17,20 @@ function verifyCalSignature(body: string, signature: string | null): boolean {
   return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))
 }
 
-// Extract LEAD_ID=<uuid> from any string field in the payload
+// Extract LEAD_ID=<uuid> from any string field in the payload (description/notes/…)
 function extractLeadId(text: string | null | undefined): string | null {
   if (!text) return null
   const match = text.match(/LEAD_ID=([0-9a-f-]{36})/i)
   return match?.[1] ?? null
+}
+
+// El helper withLeadIdMetadata() embebe el lead como metadata[leadId]=<uuid> — un
+// uuid PELÓN, sin el prefijo "LEAD_ID=". extractLeadId() nunca lo cazaba → toda
+// reserva caía como no_lead_id (causa de "0 citas"). Aceptamos también el uuid directo.
+function asBareUuid(text: string | null | undefined): string | null {
+  if (!text) return null
+  const m = String(text).match(/^\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\s*$/i)
+  return m?.[1] ?? null
 }
 
 export async function POST(req: NextRequest) {
@@ -48,11 +57,14 @@ export async function POST(req: NextRequest) {
 
   const bookingPayload = payload?.payload ?? payload
 
-  // Try to extract leadId from common Cal.com fields where we embed it
+  // Try to extract leadId from common Cal.com fields where we embed it.
+  // metadata.leadId trae el uuid PELÓN (así lo manda withLeadIdMetadata); el resto
+  // de los campos pueden traerlo con prefijo LEAD_ID=<uuid> (fallback de notas).
   const leadId =
+    asBareUuid(bookingPayload?.metadata?.leadId) ??
+    extractLeadId(bookingPayload?.metadata?.leadId) ??
     extractLeadId(bookingPayload?.description) ??
     extractLeadId(bookingPayload?.responses?.notes?.value) ??
-    extractLeadId(bookingPayload?.metadata?.leadId) ??
     extractLeadId(bookingPayload?.additionalNotes) ??
     null
 
