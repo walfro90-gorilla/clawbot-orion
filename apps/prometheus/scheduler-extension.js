@@ -22,8 +22,10 @@ import {
   dispatchSearch, dispatchInvite, dispatchCheckInbox, dispatchCheckSentInvites, dispatchFollowup,
   dispatchCommand,
   checkCampaignActiveGates,
+  dispatchPostSearch, dispatchCommentOnPost, checkPostCampaignActiveGates,
+  getDailyCommentsToday, getEffectiveCommentCap,
 } from './lib/extension-dispatch.js'
-import { generateLinkedInMessage, generateLinkedInReply, personalizeFollowupMessage, hasLeftoverPlaceholder } from './lib/ai-message.js'
+import { generateLinkedInMessage, generateLinkedInReply, personalizeFollowupMessage, hasLeftoverPlaceholder, qualifyPost, generatePostComment } from './lib/ai-message.js'
 import { isSystemLinkedInAccount } from './lib/system-accounts.js'
 import { isGroupConversationName } from './lib/group-conversation.js'
 import { sweepQuarantineTimeout } from './lib/lead-failure.js'
@@ -261,13 +263,25 @@ async function tryInvitesForCampaign(campaign, account) {
     return { skipped: true, reason: 'batch_paused' }
   }
 
-  const gapMin = campaign.min_batch_gap_min ?? 30
+  // v0.8: gap de invite DINÁMICO — reparte el daily target en la ventana activa del día,
+  // con piso anti-ban + jitter. El TARGET configurado manda la cadencia: target 20 + ventana
+  // 6-21h (15h) → ~45min entre invites → ~20/día. Cambias el target y se recalcula solo.
+  // min_batch_gap_min > 0 = override manual conservador; 0 = dinámico (recomendado).
+  const cap = getEffectiveDailyCap(account, campaign)
+  const ANTIBAN_FLOOR_MIN = 25  // nunca más rápido que 1 invite/25min, pase lo que pase
+  let baseGapMin
+  if (campaign.min_batch_gap_min > 0) {
+    baseGapMin = Math.max(ANTIBAN_FLOOR_MIN, campaign.min_batch_gap_min)
+  } else {
+    const windowMin = Math.max(60, ((campaign.schedule_end_hour ?? 21) - (campaign.schedule_start_hour ?? 6)) * 60)
+    baseGapMin = Math.max(ANTIBAN_FLOOR_MIN, Math.round(windowMin / Math.max(1, cap)))
+  }
+  const gapMin = Math.max(ANTIBAN_FLOOR_MIN, Math.round(baseGapMin * (0.85 + Math.random() * 0.30)))  // jitter anti-ban ±15%
   const minsSince = minutesSince(campaign.last_batch_at)
   if (minsSince < gapMin) {
     return { skipped: true, reason: 'batch_gap_not_met', minsSince: Math.floor(minsSince), gapMin }
   }
 
-  const cap = getEffectiveDailyCap(account, campaign)
   const today = await getDailyActivityToday(account.id, account.timezone)
   // BUG FIX: el cap de invites debe contar SOLO invites, no invites+mensajes. Antes
   // sumaba messages_sent → las respuestas/FU (que tienen su PROPIO cap MAX_DAILY_MESSAGES)
@@ -1433,6 +1447,259 @@ async function runConnectivityHealthCheck(connectedIds) {
   }
 }
 
+// ── Post-Prospecting (v0.9) ───────────────────────────────────────────────────
+// Agente nuevo: busca POSTS donde alguien pide un servicio, califica con IA,
+// redacta un comentario value-first, y tras aprobación humana lo publica + conecta.
+// Tres pasos por tick (espejo de search / invites): buscar, calificar, comentar.
+
+// Cuántas oportunidades 'scraped' califica por tick por campaña. Cada una son ~2
+// llamadas Gemini (qualify + comment) con timeout propio de 30s — capamos bajo
+// para no acercarnos al soft-timeout del tick (120s).
+const POST_QUALIFY_BATCH = parseInt(process.env.POST_QUALIFY_BATCH ?? '2')
+
+async function tryPostSearchForCampaign(postCampaign, account) {
+  if (postCampaign.post_search_paused) {
+    return { skipped: true, reason: 'post_search_paused' }
+  }
+
+  // Reabastecer por CONTEO de oportunidades aún sin procesar (scraped) o esperando
+  // revisión (pending_review). Si hay suficientes, no buscamos más (no saturar la cola).
+  const { count: pendingCount } = await supabase
+    .from('post_opportunities')
+    .select('id', { count: 'exact', head: true })
+    .eq('post_campaign_id', postCampaign.id)
+    .in('status', ['scraped', 'qualifying', 'pending_review'])
+  const minPending = postCampaign.min_pending_threshold ?? 8
+  if ((pendingCount ?? 0) >= minPending) {
+    return { skipped: true, reason: 'enough_pending_opportunities', pendingCount, minPending }
+  }
+
+  const searchGapHours = postCampaign.search_gap_hours ?? 12
+  const minsSince = minutesSince(postCampaign.last_searched_at)
+  if (minsSince < searchGapHours * 60) {
+    return { skipped: true, reason: 'post_search_gap_not_met', minsSince: Math.floor(minsSince) }
+  }
+
+  const kws = postCampaign.post_keywords ?? []
+  if (kws.length === 0) {
+    return { skipped: true, reason: 'no_post_keywords' }
+  }
+  const idx = (postCampaign.last_search_keyword_idx ?? 0) % kws.length
+  const keyword = kws[idx]
+  const nextIdx = (idx + 1) % kws.length
+
+  if (DRY_RUN) {
+    console.log(`[SCH-EXT] DRY_RUN post_search "${postCampaign.name}" keyword="${keyword}"`)
+    return { dispatched: false, dryRun: true, keyword }
+  }
+
+  const cmdId = await dispatchPostSearch(account, postCampaign, keyword)
+  if (!cmdId) return { skipped: true, reason: 'dispatch_failed' }
+
+  await supabase.from('post_campaigns')
+    .update({ last_searched_at: new Date().toISOString(), last_search_keyword_idx: nextIdx })
+    .eq('id', postCampaign.id)
+
+  await logJob({
+    campaignId: postCampaign.shadow_campaign_id ?? null, accountId: account.id, jobType: 'post_search',
+    status: 'dispatched',
+    details: { commandId: cmdId, keyword, postCampaignId: postCampaign.id, pendingBefore: pendingCount ?? 0 },
+  })
+  return { dispatched: true, commandId: cmdId, keyword }
+}
+
+// Califica oportunidades 'scraped' con IA y redacta el comentario value-first.
+// Las que pasan el umbral → pending_review (esperan aprobación humana); las que no
+// → disqualified. Corre en el scheduler (no en el WS handler del bridge) para no
+// bloquear el dispatch de otros comandos.
+async function tryQualifyPostOpportunities(postCampaign) {
+  const { data: opps } = await supabase
+    .from('post_opportunities')
+    .select('id, post_text, author_name, author_headline')
+    .eq('post_campaign_id', postCampaign.id)
+    .eq('status', 'scraped')
+    .order('created_at', { ascending: true })
+    .limit(POST_QUALIFY_BATCH)
+  if (!opps || opps.length === 0) return { qualified: 0 }
+
+  const minScore = postCampaign.qualify_min_score ?? 6
+  let qualified = 0, disqualified = 0, errored = 0
+  for (const opp of opps) {
+    // Lock optimista: marca 'qualifying' para que un tick concurrente no la re-tome.
+    await supabase.from('post_opportunities').update({ status: 'qualifying' }).eq('id', opp.id)
+
+    const q = await qualifyPost(opp.post_text, postCampaign.service_description)
+    if (q.error) {
+      errored++
+      // Devolver a 'scraped' para reintentar en otro tick.
+      await supabase.from('post_opportunities').update({ status: 'scraped' }).eq('id', opp.id)
+      continue
+    }
+    if (!q.relevant || q.score < minScore) {
+      disqualified++
+      await supabase.from('post_opportunities').update({
+        status: 'disqualified',
+        qualify_relevant: q.relevant, qualify_score: q.score, qualify_reason: q.reason,
+        updated_at: new Date().toISOString(),
+      }).eq('id', opp.id)
+      continue
+    }
+
+    // Relevante → redactar comentario value-first (NUNCA recibe el pitch_note).
+    const c = await generatePostComment(opp, postCampaign)
+    if (c.error || !c.message) {
+      errored++
+      await supabase.from('post_opportunities').update({ status: 'scraped' }).eq('id', opp.id)
+      continue
+    }
+    qualified++
+    await supabase.from('post_opportunities').update({
+      status: 'pending_review',
+      qualify_relevant: true, qualify_score: q.score, qualify_reason: q.reason,
+      draft_comment: c.message,
+      updated_at: new Date().toISOString(),
+    }).eq('id', opp.id)
+  }
+  return { qualified, disqualified, errored }
+}
+
+// Despacha el comentario de UNA oportunidad aprobada por el humano (1 por tick).
+// El connect NO se dispara aquí — se encadena desde ingestCommentPosted al confirmarse
+// el comentario, garantizando el orden comenta → conecta.
+async function tryPostCommentsForCampaign(postCampaign, account) {
+  // Cap diario de comentarios (separado del de invites) + warmup.
+  const cap = getEffectiveCommentCap(account, postCampaign)
+  const commentsToday = await getDailyCommentsToday(account.id, account.timezone)
+  if (commentsToday >= cap) {
+    return { skipped: true, reason: 'daily_comment_cap_reached', commentsToday, cap }
+  }
+
+  // Gap dinámico entre comentarios (reparte el cap en la ventana activa) + jitter ±15%,
+  // con piso anti-ban. min_comment_gap_min > 0 = override manual.
+  const ANTIBAN_FLOOR_MIN = 30
+  let baseGapMin
+  if (postCampaign.min_comment_gap_min > 0) {
+    baseGapMin = Math.max(ANTIBAN_FLOOR_MIN, postCampaign.min_comment_gap_min)
+  } else {
+    const windowMin = Math.max(60, ((postCampaign.schedule_end_hour ?? 19) - (postCampaign.schedule_start_hour ?? 9)) * 60)
+    baseGapMin = Math.max(ANTIBAN_FLOOR_MIN, Math.round(windowMin / Math.max(1, cap)))
+  }
+  const gapMin = Math.max(ANTIBAN_FLOOR_MIN, Math.round(baseGapMin * (0.85 + Math.random() * 0.30)))
+  const minsSince = minutesSince(postCampaign.last_commented_at)
+  if (minsSince < gapMin) {
+    return { skipped: true, reason: 'comment_gap_not_met', minsSince: Math.floor(minsSince), gapMin }
+  }
+
+  const { data: opps } = await supabase
+    .from('post_opportunities')
+    .select('id, post_permalink, post_urn, draft_comment, edited_comment')
+    .eq('post_campaign_id', postCampaign.id)
+    .eq('status', 'approved')
+    .order('approved_at', { ascending: true })
+    .limit(1)
+  if (!opps || opps.length === 0) {
+    return { skipped: true, reason: 'no_approved_opportunities' }
+  }
+  const opp = opps[0]
+
+  if (DRY_RUN) {
+    console.log(`[SCH-EXT] DRY_RUN comment_on_post opp=${opp.id.slice(0,8)} "${(opp.edited_comment ?? opp.draft_comment ?? '').slice(0,60)}"`)
+    return { dispatched: false, dryRun: true, opportunityId: opp.id }
+  }
+
+  const cmdId = await dispatchCommentOnPost(account, opp)
+  if (!cmdId) return { skipped: true, reason: 'dispatch_failed' }
+
+  await supabase.from('post_opportunities')
+    .update({ status: 'dispatched', command_id: cmdId, updated_at: new Date().toISOString() })
+    .eq('id', opp.id)
+  await supabase.from('post_campaigns')
+    .update({ last_commented_at: new Date().toISOString() })
+    .eq('id', postCampaign.id)
+
+  await logJob({
+    campaignId: postCampaign.shadow_campaign_id ?? null, accountId: account.id, jobType: 'post_comment',
+    status: 'dispatched',
+    details: { commandId: cmdId, opportunityId: opp.id, postCampaignId: postCampaign.id, capUsage: `${commentsToday + 1}/${cap}` },
+  })
+  return { dispatched: 1, commandId: cmdId, opportunityId: opp.id, capUsage: `${commentsToday + 1}/${cap}` }
+}
+
+// Carga post-campañas activas con su cuenta joineada. Devuelve [] si la tabla no
+// existe aún (migración pendiente) — el agente queda inerte sin romper el tick.
+async function loadActivePostCampaigns() {
+  const { data, error } = await supabase
+    .from('post_campaigns')
+    .select(`
+      id, name, is_active, post_search_paused, shadow_campaign_id,
+      linkedin_account_id,
+      post_keywords, post_recency,
+      service_description, comment_rules, pitch_note, gemini_system_prompt, qualify_min_score,
+      daily_comment_target, min_comment_gap_min, search_gap_hours, min_pending_threshold,
+      schedule_start_hour, schedule_end_hour, schedule_days,
+      last_searched_at, last_commented_at, last_search_keyword_idx,
+      linkedin_accounts (
+        id, label, status, warmup_status, warmup_started_at,
+        extension_paused, extension_paused_until, timezone, cal_com_url,
+        extension_last_seen_at
+      )
+    `)
+    .eq('is_active', true)
+  if (error) {
+    // 42P01 = tabla inexistente. Cualquier error → loguea y sigue (no rompe el tick).
+    if (!/relation .* does not exist|42P01/i.test(error.message ?? '')) {
+      console.error(`[SCH-EXT] loadActivePostCampaigns error: ${error.message}`)
+    }
+    return []
+  }
+  return data ?? []
+}
+
+async function runPostCampaigns(connectedIds, stressLockedAccount) {
+  const postCampaigns = await loadActivePostCampaigns()
+  if (postCampaigns.length === 0) return
+  console.log(`[SCH-EXT] ${postCampaigns.length} post-campañas activas`)
+
+  for (const pc of postCampaigns) {
+    const account = pc.linkedin_accounts
+    if (!account) { console.log(`[SCH-EXT] Post-campaña "${pc.name}" sin cuenta — skip`); continue }
+    if (!connectedIds.has(account.id)) continue
+    if (account.id === stressLockedAccount) continue
+
+    const skipReason = await checkPostCampaignActiveGates(pc, account)
+    if (skipReason) {
+      const key = `post:${pc.id}`
+      if (lastSkipReason.get(key) !== skipReason) {
+        lastSkipReason.set(key, skipReason)
+        console.log(`[SCH-EXT] post "${pc.name}" — gate skip: ${skipReason}`)
+      }
+      continue
+    }
+    lastSkipReason.delete(`post:${pc.id}`)
+
+    console.log(`[SCH-EXT] ━━ 📝 "${pc.name}" (${account.label}) ━━`)
+
+    const searchRes = await tryPostSearchForCampaign(pc, account)
+    if (searchRes.dispatched) console.log(`[SCH-EXT]   ✅ post_search dispatched ("${searchRes.keyword}")`)
+    else console.log(`[SCH-EXT]   ⏭️  post_search: ${searchRes.reason}`)
+
+    try {
+      const qRes = await tryQualifyPostOpportunities(pc)
+      if (qRes.qualified || qRes.disqualified || qRes.errored) {
+        console.log(`[SCH-EXT]   🧠 qualify: ${qRes.qualified} pending_review, ${qRes.disqualified} descartadas, ${qRes.errored} err`)
+      }
+    } catch (err) {
+      console.error(`[SCH-EXT]   qualify threw: ${err.message}`)
+    }
+
+    const commentRes = await tryPostCommentsForCampaign(pc, account)
+    if (commentRes.dispatched) console.log(`[SCH-EXT]   ✅ comment_on_post dispatched (${commentRes.capUsage})`)
+    else console.log(`[SCH-EXT]   ⏭️  comments: ${commentRes.reason}`)
+
+    await sleep(randInt(1000, 3000))
+  }
+}
+
 async function tick() {
   const { mxDate, mxHour } = mxTime()
   console.log(`\n[SCH-EXT] ════════════════════════════`)
@@ -1593,6 +1860,14 @@ async function tick() {
 
     // Pequeño jitter entre campañas (no ráfaga)
     await sleep(randInt(1000, 3000))
+  }
+
+  // POST-PROSPECTING (v0.9): agente nuevo, corre junto a los demás. Inerte si no
+  // hay post-campañas activas o si la tabla aún no existe (migración pendiente).
+  try {
+    await runPostCampaigns(connectedIds, stressLockedAccount)
+  } catch (err) {
+    console.error(`[SCH-EXT] runPostCampaigns threw: ${err.message}`)
   }
 
   // INBOX + CHECK_SENT_INVITES per-account (only in inbox hours, per account TZ)

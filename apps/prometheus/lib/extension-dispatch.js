@@ -725,3 +725,90 @@ export async function checkCampaignActiveGates(campaign, account) {
 
   return null  // OK
 }
+
+// ── Post-Prospecting (v0.9) ──────────────────────────────────────────────────
+
+// Contador diario de comentarios públicos (columna separada, NO comparte el
+// presupuesto de invitaciones). El RPC increment_daily_activity('comments_posted')
+// lo incrementa desde el bridge tras un comentario exitoso.
+export async function getDailyCommentsToday(accountId, tz = DEFAULT_TZ) {
+  const { data } = await supabase
+    .from('daily_activity')
+    .select('comments_posted')
+    .eq('linkedin_account_id', accountId)
+    .eq('date', mxDateStr(tz))
+    .maybeSingle()
+  return data?.comments_posted ?? 0
+}
+
+// Cap efectivo de comentarios/día: target de la campaña, recortado por warmup.
+// Cuentas frías comentan muy poco (1-2) — el comentario público es más riesgoso
+// que una invitación privada.
+export function getEffectiveCommentCap(account, postCampaign) {
+  const target = postCampaign.daily_comment_target ?? 5
+  const ws = account.warmup_status ?? 'cold'
+  if (ws === 'cold') return Math.min(target, 2)
+  if (ws === 'warming') return Math.min(target, 4)
+  return target
+}
+
+/**
+ * Despacha una búsqueda de POSTS (no perfiles). Espejo de dispatchSearch.
+ * @param {object} account
+ * @param {object} postCampaign
+ * @param {string} keyword - keyword rotada (post_keywords[idx])
+ */
+export async function dispatchPostSearch(account, postCampaign, keyword) {
+  const finalKeyword = keyword
+    ?? postCampaign.post_keywords?.[0]
+    ?? 'busco recomendación'
+  return dispatchCommand(account.id, 'search_posts', {
+    postCampaignId: postCampaign.id,
+    keywords:       finalKeyword,
+    recency:        postCampaign.post_recency ?? 'past-week',
+    targetCount:    20,
+    maxScrolls:     12,
+  }, { expiresInMinutes: 15 })
+}
+
+/**
+ * Despacha la publicación de un comentario en un post. Expiry dinámico por
+ * longitud del comentario (humanTypeContentEditable es lento), igual que
+ * dispatchFollowup. El connect NO se despacha aquí — se encadena desde el
+ * ingest del comentario exitoso (extension-bridge.ingestCommentPosted).
+ * @param {object} account
+ * @param {object} opportunity - fila de post_opportunities (status='approved')
+ */
+export async function dispatchCommentOnPost(account, opportunity) {
+  const comment = opportunity.edited_comment ?? opportunity.draft_comment ?? ''
+  const msgLen = comment.length
+  const hardMs = msgLen > 0 ? Math.min(360_000, msgLen * 550 + 90_000) : 90_000
+  const expiresInMinutes = Math.max(4, Math.min(8, Math.ceil((hardMs + 45_000) / 60_000)))
+  return dispatchCommand(account.id, 'comment_on_post', {
+    opportunityId:  opportunity.id,
+    postPermalink:  opportunity.post_permalink,
+    postUrn:        opportunity.post_urn,
+    comment,
+  }, { expiresInMinutes })
+}
+
+/**
+ * Gate compuesto para post-campañas. Análogo a checkCampaignActiveGates pero
+ * usando los campos de post_campaigns. Devuelve null si puede correr, o la razón.
+ */
+export async function checkPostCampaignActiveGates(postCampaign, account) {
+  if (!postCampaign.is_active) return 'post_campaign_inactive'
+  if (account.status === 'banned') return 'account_banned'
+  if (account.extension_paused) return 'extension_paused_by_user'
+
+  const tz = account.timezone || DEFAULT_TZ
+  const startHour = postCampaign.schedule_start_hour ?? 9
+  const endHour = postCampaign.schedule_end_hour ?? 19
+  const days = postCampaign.schedule_days?.length ? postCampaign.schedule_days : DEFAULT_DAYS
+  if (!isBusinessHours(startHour, endHour, days, tz)) return 'outside_business_hours'
+
+  const online = await isExtensionOnline(account.id)
+  if (!online) return 'extension_offline'
+
+  return null  // OK
+}

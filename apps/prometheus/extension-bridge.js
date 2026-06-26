@@ -22,7 +22,7 @@ import http from 'http'
 import { URL } from 'url'
 import { createClient } from '@supabase/supabase-js'
 import dotenv from 'dotenv'
-import { checkAndKillLeadIfStuck, checkAccountHealthAndPause } from './lib/extension-dispatch.js'
+import { checkAndKillLeadIfStuck, checkAccountHealthAndPause, dispatchInvite } from './lib/extension-dispatch.js'
 import { isSystemLinkedInAccount } from './lib/system-accounts.js'
 import { isGroupConversationName } from './lib/group-conversation.js'
 import { applyLeadAttemptOutcome, isNonFaultError } from './lib/lead-failure.js'
@@ -768,6 +768,23 @@ async function handleCommandResult(msg) {
       console.error(`[bridge] ingest check_sent_invites failed:`, err.message)
     }
   }
+  // ── Post-Prospecting (v0.9) ──────────────────────────────────────────────
+  // search_posts ingest — inserta post_opportunities nuevas (status='scraped')
+  if (!isError && action === 'search_posts' && result?.status === 'ok' && Array.isArray(result?.posts)) {
+    try {
+      await ingestSearchPosts(commandId, result)
+    } catch (err) {
+      console.error(`[bridge] ingest search_posts failed:`, err.message)
+    }
+  }
+  // comment_on_post ingest — gradúa lead + encadena connect (o marca failed)
+  if (action === 'comment_on_post') {
+    try {
+      await ingestCommentPosted(commandId, result, isError)
+    } catch (err) {
+      console.error(`[bridge] ingest comment_on_post failed:`, err.message)
+    }
+  }
 }
 
 // ── Ingest: check_sent_invites → marca accepts (leads que dejaron de estar pending)
@@ -934,6 +951,222 @@ async function ingestSearch(commandId, result) {
   }
 
   console.log(`[bridge] ✅ search ingested: ${toInsert.length} leads nuevos (${profiles.length - toInsert.length} duplicados) en campaña ${campaignId.slice(0,8)}`)
+}
+
+// ── Ingest: search_posts → inserta post_opportunities (status='scraped') ─────
+// La calificación con IA y la redacción del comentario las hace el scheduler
+// (tryQualifyPostOpportunities), NO aquí, para no bloquear el WS handler.
+async function ingestSearchPosts(commandId, result) {
+  const { data: cmd } = await supabase
+    .from('extension_commands')
+    .select('account_id, payload')
+    .eq('id', commandId)
+    .single()
+  if (!cmd?.account_id) return
+
+  const postCampaignId = cmd.payload?.postCampaignId
+  if (!postCampaignId) {
+    console.warn(`[bridge] search_posts ingest: payload sin postCampaignId`)
+    return
+  }
+
+  const posts = (result.posts ?? []).filter(p => p?.postUrn && p?.authorProfileUrl)
+  const skippedNoAuthor = (result.posts ?? []).length - posts.length
+  if (posts.length === 0) {
+    console.log(`[bridge] search_posts ${commandId.slice(0,8)}: 0 posts con autor (${skippedNoAuthor} sin /in/)`)
+    return
+  }
+
+  // Dedupe contra oportunidades existentes por post_urn (la unique constraint
+  // también lo protege; esto evita el ruido de errores de inserción).
+  const urns = posts.map(p => p.postUrn)
+  const { data: existing } = await supabase
+    .from('post_opportunities')
+    .select('post_urn')
+    .eq('post_campaign_id', postCampaignId)
+    .in('post_urn', urns)
+  const existingSet = new Set((existing ?? []).map(o => o.post_urn))
+
+  const toInsert = posts
+    .filter(p => !existingSet.has(p.postUrn))
+    .map(p => ({
+      post_campaign_id:    postCampaignId,
+      linkedin_account_id: cmd.account_id,
+      post_urn:            p.postUrn,
+      post_permalink:      p.postPermalink ?? null,
+      post_text:           (p.postText ?? '').slice(0, 4000),
+      author_name:         p.authorName ?? null,
+      author_profile_url:  p.authorProfileUrl,
+      author_headline:     p.authorHeadline ?? null,
+      status:              'scraped',
+    }))
+
+  if (toInsert.length === 0) {
+    console.log(`[bridge] search_posts ${commandId.slice(0,8)}: ${posts.length} posts, todos duplicados`)
+    return
+  }
+
+  // ignoreDuplicates por si hay carrera con la unique (post_campaign_id, post_urn).
+  const { error } = await supabase
+    .from('post_opportunities')
+    .upsert(toInsert, { onConflict: 'post_campaign_id,post_urn', ignoreDuplicates: true })
+  if (error) {
+    console.error(`[bridge] search_posts insert error:`, error.message)
+    return
+  }
+  console.log(`[bridge] ✅ search_posts ingested: ${toInsert.length} oportunidades nuevas (${posts.length - toInsert.length} dup, ${skippedNoAuthor} sin autor) en post-campaña ${postCampaignId.slice(0,8)}`)
+}
+
+// ── Ingest: comment_on_post → gradúa lead + encadena connect (o marca failed) ─
+async function ingestCommentPosted(commandId, result, isError) {
+  const { data: cmd } = await supabase
+    .from('extension_commands')
+    .select('account_id, payload')
+    .eq('id', commandId)
+    .single()
+  if (!cmd?.account_id) return
+
+  const opportunityId = cmd.payload?.opportunityId
+  if (!opportunityId) {
+    console.warn(`[bridge] comment_on_post ingest: payload sin opportunityId`)
+    return
+  }
+
+  const { data: opp } = await supabase
+    .from('post_opportunities')
+    .select('id, post_campaign_id, post_urn, post_permalink, post_text, author_name, author_profile_url, author_headline, lead_id, status')
+    .eq('id', opportunityId)
+    .single()
+  if (!opp) {
+    console.warn(`[bridge] comment_on_post ingest: oportunidad ${opportunityId.slice(0,8)} no encontrada`)
+    return
+  }
+
+  // Idempotencia: si ya se graduó (lead_id puesto / status posted), no repetir.
+  if (opp.lead_id || opp.status === 'posted') {
+    console.log(`[bridge] comment_on_post ${commandId.slice(0,8)}: oportunidad ya posteada/graduada — skip`)
+    return
+  }
+
+  // Fallo del comentario → marcar failed, NO graduar ni conectar.
+  if (isError || result?.status !== 'posted') {
+    await supabase.from('post_opportunities').update({
+      status: 'failed',
+      last_error: (result?.error ?? result?.status ?? 'unknown').toString().slice(0, 200),
+      updated_at: new Date().toISOString(),
+    }).eq('id', opportunityId)
+    console.log(`[bridge] ⚠️ comment_on_post falló para opp ${opportunityId.slice(0,8)}: ${result?.error ?? result?.status}`)
+    return
+  }
+
+  if (!opp.author_profile_url) {
+    // No debería pasar (filtramos en scrape), pero sin URL no se puede graduar.
+    await supabase.from('post_opportunities').update({
+      status: 'failed', last_error: 'no_author_profile_url', updated_at: new Date().toISOString(),
+    }).eq('id', opportunityId)
+    return
+  }
+
+  // Cargar la post-campaña para shadow_campaign_id + pitch_note.
+  const { data: pc } = await supabase
+    .from('post_campaigns')
+    .select('shadow_campaign_id, pitch_note, name')
+    .eq('id', opp.post_campaign_id)
+    .single()
+  const shadowCampaignId = pc?.shadow_campaign_id ?? null
+  const commentText = cmd.payload?.comment ?? null
+
+  // Graduar a lead. Dedup contra un lead existente con la misma URL en la shadow campaign.
+  let leadId = null
+  const { data: existingLead } = await supabase
+    .from('leads')
+    .select('id')
+    .eq('linkedin_url', opp.author_profile_url)
+    .eq('campaign_id', shadowCampaignId)
+    .maybeSingle()
+  if (existingLead?.id) {
+    leadId = existingLead.id
+  } else {
+    const { data: newLead, error: leadErr } = await supabase
+      .from('leads')
+      .insert({
+        campaign_id:  shadowCampaignId,
+        linkedin_url: opp.author_profile_url,
+        full_name:    opp.author_name ?? null,
+        profile_data: {
+          headline: opp.author_headline ?? null,
+          source: 'post',
+          post_urn: opp.post_urn,
+          post_permalink: opp.post_permalink,
+          post_text: (opp.post_text ?? '').slice(0, 1000),
+        },
+        status:     'commented',
+        source:     'post',
+        scraped_at: new Date().toISOString(),
+      })
+      .select('id')
+      .single()
+    if (leadErr) {
+      console.error(`[bridge] comment_on_post graduación lead falló: ${leadErr.message}`)
+      await supabase.from('post_opportunities').update({
+        status: 'failed', last_error: `graduation_failed: ${leadErr.message}`.slice(0, 200), updated_at: new Date().toISOString(),
+      }).eq('id', opportunityId)
+      return
+    }
+    leadId = newLead.id
+  }
+
+  // Marcar la oportunidad posteada + linkear el lead.
+  await supabase.from('post_opportunities').update({
+    status: 'posted', posted_at: new Date().toISOString(), lead_id: leadId, updated_at: new Date().toISOString(),
+  }).eq('id', opportunityId)
+
+  // Conversation (initiated) + evento comment_posted.
+  const { data: conv } = await supabase
+    .from('conversations')
+    .upsert({
+      lead_id:             leadId,
+      linkedin_account_id: cmd.account_id,
+      status:              'initiated',
+      last_message_at:     new Date().toISOString(),
+      last_message_text:   commentText ? `[Comentario]: ${commentText.slice(0, 180)}` : '[Comentario publicado]',
+    }, { onConflict: 'lead_id' })
+    .select('id')
+    .single()
+  if (conv?.id) {
+    const { error: evErr } = await supabase.from('conversation_events').insert({
+      conversation_id: conv.id,
+      event_type:      'comment_posted',
+      direction:       'outbound',
+      content:         commentText ? commentText.slice(0, 4000) : null,
+      sent_at:         new Date().toISOString(),
+      sent_via:        'orion_auto',
+      metadata:        { post_urn: opp.post_urn, post_permalink: opp.post_permalink },
+    })
+    if (evErr) console.error(`[bridge] ❌ comment_posted event insert: ${evErr.message}`)
+  }
+
+  // Contador diario de comentarios (separado del de invites).
+  const { error: incErr } = await supabase.rpc('increment_daily_activity', {
+    p_account_id: cmd.account_id, p_field: 'comments_posted',
+  })
+  if (incErr) console.error(`[bridge] ❌ RPC increment_daily_activity (comments_posted) failed: ${incErr.message}`)
+
+  await supabase.from('activity_log').insert({
+    linkedin_account_id: cmd.account_id,
+    lead_id:             leadId,
+    action:              'comment_on_post',
+    result:              'success',
+    details:             { postUrn: opp.post_urn, opportunityId },
+  }).then(({ error }) => { if (error) console.warn(`[bridge] activity_log (comment_on_post) failed: ${error.message}`) })
+
+  // Encadenar el connect con la nota PRIVADA de pitch. ingestSendInvite lo lleva
+  // a status='invite_sent' → de aquí entra al pipeline normal (check_inbox → connected → FU).
+  const cmdId = await dispatchInvite({ id: cmd.account_id }, { id: leadId, linkedin_url: opp.author_profile_url }, {
+    message: pc?.pitch_note ?? null,
+    dryRun: false,
+  })
+  console.log(`[bridge] ✅ comment_on_post: opp ${opportunityId.slice(0,8)} posteado → lead ${leadId.slice(0,8)} graduado → connect ${cmdId ? cmdId.slice(0,8) : 'FALLÓ'} (pitch privado)`)
 }
 
 // ── Ingest: send_followup → actualizar lead.last_followup_at + daily_activity

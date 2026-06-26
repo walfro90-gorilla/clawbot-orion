@@ -551,6 +551,13 @@ async function executeCommand(commandId, action, payload) {
       const searchUrl = buildSearchUrl(payload ?? {})
       console.log(`[Orion] search → ${searchUrl}`)
       tab = await navigateTabAndWait(searchUrl, 20000)
+    } else if (action === 'search_posts') {
+      const postSearchUrl = buildPostSearchUrl(payload ?? {})
+      console.log(`[Orion] search_posts → ${postSearchUrl}`)
+      tab = await navigateTabAndWait(postSearchUrl, 20000)
+    } else if (action === 'comment_on_post' && payload?.postPermalink) {
+      console.log(`[Orion] comment_on_post → ${payload.postPermalink}`)
+      tab = await navigateTabAndWait(payload.postPermalink, 15000)
     } else if (action === 'check_inbox') {
       // Auto-navegar a /messaging/ si no estamos ya ahí (consistencia con
       // send_invite/send_followup). content.js requiere estar en /messaging/.
@@ -701,6 +708,23 @@ function buildSearchUrl(payload) {
   // content.js post-filter por substring (menos eficiente pero universal).
   const geoUrns = locationsToGeoUrns(payload.locations)
   if (geoUrns.length) params.set('geoUrn', JSON.stringify(geoUrns))
+  return `${base}?${params.toString()}`
+}
+
+// Post-Prospecting (v0.9): URL de búsqueda de CONTENIDO (posts), no de personas.
+// Surface: /search/results/content/?keywords=...&datePosted="past-week". Scroll
+// infinito (content.js searchPosts no pagina). recency ∈ past-24h|past-week|past-month.
+function buildPostSearchUrl(payload) {
+  const base = 'https://www.linkedin.com/search/results/content/'
+  const params = new URLSearchParams()
+  if (payload.keywords) params.set('keywords', payload.keywords)
+  params.set('origin', 'GLOBAL_SEARCH_HEADER')
+  const recency = payload.recency ?? 'past-week'
+  if (['past-24h', 'past-week', 'past-month'].includes(recency)) {
+    params.set('datePosted', `"${recency}"`)
+  }
+  // Ordenar por más recientes (los pedidos de servicio decaen rápido).
+  params.set('sortBy', '"date_posted"')
   return `${base}?${params.toString()}`
 }
 

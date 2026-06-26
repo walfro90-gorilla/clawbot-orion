@@ -147,6 +147,10 @@ export default async function CampaignsPage({ searchParams }: { searchParams: Pr
     `)
     .order("created_at", { ascending: false })
 
+  // Ocultar shadow campaigns (las que respaldan los follow-ups de post-prospecting).
+  // is_shadow es NOT NULL default false → todas las campañas normales pasan.
+  campQuery = (campQuery as any).eq("is_shadow", false)
+
   if (isRestricted && linkedAccountId) {
     campQuery = campQuery.eq("linkedin_account_id", linkedAccountId)
   }

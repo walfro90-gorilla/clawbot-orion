@@ -1365,6 +1365,10 @@ async function executeAction(action, payload) {
       return await sendFollowup(payload)
     case 'search':
       return await searchLeads(payload)
+    case 'search_posts':
+      return await searchPosts(payload)
+    case 'comment_on_post':
+      return await commentOnPost(payload)
     case 'capture_session':
       return await captureSession()
     default:
@@ -4323,6 +4327,257 @@ async function humanTypeContentEditable(el, text, options = {}) {
 // los perfiles aunque geoUrn ya filtró server-side → Wal/Josh scrapeaban 0.
 function _normForFilter(s) {
   return String(s ?? '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+}
+
+// ── Post-Prospecting (v0.9) ──────────────────────────────────────────────────
+// search_posts: scrapea /search/results/content/ (posts donde alguien pide algo).
+// A diferencia de people-search, content-search es SCROLL INFINITO en una sola
+// página → no navegamos entre páginas (evita la reinyección de content.js que
+// rompe el scrape multi-página). Hacemos scroll + extract hasta target o sin
+// crecimiento. background.js construye la URL y navega; aquí solo scrapeamos.
+async function searchPosts(payload = {}) {
+  const targetCount = Math.min(payload.targetCount ?? 20, 60)
+  const maxScrolls = Math.min(payload.maxScrolls ?? 12, 30)
+
+  console.log(`[Orion content] searchPosts target=${targetCount} maxScrolls=${maxScrolls} url=${location.href}`)
+
+  if (!/\/search\/results\/content/.test(location.pathname)) {
+    return { action: 'search_posts', status: 'error', error: 'not_on_content_search_page', currentUrl: location.href }
+  }
+
+  const containerSel = await waitForSelector(['main', 'div.search-results-container'], 12000)
+  if (!containerSel) {
+    return { action: 'search_posts', status: 'error', error: 'results_container_not_found', currentUrl: location.href }
+  }
+  await sleep(1500)
+
+  const collected = []
+  const seenUrns = new Set()
+  let stopReason = null
+  let noGrowthStreak = 0
+
+  for (let scroll = 0; scroll < maxScrolls && collected.length < targetCount; scroll++) {
+    const before = collected.length
+    const pagePosts = extractPostsFromPage()
+    for (const p of pagePosts) {
+      if (!p.postUrn || seenUrns.has(p.postUrn)) continue
+      if (!p.authorProfileUrl) continue  // sin /in/ del autor no se puede graduar a lead
+      seenUrns.add(p.postUrn)
+      collected.push(p)
+      if (collected.length >= targetCount) break
+    }
+    console.log(`[Orion content] searchPosts scroll ${scroll + 1}: +${collected.length - before} (total ${collected.length}/${targetCount})`)
+
+    if (collected.length >= targetCount) { stopReason = 'target_reached'; break }
+
+    // Distinguir captcha / empty-state / drift en el primer scroll si no hay nada.
+    if (scroll === 0 && collected.length === 0) {
+      const bodyTxt = (document.body?.innerText ?? '').toLowerCase()
+      const captchaSignals = ['captcha', 'verify you are human', 'verifica que eres humano', 'security check', 'unusual activity']
+      if (captchaSignals.some(s => bodyTxt.includes(s))) {
+        return { action: 'search_posts', status: 'error', error: 'captcha_detected', currentUrl: location.href }
+      }
+      const broadActivity = document.querySelectorAll('[data-urn^="urn:li:activity:"], [data-id^="urn:li:activity:"]').length
+      const noResultsSignals = ['no se encontraron resultados', 'no hay resultados', 'no results', 'try different keywords', 'prueba con otras palabras']
+      if (broadActivity === 0 || noResultsSignals.some(s => bodyTxt.includes(s))) {
+        return {
+          action: 'search_posts', status: 'ok', posts: [], stopReason: 'no_results_found',
+          scrapedAt: new Date().toISOString(), debugSample: { broadActivity },
+        }
+      }
+      // Hay activities en el DOM pero el extractor sacó 0 → drift real.
+      return {
+        action: 'search_posts', status: 'error', error: 'no_posts_selector_may_have_changed',
+        currentUrl: location.href, debugSample: { broadActivity, bodyTextSnippet: bodyTxt.slice(0, 400) },
+      }
+    }
+
+    // Anti-loop: si 2 scrolls seguidos no agregan nada nuevo, paramos (feed agotado).
+    if (collected.length === before) {
+      noGrowthStreak++
+      if (noGrowthStreak >= 2) { stopReason = 'no_growth'; break }
+    } else {
+      noGrowthStreak = 0
+    }
+
+    // Scroll humano hacia abajo para hidratar más posts (infinite scroll).
+    window.scrollBy(0, randInt(700, 1100))
+    await sleep(randInt(1500, 3200))
+  }
+
+  if (!stopReason) stopReason = 'max_scrolls'
+
+  return {
+    action: 'search_posts',
+    status: 'ok',
+    posts: collected,
+    stopReason,
+    totalFound: collected.length,
+    scrapedAt: new Date().toISOString(),
+  }
+}
+
+// Extrae posts del feed/content-search. CLAVE: la unidad es el POST (no la persona),
+// seleccionada por activity URN; NO hay un anchor /in/ por-item como en people-search.
+// El URL del autor sale del PRIMER /in/ del bloque actor (anti wrong-person).
+function extractPostsFromPage() {
+  const results = []
+  const seen = new Set()
+  const containers = Array.from(document.querySelectorAll(
+    'div.feed-shared-update-v2[data-urn], div[data-urn^="urn:li:activity:"], [data-id^="urn:li:activity:"]'
+  ))
+
+  for (const card of containers) {
+    const urn = card.getAttribute('data-urn') || card.getAttribute('data-id') || ''
+    if (!/urn:li:activity:/.test(urn)) continue
+    if (seen.has(urn)) continue
+    seen.add(urn)
+
+    // Autor: PRIMER /in/ dentro del bloque actor (evita matchear comentaristas/menciones).
+    const actorBlock = card.querySelector(
+      '.update-components-actor, .update-components-actor__container, [class*="update-components-actor"]'
+    ) || card
+    const authorLink = actorBlock.querySelector('a[href*="/in/"]')
+    let authorProfileUrl = null
+    if (authorLink) {
+      const href = authorLink.getAttribute('href') || ''
+      const full = href.startsWith('http') ? href : `https://www.linkedin.com${href}`
+      authorProfileUrl = full.split('?')[0].replace(/\/$/, '') + '/'
+      if (!authorProfileUrl.includes('/in/')) authorProfileUrl = null
+    }
+
+    // Nombre del autor: título del actor o text del link.
+    let authorName = null
+    const titleEl = card.querySelector(
+      '.update-components-actor__title, [class*="update-components-actor__title"]'
+    )
+    if (titleEl) authorName = (titleEl.textContent || '').replace(/\s+/g, ' ').trim()
+    if (!authorName && authorLink) {
+      authorName = Array.from(authorLink.childNodes).filter(n => n.nodeType === 3)
+        .map(n => n.textContent.trim()).filter(Boolean).join(' ').trim()
+    }
+    // El título suele venir duplicado ("Juan Pérez\nJuan Pérez • 2do"); quedarnos la 1ª línea.
+    if (authorName) authorName = authorName.split('\n')[0].split('•')[0].trim().slice(0, 120)
+
+    // Headline del autor.
+    let authorHeadline = null
+    const descEl = card.querySelector(
+      '.update-components-actor__description, [class*="update-components-actor__description"]'
+    )
+    if (descEl) authorHeadline = (descEl.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 300)
+
+    // Texto del post.
+    let postText = null
+    const textEl = card.querySelector(
+      '.update-components-text, .feed-shared-update-v2__description, [class*="update-components-update-v2__commentary"], [class*="feed-shared-inline-show-more-text"]'
+    )
+    if (textEl) postText = (textEl.textContent || '').replace(/\s+/g, ' ').trim()
+
+    // Sin texto o sin autor no sirve (no calificable / no graduable).
+    if (!postText || postText.length < 10) continue
+
+    results.push({
+      postUrn: urn,
+      postPermalink: `https://www.linkedin.com/feed/update/${urn}/`,
+      postText: postText.slice(0, 4000),
+      authorName,
+      authorProfileUrl,
+      authorHeadline,
+    })
+  }
+  return results
+}
+
+// comment_on_post: publica un comentario en el post (background ya navegó al permalink).
+// Reusa humanClick + humanTypeContentEditable. Verifica que el editor se vacíe tras
+// publicar (Quill limpia en éxito). Detecta captcha post-submit.
+async function commentOnPost(payload = {}) {
+  const comment = String(payload.comment ?? '').trim()
+  if (!comment) {
+    return { action: 'comment_on_post', status: 'error', error: 'empty_comment' }
+  }
+
+  // Asegurar que el post cargó.
+  const ok = await waitForSelector(['.feed-shared-update-v2', 'main', 'div[data-urn^="urn:li:activity:"]'], 12000)
+  if (!ok) {
+    return { action: 'comment_on_post', status: 'error', error: 'post_not_loaded', currentUrl: location.href }
+  }
+  await sleep(randInt(1200, 2500))
+
+  // Localizar el editor de comentarios. Si no está montado, click en "Comentar".
+  const editorSels = [
+    '.comments-comment-box .ql-editor[contenteditable="true"]',
+    '.comments-comment-texteditor .ql-editor[contenteditable="true"]',
+    'div.ql-editor[contenteditable="true"][data-placeholder]',
+  ]
+  let editor = await waitForSelector(editorSels, 4000)
+  if (!editor) {
+    // Revelar el composer: botón "Comentar"/"Comment".
+    const commentBtn = Array.from(document.querySelectorAll('button')).find(b => {
+      const al = (b.getAttribute('aria-label') || '').toLowerCase()
+      const tx = (b.textContent || '').toLowerCase()
+      return /coment|comment/.test(al) || /^\s*(comentar|comment)\s*$/.test(tx)
+    })
+    if (commentBtn) {
+      await humanClick(commentBtn)
+      await sleep(randInt(1000, 2000))
+      editor = await waitForSelector(editorSels, 5000)
+    }
+  }
+  if (!editor) {
+    return { action: 'comment_on_post', status: 'error', error: 'comment_box_not_found', currentUrl: location.href }
+  }
+
+  // Escribir el comentario humanamente.
+  await humanClick(editor)
+  await sleep(randInt(300, 700))
+  try {
+    await humanTypeContentEditable(editor, comment)
+  } catch (err) {
+    return { action: 'comment_on_post', status: 'error', error: `typing_failed_${String(err.message ?? err).slice(0,60)}` }
+  }
+  await sleep(randInt(600, 1400))
+
+  // Localizar el botón de publicar (se habilita cuando hay texto).
+  const submitSels = [
+    '.comments-comment-box__submit-button',
+    'button.comments-comment-box__submit-button--cr',
+    'button[class*="comments-comment-box__submit-button"]',
+  ]
+  let submitBtn = null
+  for (const s of submitSels) {
+    const b = document.querySelector(s)
+    if (b && !b.disabled) { submitBtn = b; break }
+  }
+  // Fallback: botón con label Publicar/Comentar/Post dentro del comment box.
+  if (!submitBtn) {
+    const box = editor.closest('.comments-comment-box, .comments-comment-texteditor') || document
+    submitBtn = Array.from(box.querySelectorAll('button')).find(b => {
+      const al = (b.getAttribute('aria-label') || '').toLowerCase()
+      const tx = (b.textContent || '').toLowerCase()
+      return !b.disabled && (/publicar|^post$|comentar ahora/.test(al) || /^\s*(publicar|post|comentar)\s*$/.test(tx))
+    })
+  }
+  if (!submitBtn) {
+    return { action: 'comment_on_post', status: 'error', error: 'submit_button_not_found', currentUrl: location.href }
+  }
+
+  await humanClick(submitBtn)
+  await sleep(randInt(1800, 3200))
+
+  // Captcha/banner post-submit.
+  const bodyTxt = (document.body?.innerText ?? '').toLowerCase()
+  if (['captcha', 'verify you are human', 'verifica que eres humano', 'security check', 'unusual activity'].some(s => bodyTxt.includes(s))) {
+    return { action: 'comment_on_post', status: 'error', error: 'captcha_detected', currentUrl: location.href }
+  }
+
+  // Verificación: Quill limpia el editor al publicar con éxito.
+  const editorEmptied = !editor.isConnected || (editor.textContent || '').trim().length === 0
+  if (!editorEmptied) {
+    return { action: 'comment_on_post', status: 'error', error: 'submit_failed', currentUrl: location.href }
+  }
+
+  return { action: 'comment_on_post', status: 'posted', postUrn: payload.postUrn ?? null, postedAt: new Date().toISOString() }
 }
 
 async function searchLeads(payload = {}) {

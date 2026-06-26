@@ -74,6 +74,23 @@ const TYPE_RULES = {
     description: 'quinto y último follow-up',
     rules: ['Cierre formal y educado. "Si no es buen momento, todo bien."'],
   },
+  // ── Post-Prospecting: comentario PÚBLICO value-first en un post ──
+  // OJO: el comentario es PÚBLICO. NO vende, NO menciona empresa/servicio, NO CTA.
+  // El pitch va en la nota privada de conexión (pitch_note), nunca aquí.
+  post_comment: {
+    maxChars: 400,
+    description: 'comentario PÚBLICO en un post de LinkedIn donde el autor pide ayuda/recomendación',
+    rules: [
+      'El comentario es PÚBLICO y lo verá todo el mundo. Tu única meta es APORTAR VALOR genuino.',
+      'Responde DIRECTAMENTE a lo que el autor pide en su post. Sé concreto y útil.',
+      'PROHIBIDO vender. PROHIBIDO mencionar tu empresa, tu producto o tus servicios.',
+      'PROHIBIDO cualquier CTA, link, "mándame DM", "te escribo por privado" o auto-promoción.',
+      'Aporta UNA idea accionable, un recurso, una consideración técnica o una pregunta inteligente que demuestre expertise real.',
+      'Tono humano, colega-a-colega. CERO lenguaje corporativo, CERO halagos vacíos ("¡Gran post!").',
+      'Breve: 1-3 frases. Un comentario largo se ve a spam.',
+      'NO uses emojis salvo que encaje muy naturalmente (máximo uno).',
+    ],
+  },
   // ── NUEVO Sub-Fase 3.8: respuestas contextuales (cuando lead nos escribe) ──
   fm_reply_1: {
     maxChars: 320, // v0.8: cap typing-safe (sin link de cal en este reply)
@@ -421,4 +438,132 @@ export async function generateLinkedInReply(campaign, lead, ctx = {}, opts = {})
   const userPrompt = buildReplyUserPrompt(lead, ctx.conversationHistory ?? [], calUrl)
   const maxChars = TYPE_RULES[type]?.maxChars ?? 700
   return await callGemini(systemPrompt, userPrompt, maxChars, opts)
+}
+
+// ============================================================================
+// Post-Prospecting (v0.9): calificar posts + redactar comentarios value-first
+// ============================================================================
+
+// Helper JSON: igual que callGemini pero pide application/json y parsea el objeto.
+// Se usa para tareas de clasificación (qualifyPost) donde queremos datos, no prosa.
+// NO aplica el guard anti-placeholder ni la truncación de oraciones (eso es para DMs).
+async function callGeminiJson(systemPrompt, userPrompt, opts = {}) {
+  const apiKey = process.env.GEMINI_API_KEY
+  if (!apiKey) return { error: 'GEMINI_API_KEY missing' }
+  const ai = new GoogleGenAI({ apiKey })
+  const retries = opts.retries ?? 2
+  const GEMINI_TIMEOUT_MS = opts.timeoutMs ?? 30_000
+  const withGeminiTimeout = (p) => Promise.race([
+    p,
+    new Promise((_, rej) => setTimeout(() => rej(new Error(`gemini_timeout_${GEMINI_TIMEOUT_MS}ms`)), GEMINI_TIMEOUT_MS)),
+  ])
+  let lastError
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const response = await withGeminiTimeout(ai.models.generateContent({
+        model: MODEL,
+        config: {
+          systemInstruction: systemPrompt,
+          temperature: opts.temperature ?? 0.2,
+          maxOutputTokens: 300,
+          thinkingConfig: { thinkingBudget: 0 },
+          responseMimeType: 'application/json',
+        },
+        contents: userPrompt,
+      }))
+      let text = (response.text ?? '').trim()
+      if (!text) { lastError = 'empty_response'; continue }
+      // Por si el modelo envuelve en ```json ... ```
+      text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim()
+      try {
+        return { data: JSON.parse(text) }
+      } catch {
+        lastError = 'json_parse_error'
+        if (attempt < retries) { await new Promise(r => setTimeout(r, 600)); continue }
+      }
+    } catch (err) {
+      lastError = err.message ?? String(err)
+      if (attempt < retries) await new Promise(r => setTimeout(r, 1500 * attempt))
+    }
+  }
+  return { error: lastError ?? 'unknown' }
+}
+
+/**
+ * Califica si un post de LinkedIn es una oportunidad real para nuestro servicio.
+ * Devuelve { relevant: boolean, score: int(0-10), reason: string } o { error }.
+ * El umbral (score >= qualify_min_score) lo compara el caller (bridge/scheduler).
+ *
+ * @param {string} postText - texto del post scrapeado
+ * @param {string} serviceDescription - qué vendemos (post_campaigns.service_description)
+ */
+export async function qualifyPost(postText, serviceDescription, opts = {}) {
+  const text = String(postText ?? '').trim()
+  if (!text) return { relevant: false, score: 0, reason: 'empty_post' }
+
+  const systemPrompt = [
+    'Eres un filtro de relevancia comercial estricto. Tu trabajo es decidir si el autor de un post de LinkedIn',
+    'está ACTIVAMENTE buscando, pidiendo o necesitando el servicio que ofrecemos — AHORA, no hipotéticamente.',
+    '',
+    `SERVICIO QUE OFRECEMOS:\n"""${String(serviceDescription ?? '').slice(0, 600)}"""`,
+    '',
+    'CRITERIO:',
+    '- score 8-10: el autor pide explícitamente una recomendación/proveedor/ayuda que calza con nuestro servicio.',
+    '- score 5-7: necesidad implícita o tangencial; podría encajar pero no lo pide directo.',
+    '- score 0-4: solo menciona el tema, comparte contenido, busca empleo, o no tiene nada que ver.',
+    'Sé ESTRICTO: ante la duda, baja el score. Preferimos NO comentar que comentar en un post irrelevante (riesgo de spam).',
+    '',
+    'Responde SOLO un objeto JSON con exactamente estas llaves:',
+    '{"relevant": boolean, "score": number (0-10 entero), "reason": "frase corta en español explicando"}',
+  ].join('\n')
+
+  const userPrompt = `POST A EVALUAR:\n"""${text.slice(0, 1500)}"""`
+  const res = await callGeminiJson(systemPrompt, userPrompt, { temperature: 0.2, ...opts })
+  if (res.error) return { error: res.error }
+  const d = res.data ?? {}
+  const score = Math.max(0, Math.min(10, Math.round(Number(d.score) || 0)))
+  return {
+    relevant: Boolean(d.relevant) && score > 0,
+    score,
+    reason: String(d.reason ?? '').slice(0, 300),
+  }
+}
+
+/**
+ * Redacta un comentario PÚBLICO value-first para un post.
+ * Devuelve { message } o { error }. NUNCA recibe ni usa el pitch_note (eso es privado).
+ * Reusa callGemini → guard anti-placeholder + truncación + cierre garantizado.
+ *
+ * @param {object} post - { author_name, author_headline, post_text }
+ * @param {object} postCampaign - { gemini_system_prompt, comment_rules, service_description }
+ */
+export async function generatePostComment(post, postCampaign, opts = {}) {
+  const typeConf = TYPE_RULES.post_comment
+  const sections = [
+    postCampaign.gemini_system_prompt
+      || 'Eres un profesional con experiencia técnica real que comenta de forma genuina y útil en LinkedIn, en español.',
+    '',
+    `TIPO DE MENSAJE: ${typeConf.description}`,
+    `LÍMITE: máximo ${typeConf.maxChars} caracteres.`,
+    `CIERRE OBLIGATORIO: termina SIEMPRE con puntuación cerrada. Nunca dejes una frase a medias.`,
+    '',
+    'REGLAS:',
+    ...typeConf.rules.map(r => `- ${r}`),
+  ]
+  if (postCampaign.comment_rules) {
+    sections.push('', 'GUÍA ADICIONAL DEL CLIENTE PARA EL COMENTARIO:', postCampaign.comment_rules.slice(0, 800))
+  }
+  sections.push('', 'FORMATO DE RESPUESTA: SOLO el comentario a publicar, texto plano. Sin comillas envolventes, sin prefijos, sin firma.')
+  sections.push('', '🚫 PROHIBIDO: corchetes [ ], llaves { }, placeholders, links, menciones a tu empresa/servicio, o cualquier CTA. El comentario debe quedar 100% listo para publicarse tal cual.')
+  const systemPrompt = sections.join('\n')
+
+  const userParts = [
+    `POST DEL AUTOR (responde DIRECTAMENTE a lo que pide):`,
+    `- Autor: ${post.author_name ?? '(desconocido)'}`,
+  ]
+  if (post.author_headline) userParts.push(`- Headline del autor: ${post.author_headline}`)
+  userParts.push('', 'CONTENIDO DEL POST:', '"""', String(post.post_text ?? '').slice(0, 1500), '"""')
+  userParts.push('', 'Escribe un comentario público breve y genuinamente útil sobre lo que pide. Aporta valor real, sin vender.')
+
+  return await callGemini(systemPrompt, userParts.join('\n'), typeConf.maxChars, { temperature: 0.8, ...opts })
 }

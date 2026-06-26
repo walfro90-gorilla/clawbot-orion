@@ -46,7 +46,7 @@ export default async function DashboardLayout({
 
   // Cargar alertas + conteos en paralelo (incluye auto-learning insights y visual tickets)
   const isAdmin = profile?.role === "god_admin" || profile?.role === "admin"
-  const [{ data: alerts }, { count: unreadCount }, insightsResult, ticketsResult] = await Promise.all([
+  const [{ data: alerts }, { count: unreadCount }, insightsResult, ticketsResult, postsResult] = await Promise.all([
     supabase
       .from("account_alerts")
       .select("id, alert_type, severity, message, details, auto_paused, created_at, linkedin_account_id, campaign_id")
@@ -71,9 +71,15 @@ export default async function DashboardLayout({
     isAdmin
       ? (admin as any).from("selector_tickets").select("id", { count: "exact", head: true }).eq("status", "open")
       : Promise.resolve({ count: 0 }),
+    // Post-Prospecting: comentarios esperando revisión (admin only)
+    isAdmin
+      ? (admin as any).from("post_opportunities").select("id", { count: "exact", head: true }).eq("status", "pending_review")
+      : Promise.resolve({ count: 0 }),
   ])
   const insightsCount = (insightsResult as any)?.count ?? 0
   const ticketsCount = (ticketsResult as any)?.count ?? 0
+  // post_opportunities puede no existir aún (migración pendiente) → count 0 si error.
+  const postsCount = (postsResult as any)?.count ?? 0
 
   // Deduplicate alerts: keep only the most recent per (account_id + alert_type).
   // Without this, recurring scheduler-generated alerts (e.g. cookie_expiry every
@@ -97,6 +103,7 @@ export default async function DashboardLayout({
         unreadCount={unreadCount ?? 0}
         insightsCount={insightsCount}
         ticketsCount={ticketsCount}
+        postsCount={postsCount}
       />
       <main className="flex-1 overflow-auto pt-12 sm:pt-0">
         <AlertBanner initialAlerts={unresolvedAlerts} />

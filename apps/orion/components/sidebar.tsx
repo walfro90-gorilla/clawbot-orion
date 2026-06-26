@@ -13,6 +13,7 @@ const NAV = [
   { href: "/dashboard/meetings",          label: "Reuniones",  icon: "📅", adminOnly: false },
   { href: "/dashboard/funnel",            label: "Funnel",     icon: "📊", adminOnly: true  },
   { href: "/dashboard/campaigns",         label: "Campañas",   icon: "🎯", adminOnly: false },
+  { href: "/dashboard/posts",             label: "Posts",      icon: "📝", adminOnly: true  },
   { href: "/dashboard/accounts",          label: "Cuentas LI", icon: "🔗", adminOnly: true  },
   { href: "/dashboard/control",           label: "Centro de Control", icon: "⚙️", adminOnly: true  },
   { href: "/dashboard/activity",          label: "Actividad",  icon: "📋", adminOnly: false },
@@ -39,9 +40,10 @@ interface SidebarProps {
   unreadCount?: number
   insightsCount?: number
   ticketsCount?: number
+  postsCount?: number
 }
 
-export function Sidebar({ email, role, alertCount = 0, unreadCount = 0, insightsCount = 0, ticketsCount = 0 }: SidebarProps) {
+export function Sidebar({ email, role, alertCount = 0, unreadCount = 0, insightsCount = 0, ticketsCount = 0, postsCount = 0 }: SidebarProps) {
   const path          = usePathname()
   const [menuOpen,    setMenuOpen]    = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -58,6 +60,7 @@ export function Sidebar({ email, role, alertCount = 0, unreadCount = 0, insights
     const isConversations = href === "/dashboard/conversations"
     const isAutoLearning  = href === "/dashboard/auto-learning"
     const isTickets       = href === "/dashboard/visual-tickets"
+    const isPosts         = href === "/dashboard/posts"
     return (
       <Link href={href} onClick={() => setSidebarOpen(false)}
         className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
@@ -87,6 +90,11 @@ export function Sidebar({ email, role, alertCount = 0, unreadCount = 0, insights
         {isTickets && ticketsCount > 0 && (
           <span className="ml-auto flex items-center justify-center min-w-4 h-4 px-1 rounded-full bg-purple-500 text-white text-[9px] font-bold animate-pulse">
             {ticketsCount > 99 ? "99+" : ticketsCount}
+          </span>
+        )}
+        {isPosts && postsCount > 0 && (
+          <span className="ml-auto flex items-center justify-center min-w-4 h-4 px-1 rounded-full bg-amber-500 text-white text-[9px] font-bold">
+            {postsCount > 99 ? "99+" : postsCount}
           </span>
         )}
       </Link>
