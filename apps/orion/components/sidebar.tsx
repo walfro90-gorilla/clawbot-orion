@@ -8,6 +8,7 @@ import { ThemeToggle } from "./theme-toggle"
 const NAV = [
   { href: "/dashboard",                   label: "Dashboard",  icon: "⚡", adminOnly: false },
   { href: "/dashboard/leads",             label: "Leads",      icon: "👥", adminOnly: false },
+  { href: "/dashboard/quarantine",        label: "Cuarentena", icon: "🔒", adminOnly: false },
   { href: "/dashboard/crm",               label: "CRM Oracle", icon: "👁️", adminOnly: false },
   { href: "/dashboard/conversations",     label: "Mensajes",   icon: "💬", adminOnly: false },
   { href: "/dashboard/meetings",          label: "Reuniones",  icon: "📅", adminOnly: false },
