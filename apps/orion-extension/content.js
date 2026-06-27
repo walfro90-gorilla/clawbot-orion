@@ -1000,9 +1000,17 @@ class MicroPhaseRunner {
     const phaseStart = Date.now()
     await this._record(name, { state: 'started', label })
 
-    const deadline = Date.now() + timeoutMs
+    // v0.9 ANTI-THROTTLE en el poll: Chrome ralentiza setTimeout (~1/min) en tabs en
+    // background/ocluidas → el sleep(intervalMs) se estira y la fase se rinde con 1 solo
+    // poll real (causa de micro_phase_typing_complete_timeout pese al foco v0.7.42). Si
+    // detectamos un sleep throttled (slept >> intervalMs), devolvemos el exceso al
+    // deadline (hasta maxCredit) para que la fase reciba suficientes polls reales antes
+    // de declarar timeout. Ver docs/fix-typing-throttle.md.
+    let deadline = Date.now() + timeoutMs
     let lastError = null
     let polls = 0
+    let throttleCredit = 0
+    const maxCredit = timeoutMs * 3
     while (Date.now() < deadline) {
       polls++
       try {
@@ -1021,11 +1029,18 @@ class MicroPhaseRunner {
         lastError = err.message
         // No abort — sigue poleando (evidenceFn puede tener errores transitorios)
       }
+      const _sleepT0 = Date.now()
       await sleep(intervalMs)
+      const slept = Date.now() - _sleepT0
+      if (slept > intervalMs * 4 && throttleCredit < maxCredit) {
+        const extra = Math.min(slept - intervalMs, maxCredit - throttleCredit)
+        deadline += extra
+        throttleCredit += extra
+      }
     }
 
     const ms = Date.now() - phaseStart
-    await this._record(name, { state: 'timeout', ms, polls, lastError, timeoutMs })
+    await this._record(name, { state: 'timeout', ms, polls, lastError, timeoutMs, throttleCredit })
     // v0.7.4: trigger Visual Learning tracker (async, fire-and-forget)
     try { vlOnPhaseTimeout(name) } catch {}
     throw new Error(`micro_phase_${name}_timeout_${ms}ms`)
