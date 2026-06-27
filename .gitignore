@@ -1,7 +1,7 @@
-# env
+# env — nunca commitear secretos (se conserva .env.example)
 .env
-.env.local
-.env*.local
+.env.*
+!.env.example
 
 # deps
 node_modules/

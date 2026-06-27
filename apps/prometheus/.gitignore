@@ -1,7 +1,7 @@
-# Environment variables — NEVER commit credentials
+# Environment variables — NEVER commit credentials (se conserva .env.example)
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 
 # MCP config — contains API tokens
 .claude/mcp.json
