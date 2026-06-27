@@ -336,6 +336,23 @@ const PHASE_TIMEOUT_FLOOR_MS = {
 }
 const DEFAULT_PHASE_FLOOR_MS = 3000
 
+// v0.8 cap por phase: techo máximo al que el auto-tune (L3) puede inflar cada
+// timeout. Evita el runaway que llevó typing_complete a 30000ms (4000→15000→30000):
+// el tecleo se atasca por throttling de pestaña en background, el analyzer veía p95
+// alto y subía el timeout hasta el cap global (max_timeout_ms=30000), alargando cada
+// fallo a 30s antes de cuarentena. Con techo por phase el auto-tune queda acotado.
+// Si una phase no está listada se usa analyzerCfg.max_timeout_ms (cap global).
+const PHASE_TIMEOUT_CAP_MS = {
+  typing_complete: 15000,
+  editor_focused: 8000,
+  send_button_enabled: 10000,
+  message_in_dom: 22000,
+  editor_cleared_via_ctrl_enter: 10000,
+  editor_cleared_via_humanClick: 10000,
+  editor_cleared_via_form_submit: 10000,
+  editor_cleared_via_plain_enter: 10000,
+}
+
 async function setRuntimeConfig(key, value, updatedBy, reason, insightId, previousValue) {
   const { error } = await supabase.from('runtime_config').upsert({
     key, value, updated_by: updatedBy, reason,
@@ -367,8 +384,14 @@ async function detectTimeoutsTooTight() {
     const safetyMargin = r.p95_ms / configured
     if (safetyMargin <= 0.7) continue
 
-    const recommended = Math.min(
+    // Techo por phase (PHASE_TIMEOUT_CAP_MS) además del cap global, para que el
+    // auto-tune no vuelva a inflar p.ej. typing_complete hasta 30s.
+    const phaseCap = Math.min(
       analyzerCfg.max_timeout_ms,
+      PHASE_TIMEOUT_CAP_MS[r.phase_name] ?? analyzerCfg.max_timeout_ms
+    )
+    const recommended = Math.min(
+      phaseCap,
       Math.ceil(r.p95_ms * analyzerCfg.timeout_safety_multiplier)
     )
     // L3 AUTO-APPLY: si sample suficientemente grande, aplicamos automáticamente
