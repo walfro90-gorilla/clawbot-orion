@@ -15,6 +15,7 @@ const NAV = [
   { href: "/dashboard/funnel",            label: "Funnel",     icon: "📊", adminOnly: true  },
   { href: "/dashboard/campaigns",         label: "Campañas",   icon: "🎯", adminOnly: false },
   { href: "/dashboard/posts",             label: "Posts",      icon: "📝", adminOnly: true  },
+  { href: "/dashboard/publish-agent",     label: "Publicador", icon: "📣", adminOnly: true  },
   { href: "/dashboard/accounts",          label: "Cuentas LI", icon: "🔗", adminOnly: true  },
   { href: "/dashboard/control",           label: "Centro de Control", icon: "⚙️", adminOnly: true  },
   { href: "/dashboard/activity",          label: "Actividad",  icon: "📋", adminOnly: false },

@@ -26,6 +26,7 @@ import {
   getDailyCommentsToday, getEffectiveCommentCap,
 } from './lib/extension-dispatch.js'
 import { generateLinkedInMessage, generateLinkedInReply, personalizeFollowupMessage, hasLeftoverPlaceholder, qualifyPost, generatePostComment } from './lib/ai-message.js'
+import { generatePostCopy } from './lib/daily-publish.js'
 import { isSystemLinkedInAccount } from './lib/system-accounts.js'
 import { isGroupConversationName } from './lib/group-conversation.js'
 import { sweepQuarantineTimeout } from './lib/lead-failure.js'
@@ -1700,6 +1701,98 @@ async function runPostCampaigns(connectedIds, stressLockedAccount) {
   }
 }
 
+// ── PUBLISH AGENT (v0.9): contenido diario en el perfil propio ───────────────
+// Genera el COPY del post (Groq/Gemini) y lo deja como borrador pending_review
+// para que el admin lo apruebe/edite en Orion. La imagen (fase B) y la
+// publicación (manual o fase C) van aparte. 1 post/día por agente.
+const PUB_DEFAULT_DAYS = ['lunes', 'martes', 'miércoles', 'jueves', 'viernes']
+
+async function loadActivePublishAgents() {
+  const { data, error } = await supabase
+    .from('publish_agents')
+    .select(`
+      id, name, is_active, linkedin_account_id,
+      business_context, ideas, tone, do_dont, gemini_system_prompt,
+      schedule_start_hour, schedule_end_hour, schedule_days,
+      last_generated_for_date, last_generated_at,
+      linkedin_accounts ( id, label, status, timezone )
+    `)
+    .eq('is_active', true)
+  if (error) {
+    if (!/relation .* does not exist|42P01/i.test(error.message ?? '')) {
+      console.error(`[SCH-EXT] loadActivePublishAgents error: ${error.message}`)
+    }
+    return []
+  }
+  return data ?? []
+}
+
+async function tryDailyGenerateForAgent(agent, account) {
+  const tz = account?.timezone ?? 'America/Mexico_City'
+  const today = mxDateStr(tz)
+
+  if (agent.last_generated_for_date === today) return { skipped: true, reason: 'already_generated_today' }
+  const days = (agent.schedule_days && agent.schedule_days.length) ? agent.schedule_days : PUB_DEFAULT_DAYS
+  if (!isBusinessHours(agent.schedule_start_hour ?? 9, agent.schedule_end_hour ?? 19, days, tz)) {
+    return { skipped: true, reason: 'outside_schedule' }
+  }
+
+  let copy
+  try {
+    copy = await generatePostCopy(agent)
+  } catch (e) {
+    return { skipped: true, reason: 'gen_failed_' + String(e.message ?? e).slice(0, 60) }
+  }
+
+  const { data, error } = await supabase
+    .from('generated_posts')
+    .insert({
+      agent_id: agent.id,
+      linkedin_account_id: agent.linkedin_account_id,
+      draft_text: copy.text,
+      status: 'pending_review',
+      scheduled_for: today,
+    })
+    .select('id')
+    .maybeSingle()
+
+  // Marca el agente como generado-hoy pase lo que pase (evita reintentos en bucle).
+  await supabase.from('publish_agents')
+    .update({ last_generated_for_date: today, last_generated_at: new Date().toISOString() })
+    .eq('id', agent.id)
+
+  if (error) {
+    if (/duplicate key|unique/i.test(error.message ?? '')) return { skipped: true, reason: 'already_exists_today' }
+    return { skipped: true, reason: 'insert_failed_' + String(error.message).slice(0, 60) }
+  }
+  return { generated: true, postId: data?.id, provider: copy.provider, warn: copy.warn }
+}
+
+async function runDailyPublishAgents() {
+  const agents = await loadActivePublishAgents()
+  if (agents.length === 0) return
+  console.log(`[SCH-EXT] ${agents.length} publish-agents activos`)
+  for (const ag of agents) {
+    const account = ag.linkedin_accounts
+    if (!account) continue
+    try {
+      const res = await tryDailyGenerateForAgent(ag, account)
+      if (res.generated) {
+        console.log(`[SCH-EXT] 📣 "${ag.name}" (${account.label}) → borrador generado (${res.provider}${res.warn ? ', warn: ' + res.warn : ''})`)
+      } else {
+        const key = `pub:${ag.id}`
+        if (lastSkipReason.get(key) !== res.reason) {
+          lastSkipReason.set(key, res.reason)
+          console.log(`[SCH-EXT] 📣 "${ag.name}" — ${res.reason}`)
+        }
+      }
+    } catch (err) {
+      console.error(`[SCH-EXT] publish-agent "${ag.name}" threw: ${err.message}`)
+    }
+    await sleep(randInt(500, 1500))
+  }
+}
+
 async function tick() {
   const { mxDate, mxHour } = mxTime()
   console.log(`\n[SCH-EXT] ════════════════════════════`)
@@ -1868,6 +1961,14 @@ async function tick() {
     await runPostCampaigns(connectedIds, stressLockedAccount)
   } catch (err) {
     console.error(`[SCH-EXT] runPostCampaigns threw: ${err.message}`)
+  }
+
+  // PUBLISH AGENT (v0.9): genera el borrador del post diario (perfil propio).
+  // Inerte si no hay agentes activos o si la tabla aún no existe (migración pendiente).
+  try {
+    await runDailyPublishAgents()
+  } catch (err) {
+    console.error(`[SCH-EXT] runDailyPublishAgents threw: ${err.message}`)
   }
 
   // INBOX + CHECK_SENT_INVITES per-account (only in inbox hours, per account TZ)
