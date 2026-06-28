@@ -178,6 +178,12 @@ export default async function PublishAgentPage() {
               <img src={p.image_url} alt="imagen generada" className="max-h-56 rounded border border-gray-800" />
             )}
 
+            {p.source_news?.summary && (
+              <p className="text-[11px] text-amber-300/80 bg-amber-900/10 border border-amber-900/30 rounded px-2 py-1">
+                📰 {p.source_news.summary}
+              </p>
+            )}
+
             <div>
               <label className="text-[11px] text-gray-500">Texto del post (editable)</label>
               <textarea name="edited_text" rows={8} defaultValue={p.edited_text ?? p.draft_text ?? ""} className={inp + " resize-y"} />

@@ -26,7 +26,8 @@ import {
   getDailyCommentsToday, getEffectiveCommentCap,
 } from './lib/extension-dispatch.js'
 import { generateLinkedInMessage, generateLinkedInReply, personalizeFollowupMessage, hasLeftoverPlaceholder, qualifyPost, generatePostComment } from './lib/ai-message.js'
-import { generatePostCopy } from './lib/daily-publish.js'
+import { generatePostCopy, generateDailyPost } from './lib/daily-publish.js'
+import { uploadGeneratedImage } from './lib/gemini-image.js'
 import { isSystemLinkedInAccount } from './lib/system-accounts.js'
 import { isGroupConversationName } from './lib/group-conversation.js'
 import { sweepQuarantineTimeout } from './lib/lead-failure.js'
@@ -1737,9 +1738,9 @@ async function tryDailyGenerateForAgent(agent, account) {
     return { skipped: true, reason: 'outside_schedule' }
   }
 
-  let copy
+  let gen
   try {
-    copy = await generatePostCopy(agent)
+    gen = await generateDailyPost(agent)
   } catch (e) {
     return { skipped: true, reason: 'gen_failed_' + String(e.message ?? e).slice(0, 60) }
   }
@@ -1749,7 +1750,9 @@ async function tryDailyGenerateForAgent(agent, account) {
     .insert({
       agent_id: agent.id,
       linkedin_account_id: agent.linkedin_account_id,
-      draft_text: copy.text,
+      draft_text: gen.text,
+      image_prompt: gen.imagePrompt,
+      source_news: gen.sourceNews,
       status: 'pending_review',
       scheduled_for: today,
     })
@@ -1765,7 +1768,18 @@ async function tryDailyGenerateForAgent(agent, account) {
     if (/duplicate key|unique/i.test(error.message ?? '')) return { skipped: true, reason: 'already_exists_today' }
     return { skipped: true, reason: 'insert_failed_' + String(error.message).slice(0, 60) }
   }
-  return { generated: true, postId: data?.id, provider: copy.provider, warn: copy.warn }
+
+  // Imagen (best-effort): sube al bucket y actualiza la fila con la URL pública.
+  if (data?.id && gen.imageBase64) {
+    try {
+      const url = await uploadGeneratedImage(gen.imageBase64, gen.imageMime, agent.linkedin_account_id, data.id)
+      await supabase.from('generated_posts').update({ image_url: url }).eq('id', data.id)
+    } catch (e) {
+      console.warn(`[SCH-EXT] publish-agent image upload failed: ${String(e.message).slice(0, 80)}`)
+    }
+  }
+
+  return { generated: true, postId: data?.id, provider: gen.provider, warn: gen.warn }
 }
 
 async function runDailyPublishAgents() {

@@ -5,6 +5,8 @@
 // Fase B añadirá: grounding de noticias (Gemini googleSearch) + imagen (Nano Banana).
 
 import { GoogleGenAI } from '@google/genai'
+import { researchNews } from './news-research.js'
+import { generateImagePrompt, generateImage } from './gemini-image.js'
 
 const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile'
 const GEMINI_MODEL = 'gemini-2.5-flash'
@@ -112,5 +114,49 @@ export async function generatePostCopy(agent, { newsContext = null } = {}) {
       if (text && text.length >= 20) return { text, provider: 'gemini-fallback', warn: String(e.message) }
     }
     throw e
+  }
+}
+
+/**
+ * Orquestador completo (Fase B): noticia (Google Search) → copy (Groq/Gemini) →
+ * prompt de imagen → imagen (Nano Banana). Noticia e imagen son best-effort: si
+ * fallan, el post sale igual (sin noticia / sin imagen). El upload de la imagen lo
+ * hace el caller (scheduler) porque necesita el id de la fila ya insertada.
+ * @returns {Promise<{text, provider, imagePrompt, imageBase64, imageMime, sourceNews, warn}>}
+ */
+export async function generateDailyPost(agent) {
+  // 1. Noticia reciente (best-effort)
+  let newsContext = null
+  let sourceNews = null
+  try {
+    const news = await researchNews(agent)
+    if (news) { newsContext = news.summary; sourceNews = news }
+  } catch { /* sin noticia */ }
+
+  // 2. Copy (con o sin noticia)
+  const copy = await generatePostCopy(agent, { newsContext })
+
+  // 3. Imagen (best-effort)
+  let imagePrompt = null
+  let imageBase64 = null
+  let imageMime = null
+  let imageWarn = null
+  try {
+    imagePrompt = await generateImagePrompt(copy.text, agent)
+    const img = await generateImage(imagePrompt)
+    imageBase64 = img.base64
+    imageMime = img.mime
+  } catch (e) {
+    imageWarn = 'image:' + String(e.message ?? e).slice(0, 80)
+  }
+
+  return {
+    text: copy.text,
+    provider: copy.provider,
+    imagePrompt,
+    imageBase64,
+    imageMime,
+    sourceNews,
+    warn: [copy.warn, imageWarn].filter(Boolean).join('; ') || null,
   }
 }
