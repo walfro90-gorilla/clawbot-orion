@@ -63,6 +63,38 @@ async function markPublished(formData: FormData): Promise<void> {
   revalidatePath("/dashboard/publish-agent")
 }
 
+// Publica el TEXTO automáticamente vía la extensión (sin imagen). Encola un comando
+// publish_post; el bridge lo despacha a la cuenta y la extensión publica en el feed.
+async function publishViaExtension(formData: FormData): Promise<void> {
+  "use server"
+  const admin = createAdminClient() as any
+  const id = formData.get("post_id") as string
+  if (!id) return
+  const { data: post } = await admin
+    .from("generated_posts")
+    .select("id, status, linkedin_account_id, draft_text, edited_text")
+    .eq("id", id).eq("status", "approved").maybeSingle()
+  if (!post) return
+  const text = ((post.edited_text ?? post.draft_text) || "").trim()
+  if (!text) return
+  const expiresAt = new Date(Date.now() + 10 * 60_000).toISOString()
+  const { data: cmd, error } = await admin
+    .from("extension_commands")
+    .insert({
+      account_id: post.linkedin_account_id,
+      action: "publish_post",
+      payload: { postText: text, generatedPostId: id },
+      status: "pending",
+      expires_at: expiresAt,
+    })
+    .select("id").single()
+  if (error || !cmd) return
+  await admin.from("generated_posts").update({
+    status: "dispatched", command_id: cmd.id, updated_at: new Date().toISOString(),
+  }).eq("id", id)
+  revalidatePath("/dashboard/publish-agent")
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default async function PublishAgentPage() {
@@ -225,8 +257,16 @@ export default async function PublishAgentPage() {
                 </div>
               )}
               <p className="text-sm text-gray-200 bg-gray-950/60 border border-gray-800 rounded p-3 whitespace-pre-wrap">{text}</p>
-              <div className="flex items-center gap-2 justify-end">
+              <div className="flex items-center gap-2 justify-end flex-wrap">
                 <CopyTextButton text={text} />
+                <form action={publishViaExtension}>
+                  <input type="hidden" name="post_id" value={p.id} />
+                  <button type="submit"
+                    title="Publica SOLO el texto vía la extensión (sin imagen). La cuenta debe estar conectada."
+                    className="px-3 py-1.5 text-xs bg-indigo-600 hover:bg-indigo-500 rounded text-white">
+                    Publicar texto (auto)
+                  </button>
+                </form>
                 <a href="https://www.linkedin.com/feed/" target="_blank" rel="noopener noreferrer"
                   className="px-3 py-1.5 text-xs bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-gray-200">Abrir LinkedIn ↗</a>
                 <form action={markPublished}>

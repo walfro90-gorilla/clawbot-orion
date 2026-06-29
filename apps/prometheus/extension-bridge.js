@@ -785,6 +785,22 @@ async function handleCommandResult(msg) {
       console.error(`[bridge] ingest comment_on_post failed:`, err.message)
     }
   }
+
+  // publish_post ingest (v0.9.2) — marca el generated_post como publicado o failed
+  if (action === 'publish_post') {
+    try {
+      const published = !isError && result?.status === 'published'
+      await supabase.from('generated_posts').update({
+        status: published ? 'published' : 'failed',
+        published_at: published ? new Date().toISOString() : null,
+        reject_reason: published ? null : String(result?.error ?? 'publish_failed').slice(0, 100),
+        updated_at: new Date().toISOString(),
+      }).eq('command_id', commandId)
+      console.log(`[bridge] publish_post ${commandId.slice(0, 8)} → ${published ? 'published' : 'failed (' + (result?.error ?? '?') + ')'}`)
+    } catch (err) {
+      console.error(`[bridge] ingest publish_post failed:`, err.message)
+    }
+  }
 }
 
 // ── Ingest: check_sent_invites → marca accepts (leads que dejaron de estar pending)

@@ -207,6 +207,10 @@ const EXEC_HARD_TIMEOUT_MAX_MS = 480_000  // 8 min para messages muy largos
 const EXEC_HARD_TIMEOUT_MS = 120_000  // fallback para acciones sin payload.message
 
 function calcHardTimeout(action, payload) {
+  if (action === 'publish_post') {
+    const len = payload?.postText?.length ?? 0
+    return Math.max(EXEC_HARD_TIMEOUT_MIN_MS, Math.min(EXEC_HARD_TIMEOUT_MAX_MS, len * 550 + 90_000))
+  }
   if (action === 'send_followup' || action === 'send_invite') {
     const msgLen = (payload?.message?.length ?? 0)
     // v0.7.22 BUG-M: sin mensaje (Path A.1 no-note / send_followup vacío) → floor 90s.
@@ -1384,6 +1388,8 @@ async function executeAction(action, payload) {
       return await searchPosts(payload)
     case 'comment_on_post':
       return await commentOnPost(payload)
+    case 'publish_post':
+      return await publishPost(payload)
     case 'capture_session':
       return await captureSession()
     default:
@@ -4501,6 +4507,107 @@ function extractPostsFromPage() {
     })
   }
   return results
+}
+
+// publish_post (v0.9.2): publica un post en el FEED del propio usuario (texto).
+// background ya navegó a /feed/. Abre el composer, teclea (reusa humanTypeContentEditable
+// + el throttle-fix), y clickea "Publicar". Selectores semánticos (role=textbox + texto
+// del botón) con debug en fallos. Imagen NO (se adjunta manual desde Orion).
+async function publishPost(payload = {}) {
+  const text = String(payload.postText ?? '').trim()
+  if (!text) return { action: 'publish_post', status: 'error', error: 'empty_post_text' }
+
+  // 1. Feed cargado
+  const ok = await waitForSelector(['main', '.scaffold-layout', 'div[role="main"]'], 12000)
+  if (!ok) return { action: 'publish_post', status: 'error', error: 'feed_not_loaded', currentUrl: location.href }
+  await sleep(randInt(1500, 2800))
+
+  // 2. Abrir el composer (clic en "Comienza una publicación")
+  const startTrigger = Array.from(document.querySelectorAll('button, [role="button"], .share-box-feed-entry__trigger'))
+    .find(el => {
+      if (el.offsetParent === null) return false
+      const t = ((el.textContent || '') + ' ' + (el.getAttribute('aria-label') || '')).toLowerCase()
+      return /comienza una publicaci|empieza una publicaci|crear una publicaci|start a post|create a post|comparte ideas|de qué quieres hablar/.test(t)
+    })
+  if (startTrigger) {
+    await humanClick(startTrigger)
+    await sleep(randInt(1800, 3200))
+  }
+
+  // 3. Editor del composer (contenteditable dentro del dialog; el más grande visible)
+  const editorSels = [
+    'div[role="dialog"] div.ql-editor[contenteditable="true"]',
+    'div[role="dialog"] [contenteditable="true"][role="textbox"]',
+    'div[role="dialog"] [contenteditable="true"]',
+    '.share-creation-state [contenteditable="true"]',
+  ]
+  let editor = await waitForSelector(editorSels, 8000)
+  if (!editor || editor.offsetParent === null) {
+    await sleep(1000)
+    editor = Array.from(document.querySelectorAll('[contenteditable="true"]'))
+      .filter(e => e.offsetParent !== null)
+      .sort((a, b) => {
+        const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect()
+        return (rb.width * rb.height) - (ra.width * ra.height)
+      })[0]
+  }
+  if (!editor) {
+    return {
+      action: 'publish_post', status: 'error', error: 'composer_editor_not_found', currentUrl: location.href,
+      debug: Array.from(document.querySelectorAll('[contenteditable="true"]')).slice(0, 8).map(e => ({
+        vis: e.offsetParent !== null, role: e.getAttribute('role'), aria: (e.getAttribute('aria-label') || '').slice(0, 40),
+      })),
+    }
+  }
+
+  // 4. Teclear el post
+  await humanClick(editor)
+  await sleep(randInt(300, 600))
+  try {
+    await humanTypeContentEditable(editor, text.slice(0, 2800))
+  } catch (err) {
+    return { action: 'publish_post', status: 'error', error: `typing_failed_${String(err.message ?? err).slice(0, 50)}` }
+  }
+  await sleep(randInt(900, 1600))
+
+  // 5. Botón "Publicar" (en el dialog, habilitado tras teclear)
+  const findPostBtn = () => {
+    const scope = editor.closest('[role="dialog"]') || document
+    return Array.from(scope.querySelectorAll('button')).find(b => {
+      if (b.offsetParent === null || b.disabled) return false
+      const t = (b.textContent || '').trim().toLowerCase()
+      const a = (b.getAttribute('aria-label') || '').toLowerCase()
+      return t === 'publicar' || t === 'post' || t === 'publish' || /^publicar( ahora)?$/.test(a)
+    })
+  }
+  let postBtn = findPostBtn()
+  if (!postBtn) { await sleep(1300); postBtn = findPostBtn() }
+  if (!postBtn) {
+    const scope = editor.closest('[role="dialog"]') || document
+    return {
+      action: 'publish_post', status: 'error', error: 'post_button_not_found', currentUrl: location.href,
+      debug: Array.from(scope.querySelectorAll('button')).filter(b => b.offsetParent !== null).slice(-10).map(b => ({
+        txt: (b.textContent || '').trim().slice(0, 24), disabled: b.disabled, aria: (b.getAttribute('aria-label') || '').slice(0, 30),
+      })),
+    }
+  }
+
+  // 6. Publicar
+  await humanClick(postBtn)
+  await sleep(randInt(2500, 4200))
+
+  // 7. Captcha / security
+  const bodyTxt = (document.body?.innerText ?? '').toLowerCase()
+  if (['captcha', 'verify you are human', 'verifica que eres humano', 'security check', 'unusual activity'].some(s => bodyTxt.includes(s))) {
+    return { action: 'publish_post', status: 'error', error: 'captcha_detected', currentUrl: location.href }
+  }
+
+  // 8. Verificar: el composer (dialog) se cerró tras publicar
+  const dialogGone = !editor.isConnected || editor.offsetParent === null || !document.querySelector('div[role="dialog"]')
+  if (!dialogGone) {
+    return { action: 'publish_post', status: 'error', error: 'publish_unconfirmed', editorLen: (editor.textContent || '').length, currentUrl: location.href }
+  }
+  return { action: 'publish_post', status: 'published', postedAt: new Date().toISOString(), chars: text.length }
 }
 
 // comment_on_post: publica un comentario en el post (background ya navegó al permalink).
