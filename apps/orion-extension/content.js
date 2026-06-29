@@ -1354,6 +1354,40 @@ function checkBannersBeforeExecute() {
   return { detected: false }
 }
 
+// v0.9.3: LinkedIn antepone modales de UPSELL (Sales Navigator / Premium) sobre el
+// composer de /messaging/compose → tapan el editor y rompen send_followup (el bot no
+// puede teclear → typing_complete_timeout). NO son security checks (no abortar): se
+// cierran con el botón X (o ESC) y se continúa. Devuelve true si cerró alguno.
+function dismissUpsellModals() {
+  let dismissed = false
+  try {
+    const dialogs = Array.from(document.querySelectorAll('[role="dialog"], .artdeco-modal'))
+    for (const d of dialogs) {
+      if (d.offsetParent === null) continue
+      const txt = (d.textContent || '').toLowerCase()
+      const isUpsell =
+        /sales\s*navigator|premium/.test(txt) &&
+        /descuento|mensajes a cualquier|más eficaz|cancela en cualquier|prueba gratis|free trial|upgrade|inmail|relaciones con clientes/.test(txt)
+      if (!isUpsell) continue
+      const close =
+        d.querySelector('button[aria-label*="cerrar" i], button[aria-label*="close" i], button[aria-label*="descartar" i], button[aria-label*="dismiss" i], .artdeco-modal__dismiss') ||
+        Array.from(d.querySelectorAll('button')).find(b =>
+          b.offsetParent !== null &&
+          (b.querySelector('svg[data-test-icon*="close"], use[href*="close"]') || /^[\s✕×x]+$/.test((b.textContent || '').trim())))
+      if (close) {
+        close.click(); dismissed = true
+        console.warn('[Orion content] upsell modal (Sales Navigator/Premium) cerrado')
+      } else {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }))
+        dismissed = true
+      }
+    }
+  } catch (e) {
+    console.warn('[Orion content] dismissUpsellModals error:', e?.message)
+  }
+  return dismissed
+}
+
 async function executeAction(action, payload) {
   // v0.7.16 pre-flight: detecta banners de seguridad LinkedIn ANTES de cualquier acción.
   // Skip para capture_session (no toca LinkedIn DOM normal).
@@ -1372,6 +1406,8 @@ async function executeAction(action, payload) {
         selectorSignal: banner.selectorSignal,
       }
     }
+    // v0.9.3: cerrar modales de upsell (Sales Navigator/Premium) que tapan el composer.
+    try { dismissUpsellModals() } catch {}
   }
   switch (action) {
     case 'check_inbox':
@@ -3370,6 +3406,10 @@ async function sendFollowup(payload = {}) {
   const expectedTail = (message ?? '').slice(0, 8000).slice(-25).toLowerCase().replace(/\s+/g, ' ').trim()
   const expectedHead = (message ?? '').slice(0, 30).toLowerCase().replace(/\s+/g, ' ').trim()
 
+  // v0.9.3: cerrar el modal de upsell (Sales Navigator/Premium) que LinkedIn antepone
+  // sobre el composer en /messaging/compose y tapa el editor (rompe el FU).
+  if (dismissUpsellModals()) { await sleep(randInt(400, 800)); dismissUpsellModals() }
+
   // µ-Phase: editor_focused — esperar a que activeElement sea el editor
   // v0.7.3: timeout dinámico desde runtime_config (auto-tuned por phase-analyzer L3)
   editor.focus()
@@ -4262,6 +4302,33 @@ async function humanTypeContentEditable(el, text, options = {}) {
     console.log(`[Orion content] humanType CHUNKED mode (${total} chars, chunks of ${chunkSize})`)
   }
 
+  // v0.9.3 ANTI-THROTTLE AGRESIVO: vuelca el mensaje COMPLETO de golpe (selectAll +
+  // insertText) RE-ENFOCANDO el editor, para que aterrice aunque haya perdido foco
+  // durante un sleep throttled (causa de typing_complete_timeout: el bulk-insert
+  // v0.7.46 no re-enfocaba → execCommand no caía en el editor → texto parcial).
+  // Triggers: (1) tab oculta, (2) presupuesto total >9s (muchos sleeps de 1-2s bajo el
+  // umbral por-sleep = throttle moderado, el que rompía al runPhase fix), (3) sleep
+  // individual >2s (el delay legítimo máximo es ~1.1s, así que 2s = throttle real).
+  const typeStartT0 = Date.now()
+  const bulkInsertFull = (reason) => {
+    console.warn(`[Orion content] typing: ${reason} → bulk-insert COMPLETO (${text.length} chars)`)
+    try { el.focus() } catch {}
+    if (document.activeElement === el) {
+      document.execCommand('selectAll', false, null)
+      document.execCommand('insertText', false, text)
+    } else {
+      // foco no aterrizó: caret al final + insertar el resto desde donde íbamos
+      try {
+        const r = document.createRange(); r.selectNodeContents(el); r.collapse(false)
+        const s = window.getSelection(); s.removeAllRanges(); s.addRange(r)
+      } catch {}
+      document.execCommand('insertText', false, text.slice(charsTyped))
+    }
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+    charsTyped = total
+    try { progressCallback && progressCallback({ charsTyped, total, pct: 100 }) } catch {}
+  }
+
   for (let i = 0; i < text.length; i += chunkSize) {
     if (location.href !== startUrl) {
       throw new Error(`navigation_during_typing_at_char_${charsTyped}_of_${total}`)
@@ -4302,31 +4369,18 @@ async function humanTypeContentEditable(el, text, options = {}) {
       if ('.?,!¡¿\n'.includes(ch)) delay += randInt(60, 240)
       if (Math.random() < 0.07) delay += randInt(250, 600)
     }
-    // v0.7.46 ANTI-THROTTLE BULK FALLBACK — la causa #1 de exec_hard_timeout en
-    // send_followup: si la tab está OCULTA, Chrome ralentiza setTimeout (hasta 1/min
-    // tras 5min hidden = "intensive throttling") → teclear chunk a chunk cuelga 200s+
-    // (visto: typing_progress_26pct a 256s) → hard_timeout → el FU NO sale. Cuando la
-    // tab está oculta o un sleep se throttlea, insertamos el RESTO de golpe. La tab en
-    // background nadie la ve, así que el "typing humano" ya no aporta; lo crítico es que
-    // el FU SALGA. Con tab visible (foco v0.7.42 OK) se mantiene el typing humano normal.
+    // v0.9.3 anti-throttle (ver helper bulkInsertFull arriba): 3 triggers que vuelcan
+    // el mensaje completo re-enfocando el editor.
     const _restI = i + chunkSize
-    if (document.hidden && _restI < text.length) {
-      const rest = text.slice(_restI)
-      console.warn(`[Orion content] typing: tab OCULTA → bulk-insert ${rest.length} chars restantes (anti-throttle)`)
-      document.execCommand('insertText', false, rest)
-      charsTyped = total
-      if (progressCallback) { try { await progressCallback({ charsTyped, total, pct: 100 }) } catch {} }
-      break
+    const restPending = _restI < text.length
+    if (restPending && document.hidden) { bulkInsertFull('tab oculta'); break }
+    if (restPending && (Date.now() - typeStartT0) > 9000) {
+      bulkInsertFull(`budget 9s (throttle moderado, char ${charsTyped}/${total})`); break
     }
     const _sleepT0 = Date.now()
     await sleep(delay)
-    if ((Date.now() - _sleepT0) > 5000 && _restI < text.length) {
-      const rest = text.slice(_restI)
-      console.warn(`[Orion content] typing: throttle detectado (sleep ${Date.now() - _sleepT0}ms) → bulk-insert ${rest.length} chars`)
-      document.execCommand('insertText', false, rest)
-      charsTyped = total
-      if (progressCallback) { try { await progressCallback({ charsTyped, total, pct: 100 }) } catch {} }
-      break
+    if (restPending && (Date.now() - _sleepT0) > 2000) {
+      bulkInsertFull(`sleep throttled ${Date.now() - _sleepT0}ms`); break
     }
   }
   el.dispatchEvent(new Event('input', { bubbles: true }))
