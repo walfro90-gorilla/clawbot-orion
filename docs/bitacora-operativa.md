@@ -9,6 +9,11 @@
 
 ## ✅ Resuelto
 
+### 🐛 REGRESIÓN (mía, 0.9.4): el mensaje se borraba "al querer enviar" — extensión 0.9.6  [Josh/Martin]
+- **Causa**: el `liveEditor()` que agregué en 0.9.4 usaba `querySelector` con selector de coma → devolvía el PRIMER `[contenteditable]` en orden del DOM, que podía ser el buscador u otro (no el composer) → la verificación 6.5 leía vacío → "tooShort" → **borraba el composer (con el mensaje completo) justo antes de enviar** y abortaba. Por eso Martin "se escribía bien pero al enviar se borraba".
+- **Fix (0.9.6)**: `liveEditor` prefiere el ref original si sigue conectado; solo re-query el composer ESPECÍFICO (`.msg-form__contenteditable`) si se desconectó. Nunca genéricos.
+- **Backlog relacionado**: `sent_unconfirmed` (editor vaciado pero mensaje NO en el thread) se trata como enviado → si un método sintético vacía sin enviar, el lead avanza falso. Endurecer a futuro (requerir `message_in_dom`).
+
 ### 🔒 SEGURIDAD: InMail/mensaje al contacto equivocado — extensión 0.9.5  [Josh]
 - **Bug**: en `/messaging/compose`, cuando LinkedIn no auto-popula el recipient, el bot escribía el nombre del lead en el typeahead y **clickeaba la PRIMERA sugerencia A CIEGAS** → componía/InMail al **contacto equivocado** (nombre similar o sugerencia ajena), incl. gente fuera de la lista.
 - **Fix (0.9.5)**: verificar que la sugerencia **coincida** con el nombre del lead (normalizado, first+last) antes de clickear; si **ninguna matchea → ABORT `recipient_mismatch`** (no mensajea a nadie). Esos leads (probables 2do grado / nombre no-conexión) dejan de recibir FU a propósito → caen a cuarentena para revisión.
