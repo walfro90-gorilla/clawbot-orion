@@ -3454,8 +3454,17 @@ async function sendFollowup(payload = {}) {
   // (2) aceptar por head + RATIO de longitud (0.9–1.2), no solo endsWith(tail) estricto
   // (fallaba por un char final/normalización aunque el mensaje estuviera completo).
   const expectedFullNorm = (message ?? '').slice(0, 8000).toLowerCase().replace(/\s+/g, ' ').trim()
-  const liveEditor = () =>
-    document.querySelector('.msg-form__contenteditable, div[contenteditable="true"][role="textbox"], div.msg-form__msg-content-container [contenteditable="true"]') || editor
+  // v0.9.6 SAFE: preferir el ref original si sigue conectado (es el composer correcto ya
+  // validado). Solo si se re-renderizó (detached) re-query el composer ESPECÍFICO — nunca
+  // un genérico [contenteditable][role=textbox] (el buscador u otro aparecen antes en el
+  // DOM y querySelector con coma devolvía el equivocado → 6.5 leía vacío → borraba el
+  // composer con el mensaje "al querer enviar"). Causa del clear-sin-enviar de Martin.
+  const liveEditor = () => {
+    if (editor && editor.isConnected) return editor
+    return document.querySelector('.msg-form__contenteditable')
+      || document.querySelector('div.msg-form__msg-content-container [contenteditable="true"]')
+      || editor
+  }
   await runner.runPhase('typing_complete', () => {
     const live = liveEditor()
     const actual = (live?.textContent ?? '').toLowerCase().replace(/\s+/g, ' ').trim()
