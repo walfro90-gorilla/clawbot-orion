@@ -3278,14 +3278,31 @@ async function sendFollowup(payload = {}) {
           '[role="option"]',
           '.search-typeahead-v2__hit',
         ]
+        // v0.9.5 SAFETY: NO clickear la primera sugerencia a ciegas (causaba InMail/mensaje
+        // al contacto EQUIVOCADO — nombre similar o sugerencia ajena). Verificar que la
+        // sugerencia COINCIDA con el nombre del lead; si ninguna matchea → ABORTAR.
+        const _norm = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ').trim()
+        const _leadNorm = _norm(leadName)
+        const _parts = _leadNorm.split(' ').filter(w => w.length >= 3)
+        const _first = _parts[0], _last = _parts[_parts.length - 1]
         let suggestion = null
         for (const sel of suggestionSels) {
-          const candidates = Array.from(document.querySelectorAll(sel))
-            .filter(el => el.offsetParent !== null)
-          if (candidates.length > 0) { suggestion = candidates[0]; break }
+          const candidates = Array.from(document.querySelectorAll(sel)).filter(el => el.offsetParent !== null)
+          for (const c of candidates) {
+            const t = _norm(c.textContent)
+            if (!t) continue
+            const match = t.includes(_leadNorm) || (_leadNorm.length > 6 && _leadNorm.includes(t)) ||
+              (_first && _last && _first !== _last && t.includes(_first) && t.includes(_last))
+            if (match) { suggestion = c; break }
+          }
+          if (suggestion) break
+        }
+        if (!suggestion) {
+          console.warn(`[Orion content] v0.9.5 — ninguna sugerencia del typeahead coincide con "${leadName}" → ABORT recipient_mismatch (no mensajear al equivocado)`)
+          return { action: 'send_followup', status: 'error', error: 'recipient_mismatch', reason: 'typeahead_no_match', leadName, currentUrl: location.href }
         }
         if (suggestion) {
-          console.log(`[Orion content] v0.6.48 — click en sugerencia recipient`)
+          console.log(`[Orion content] v0.9.5 — sugerencia recipient VERIFICADA matchea "${leadName}"`)
           suggestion.scrollIntoView({ block: 'center', behavior: 'instant' })
           await sleep(randInt(200, 400))
           suggestion.click()
