@@ -388,11 +388,11 @@ async function refreshMonitor() {
     const statusEmoji = data.bridgeOnline ? '🟢' : '🔴'
     $mConfig.innerHTML = `${warmupEmoji} ${data.account?.warmupStatus ?? '?'} · ${statusEmoji} bridge · cap ${data.account?.dailyCap ?? '—'}/día`
 
-    // Update pause state
+    // Update pause state — v0.9.7: verde=ACTIVO, rojo parpadeante=PAUSADO
     isPausedState = !!data.account?.paused
-    $pauseBtn.className = `pause-btn ${isPausedState ? 'active' : 'inactive'}`
-    $pauseIcon.textContent = isPausedState ? '▶️' : '⏸️'
-    $pauseText.textContent = isPausedState ? 'Reanudar actividad' : 'Pausar actividad'
+    $pauseBtn.className = `pause-btn ${isPausedState ? 'is-paused' : 'is-running'}`
+    $pauseIcon.textContent = isPausedState ? '🔴' : '🟢'
+    $pauseText.textContent = isPausedState ? 'Pausado · clic para reanudar' : 'Activo · clic para pausar'
 
     $monitor.style.display = 'block'
     // Re-render status dot color
@@ -488,6 +488,10 @@ $pauseBtn.addEventListener('click', async () => {
     const data = await r.json()
     if (typeof data.paused === 'boolean') {
       isPausedState = data.paused
+      // v0.9.7: reflejar el estado al instante (verde/rojo) sin esperar el fetch
+      $pauseBtn.className = `pause-btn ${isPausedState ? 'is-paused' : 'is-running'}`
+      $pauseIcon.textContent = isPausedState ? '🔴' : '🟢'
+      $pauseText.textContent = isPausedState ? 'Pausado · clic para reanudar' : 'Activo · clic para pausar'
       await refreshMonitor()
     }
   } catch (err) {

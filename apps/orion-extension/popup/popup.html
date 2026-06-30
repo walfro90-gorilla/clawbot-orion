@@ -109,20 +109,38 @@
     .monitor-value { color: #f9fafb; font-weight: 600; }
     .monitor-value.muted { color: #6b7280; font-weight: 500; }
 
+    /* v0.9.7 — Toggle de actividad PROMINENTE: verde=activo, rojo parpadeante=pausado */
     .pause-btn {
-      width: 100%; padding: 10px; border-radius: 8px; border: 1px solid;
-      font-size: 13px; font-weight: 600; cursor: pointer;
-      transition: all 0.15s; margin-bottom: 12px;
-      display: flex; align-items: center; justify-content: center; gap: 6px;
+      width: 100%; padding: 13px 14px; border-radius: 10px; border: 2px solid;
+      font-size: 14px; font-weight: 800; cursor: pointer; letter-spacing: 0.03em;
+      text-transform: uppercase; transition: filter 0.15s, box-shadow 0.15s;
+      margin-bottom: 12px;
+      display: flex; align-items: center; justify-content: center; gap: 8px;
     }
-    .pause-btn.active {
-      background: #f59e0b1a; border-color: #f59e0b66; color: #fbbf24;
+    .pause-btn .pi { font-size: 16px; line-height: 1; }
+    /* Estado desconocido (mientras carga el status) */
+    .pause-btn.is-loading {
+      background: #1f2937; border-color: #374151; color: #9ca3af;
+      text-transform: none; font-weight: 600;
     }
-    .pause-btn.active:hover { background: #f59e0b30; }
-    .pause-btn.inactive {
-      background: #1f293730; border-color: #374151; color: #d1d5db;
+    /* ACTIVO = verde sólido brillante */
+    .pause-btn.is-running {
+      background: linear-gradient(135deg, #15803d, #22c55e);
+      border-color: #4ade80; color: #f0fdf4;
+      box-shadow: 0 0 12px rgba(34,197,94,0.45);
     }
-    .pause-btn.inactive:hover { background: #1f2937; }
+    .pause-btn.is-running:hover { filter: brightness(1.1); box-shadow: 0 0 18px rgba(34,197,94,0.65); }
+    /* PAUSADO = rojo brillante PARPADEANTE */
+    .pause-btn.is-paused {
+      background: linear-gradient(135deg, #dc2626, #ef4444);
+      border-color: #fca5a5; color: #fff;
+      animation: pause-blink 0.9s ease-in-out infinite;
+    }
+    .pause-btn.is-paused:hover { animation-play-state: paused; filter: brightness(1.12); }
+    @keyframes pause-blink {
+      0%, 100% { box-shadow: 0 0 5px rgba(239,68,68,0.45); filter: brightness(0.96); }
+      50%      { box-shadow: 0 0 24px 5px rgba(239,68,68,0.95); filter: brightness(1.22); }
+    }
 
     .field { margin-bottom: 10px; }
     label {
@@ -221,6 +239,12 @@
     <span class="status-dot status-disconnected" id="status-dot"></span>
     <span id="status-text">Sin conectar</span>
   </div>
+
+  <!-- v0.9.7 — Toggle de actividad PROMINENTE (verde=activo / rojo parpadeante=pausado) -->
+  <button class="pause-btn is-loading" id="pause-btn" type="button" style="display: none;">
+    <span class="pi" id="pause-icon">⏳</span>
+    <span id="pause-text">Cargando estado…</span>
+  </button>
 
   <!-- Update banner -->
   <div class="update-banner" id="update-banner">
@@ -329,11 +353,7 @@
     </div>
   </div>
 
-  <!-- Pause/Resume toggle -->
-  <button class="pause-btn inactive" id="pause-btn" style="display: none;">
-    <span id="pause-icon">⏸️</span>
-    <span id="pause-text">Pausar actividad</span>
-  </button>
+  <!-- Pause/Resume toggle movido arriba (v0.9.7) -->
 
   <!-- Config (collapsible) -->
   <details id="config-details">
