@@ -3430,15 +3430,25 @@ async function sendFollowup(payload = {}) {
     },
   })
 
-  // µ-Phase: typing_complete — verificar que el editor contiene fingerprint completo
-  // Polea hasta que el textContent del editor matchee head + tail (>= 95% del mensaje)
+  // µ-Phase: typing_complete — verificar que el editor contiene el mensaje completo.
+  // v0.9.3 ROBUSTO: (1) re-query el editor VIVO cada poll — el ref `editor` puede quedar
+  // stale si React re-renderiza el composer tras teclear (editor.textContent vacío aunque
+  // el texto SÍ esté en el DOM nuevo → typing_complete_timeout pese a mensaje visible).
+  // (2) aceptar por head + RATIO de longitud (0.9–1.2), no solo endsWith(tail) estricto
+  // (fallaba por un char final/normalización aunque el mensaje estuviera completo).
+  const expectedFullNorm = (message ?? '').slice(0, 8000).toLowerCase().replace(/\s+/g, ' ').trim()
+  const liveEditor = () =>
+    document.querySelector('.msg-form__contenteditable, div[contenteditable="true"][role="textbox"], div.msg-form__msg-content-container [contenteditable="true"]') || editor
   await runner.runPhase('typing_complete', () => {
-    const actual = (editor.textContent ?? '').toLowerCase().replace(/\s+/g, ' ').trim()
-    if (actual.length < expectedHead.length) return null
+    const live = liveEditor()
+    const actual = (live?.textContent ?? '').toLowerCase().replace(/\s+/g, ' ').trim()
+    if (actual.length < Math.min(20, expectedHead.length)) return null
     const hasHead = actual.startsWith(expectedHead.slice(0, 20))
     const hasTail = expectedTail.length === 0 || actual.endsWith(expectedTail.slice(-15))
-    if (hasHead && hasTail) {
-      return { editorLen: actual.length, expectedLen: message.length, ratio: +(actual.length / message.length).toFixed(3) }
+    const ratio = expectedFullNorm.length > 0 ? actual.length / expectedFullNorm.length : 1
+    const lenOk = ratio >= 0.9 && ratio <= 1.2
+    if (hasHead && (hasTail || lenOk)) {
+      return { editorLen: actual.length, expectedLen: message.length, ratio: +ratio.toFixed(3), via: hasTail ? 'head+tail' : 'head+ratio' }
     }
     return null
   }, { timeoutMs: getPhaseTimeout('typing_complete', 4000), intervalMs: 250 })
@@ -3469,7 +3479,8 @@ async function sendFollowup(payload = {}) {
   // (cada \r\n perdía 1 char en editor.textContent porque insertText convierte
   // \n → <br>, no serializable de vuelta). Compare en forma canónica único.
   const canon = (s) => String(s ?? '').replace(/\s+/g, ' ').trim()
-  const editorRaw = (editor.textContent ?? editor.innerText ?? '')
+  const _le65 = liveEditor()  // v0.9.3: editor vivo (no el ref posiblemente stale)
+  const editorRaw = (_le65?.textContent ?? _le65?.innerText ?? '')
   const expectedRaw = message.slice(0, 8000)
   const editorText = canon(editorRaw)
   const expectedText = canon(expectedRaw)
@@ -3486,8 +3497,13 @@ async function sendFollowup(payload = {}) {
   const tooShort = lenRatio < 0.95
   const tooLong  = lenRatio > 1.15
   const tailMismatch = !editorText.endsWith(tailExpected.slice(-15))
-  if (tooShort || tooLong || tailMismatch) {
-    const reason = tooLong ? 'garbled_or_doubled' : tooShort ? 'truncated' : 'tail_mismatch'
+  // v0.9.3: tail-mismatch con longitud OK ya NO bloquea (era un false-positive que dejaba
+  // el mensaje escrito sin enviar). Solo bloqueamos corrupción real (muy corto / doblado).
+  if (tailMismatch && !tooShort && !tooLong) {
+    console.warn(`[Orion content] typing: tail no coincide exacto pero longitud OK (ratio ${lenRatio.toFixed(2)}) → se ACEPTA y se envía`)
+  }
+  if (tooShort || tooLong) {
+    const reason = tooLong ? 'garbled_or_doubled' : 'truncated'
     console.warn(`[Orion content] ⚠️  message_typing_invalid (${reason}): editor=${editorLen} expected=${expectedLen} ratio=${lenRatio.toFixed(2)}`)
     // Limpiar el editor corrupto para no dejar basura visible
     try { editor.innerHTML = ''; editor.dispatchEvent(new Event('input', { bubbles: true })) } catch {}
