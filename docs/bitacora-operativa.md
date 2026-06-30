@@ -9,6 +9,10 @@
 
 ## ✅ Resuelto
 
+### 🔒 SEGURIDAD: InMail/mensaje al contacto equivocado — extensión 0.9.5  [Josh]
+- **Bug**: en `/messaging/compose`, cuando LinkedIn no auto-popula el recipient, el bot escribía el nombre del lead en el typeahead y **clickeaba la PRIMERA sugerencia A CIEGAS** → componía/InMail al **contacto equivocado** (nombre similar o sugerencia ajena), incl. gente fuera de la lista.
+- **Fix (0.9.5)**: verificar que la sugerencia **coincida** con el nombre del lead (normalizado, first+last) antes de clickear; si **ninguna matchea → ABORT `recipient_mismatch`** (no mensajea a nadie). Esos leads (probables 2do grado / nombre no-conexión) dejan de recibir FU a propósito → caen a cuarentena para revisión.
+
 ### FU "escribe pero no envía" (Josh) — extensión 0.9.4  [EL grande]
 - **Root cause**: la verificación `typing_complete` daba **false-negative** (timeout 15s) pese a que el mensaje estaba completo y visible → el bot erraba ANTES de clickear Enviar → dejaba el mensaje huérfano → saltaba al siguiente. Dos causas: (1) ref `editor` **stale** tras re-render de React del composer; (2) `endsWith(tail)` **estricto**.
 - **Fix (0.9.4)**: en las 2 capas de verificación → re-query del **editor vivo** cada poll + aceptar por **head + ratio de longitud** (0.9–1.2), no solo tail estricto.
