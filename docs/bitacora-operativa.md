@@ -2,12 +2,19 @@
 
 > Log vivo del monitoreo. Cada entrada: hallazgo → acción/estado. Lo mantiene Orion (Claude) en modo monitor.
 
-## Estado actual (2026-06-29)
-- **Extensión**: Josh `0.9.4`, Café 57 `0.9.4`, Wal `0.9.3` (pendiente → 0.9.4).
+## Estado actual (2026-07-01)
+- **Extensión**: las 3 cuentas en `0.9.8` (fix shadow DOM). 
 - **PM2**: 4 procesos online (orion, extension-bridge, prometheus-scheduler, xvfb).
-- **Agente de publicación diaria** (Fases A+B+C) en producción.
+- **Agente de publicación diaria** (Fases A+B+C) en producción — 3 borradores en `pending_review` esperando revisión.
+- **⚠️ Josh**: pausa manual recurrente (`extension_paused_by_user`, ~5 veces). Requiere hablar con el operador.
 
 ## ✅ Resuelto
+
+### 🎯 CAUSA RAÍZ del ~82% de FU fallidos: SHADOW DOM — extensión 0.9.8  [EL más grande, validado]
+- **Retrospectiva (mar 30-jun)**: `send_followup` 61 errores vs 13 ok (~82% falla), todos Josh, `typing_complete_timeout` ~15s. `daily_activity.errors=0` lo ocultaba.
+- **Diagnóstico en vivo** (consola en el overlay "Nuevo mensaje"): el composer `.msg-form__contenteditable` existe pero **dentro de un SHADOW ROOT** (`path top>shadow[div]`) → `document.querySelector` NO lo alcanza. LinkedIn movió el composer del overlay (leads sin thread previo) a shadow DOM. FU por **thread existente** (DOM ligero) → funcionan; por **overlay nuevo** (shadow) → siempre fallaban.
+- **Fix (0.9.8)**: helpers `deepQueryAll`/`deepQuery` que perforan shadow DOM, aplicados en: adquisición del editor (`send_followup` + `sendFollowupFromProfile`), `liveEditor`, `findThreadSendButton` (ahora recibe el editor y busca en su shadow root), `readThreadHeader`.
+- **Validado (mié 01-jul)**: (1) snippet con la lógica de 0.9.8 sobre el overlay real 1er grado → `✅ ENCUENTRA el composer` con el texto tecleado; (2) test en vivo → CERO `typing_complete_timeout`; los 2do-grado ahora abortan rápido (`lead_not_first_degree`) en vez de colgarse 15s. **Muchos "typing_timeout" de ayer eran en realidad 2do grado.**
 
 ### 🐛 REGRESIÓN (mía, 0.9.4): el mensaje se borraba "al querer enviar" — extensión 0.9.6  [Josh/Martin]
 - **Causa**: el `liveEditor()` que agregué en 0.9.4 usaba `querySelector` con selector de coma → devolvía el PRIMER `[contenteditable]` en orden del DOM, que podía ser el buscador u otro (no el composer) → la verificación 6.5 leía vacío → "tooShort" → **borraba el composer (con el mensaje completo) justo antes de enviar** y abortaba. Por eso Martin "se escribía bien pero al enviar se borraba".
