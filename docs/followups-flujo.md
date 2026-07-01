@@ -126,11 +126,18 @@ where id = '<lead_id>';
 
 ---
 
-## 7. Pausa de cuenta (popup Orion Sync)
+## 7. Pausa de cuenta — TRES causas (¡`extension_paused_by_user` NO prueba que sea humano!)
 
-- `extension_paused = true` + `extension_paused_until = null` → **pausa MANUAL** (alguien tocó "Pausar"). Gate log: `extension_paused_by_user`.
-- `extension_paused_until` con timestamp → **auto-pausa temporal** (expira sola).
-- El popup (0.9.7) muestra el toggle **arriba**: verde=activo, **rojo parpadeante=pausado**.
+`extension_paused = true` puede venir de:
+1. **Manual** — toggle del popup / dashboard (`app/api/extension/pause-toggle/route.ts`). Setea `extension_paused_reason`.
+2. **Auto-pausa temporal** — `extension_paused_until` con timestamp (expira sola).
+3. **⚠️ CIRCUIT BREAKER de cuenta (Capa 2)** — `lib/extension-dispatch.js` (~333-381) auto-pausa cuando **≥60% de comandos en 30min son "account-fault", de ≥3 leads distintos** (`windowMin=30, minCommands=5, errorThresholdPct=60, MIN_DISTINCT_LEADS_FOR_PAUSE=3`). **Setea `extension_paused=true` SIN `extension_paused_until` ni `extension_paused_reason`** → parece manual pero NO lo es. Crea alerta `account_alerts.alert_type='error_spike'`.
+
+> ⚠️ **El gate log `extension_paused_by_user` es una etiqueta GENÉRICA del scheduler cuando `extension_paused=true` — NO es evidencia de un humano.** Josh fue auto-pausado **8×** por el circuit breaker (spike de `typing_complete_timeout` del bug shadow DOM) y se leyó como "pausa manual" durante días. **Para la causa REAL:** revisar `account_alerts` (`error_spike`) + `extension_paused_reason`, no el label del gate.
+
+**Qué cuenta como "account-fault" para el breaker** (`extension-dispatch.js:333`): NO cuenta `LEAD_FAULT_ERRORS` (2do grado…), `PAGE_RENDER_ERRORS` (UI race), infra transitoria, **ni timeouts de µ-fase** (`micro_phase_*_timeout` — excluidos en el fix del 01-jul). SÍ cuenta: captcha, authwall, rate_limited, timeouts puros sin contexto.
+
+El popup (0.9.7) muestra el toggle **arriba**: verde=activo, **rojo parpadeante=pausado**.
 
 ---
 

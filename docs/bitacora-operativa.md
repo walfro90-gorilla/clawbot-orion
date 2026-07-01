@@ -6,7 +6,7 @@
 - **Extensión**: las 3 cuentas en `0.9.8` (fix shadow DOM). 
 - **PM2**: 4 procesos online (orion, extension-bridge, prometheus-scheduler, xvfb).
 - **Agente de publicación diaria** (Fases A+B+C) en producción — 3 borradores en `pending_review` esperando revisión.
-- **⚠️ Josh**: pausa manual recurrente (`extension_paused_by_user`, ~5 veces). Requiere hablar con el operador.
+- **✅ Josh "pausa manual" recurrente = era el CIRCUIT BREAKER** (no un humano — el operador lo confirmó). El spike de `typing_complete_timeout` (bug shadow DOM) tripeaba el account circuit breaker (Capa 2, `extension-dispatch.js`) → auto-pausa 8× (alertas `error_spike` 29-jun→01-jul). El label `extension_paused_by_user` del gate es genérico y engañó. **Fix**: (1) raíz = shadow DOM 0.9.8; (2) defensa = excluir `micro_phase_*_timeout` de account-fault en el breaker. Ver [`followups-flujo.md §7`](followups-flujo.md).
 
 ## ✅ Resuelto
 
