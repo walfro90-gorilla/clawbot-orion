@@ -3200,6 +3200,20 @@ async function sendFollowup(payload = {}) {
     editor = candidates[0] ?? null
   }
 
+  // v0.9.8 SHADOW DOM: el composer del overlay "Nuevo mensaje" (leads sin thread previo)
+  // vive en un SHADOW ROOT (top>shadow[div]) → document.querySelector no lo ve. Perforar.
+  if (!editor || editor.offsetParent === null) {
+    for (const sel of editorSels) {
+      const deep = deepQueryAll(sel).find(el => el.offsetParent !== null)
+      if (deep) { editor = deep; console.log(`[Orion content] v0.9.8 ✅ editor en SHADOW DOM vía "${sel}"`); break }
+    }
+    if (!editor) {
+      const deepCe = deepQueryAll('div[contenteditable="true"]')
+        .find(el => el.offsetParent !== null && el.getBoundingClientRect().width > 100)
+      if (deepCe) { editor = deepCe; console.log('[Orion content] v0.9.8 ✅ editor (contenteditable) en SHADOW DOM') }
+    }
+  }
+
   // NUDGE: en threads, LinkedIn a veces NO monta el contenteditable hasta que
   // interactúas con el área del formulario. Si no lo encontramos, clickeamos el
   // placeholder/form footer para forzar el render, scroll al fondo, y re-esperamos.
@@ -3461,8 +3475,10 @@ async function sendFollowup(payload = {}) {
   // composer con el mensaje "al querer enviar"). Causa del clear-sin-enviar de Martin.
   const liveEditor = () => {
     if (editor && editor.isConnected) return editor
-    return document.querySelector('.msg-form__contenteditable')
-      || document.querySelector('div.msg-form__msg-content-container [contenteditable="true"]')
+    // v0.9.8: perforar shadow DOM (composer del overlay "Nuevo mensaje" vive en shadow root)
+    return deepQuery('.msg-form__contenteditable')
+      || deepQuery('div.msg-form__msg-content-container [contenteditable="true"]')
+      || deepQuery('div[contenteditable="true"][role="textbox"]')
       || editor
   }
   await runner.runPhase('typing_complete', () => {
@@ -3551,10 +3567,10 @@ async function sendFollowup(payload = {}) {
 
   // 7. Click Send button (botón regular del thread footer / compose page)
   // El send button puede aparecer tardío en compose page — pequeño retry
-  let sendBtn = findThreadSendButton()
+  let sendBtn = findThreadSendButton(editor)
   if (!sendBtn) {
     await sleep(1200)
-    sendBtn = findThreadSendButton()
+    sendBtn = findThreadSendButton(editor)
   }
   if (!sendBtn) {
     return {
@@ -3880,6 +3896,14 @@ async function sendFollowupFromProfile(payload) {
         return r.width > 100 && r.height > 20
       })
   }
+  // v0.9.8 SHADOW DOM: el composer del overlay "Nuevo mensaje" vive en un shadow root
+  // (top>shadow[div]) → document.querySelector no lo ve. Perforar shadow DOM.
+  if (!editor || editor.offsetParent === null) {
+    for (const sel of overlayEditorSels) {
+      const deep = deepQueryAll(sel).find(el => el.offsetParent !== null)
+      if (deep) { editor = deep; console.log(`[Orion content] v0.9.8 ✅ overlay editor en SHADOW DOM vía "${sel}"`); break }
+    }
+  }
   if (!editor) {
     // Debug exhaustivo: dump del DOM relevante para diagnosticar
     const allEditables = Array.from(document.querySelectorAll('div[contenteditable], textarea, input[type="text"]'))
@@ -3943,10 +3967,10 @@ async function sendFollowupFromProfile(payload) {
   }
 
   // 6. Click Send button del overlay
-  let sendBtn = findThreadSendButton()
+  let sendBtn = findThreadSendButton(editor)
   if (!sendBtn) {
     await sleep(1200)
-    sendBtn = findThreadSendButton()
+    sendBtn = findThreadSendButton(editor)
   }
   if (!sendBtn) {
     return {
@@ -4129,6 +4153,29 @@ function dumpTopCardButtons() {
 
 // ── Helpers thread page ──────────────────────────────────────────────────────
 
+// ── Shadow-DOM-piercing query helpers (v0.9.8) ────────────────────────────────
+// LinkedIn movió el composer del overlay "Nuevo mensaje" a un SHADOW ROOT
+// (path top>shadow[div]) → document.querySelector NO lo alcanza. Estos helpers
+// recorren shadow roots recursivamente. Causa raíz del ~82% de FU fallidos
+// (typing_complete_timeout: el bot nunca encontraba el composer en shadow DOM).
+function deepQueryAll(selector, root = document) {
+  const out = []
+  const stack = [root]
+  while (stack.length) {
+    const node = stack.pop()
+    let matches
+    try { matches = node.querySelectorAll(selector) } catch { matches = [] }
+    for (const el of matches) out.push(el)
+    let all
+    try { all = node.querySelectorAll('*') } catch { all = [] }
+    for (const el of all) if (el.shadowRoot) stack.push(el.shadowRoot)
+  }
+  return out
+}
+function deepQuery(selector, root = document) {
+  return deepQueryAll(selector, root)[0] || null
+}
+
 function readThreadHeader() {
   const sels = [
     '.msg-entity-lockup__entity-title',
@@ -4137,7 +4184,7 @@ function readThreadHeader() {
     'h2[class*="msg-thread"]',
   ]
   for (const sel of sels) {
-    const el = document.querySelector(sel)
+    const el = deepQuery(sel)  // v0.9.8: perfora shadow DOM (overlay "Nuevo mensaje")
     if (el && el.offsetParent !== null) {  // FIX: chequear null PRIMERO
       return (el.textContent ?? '').trim()
     }
@@ -4145,7 +4192,7 @@ function readThreadHeader() {
   return ''
 }
 
-function findThreadSendButton() {
+function findThreadSendButton(knownEditor) {
   // El botón Enviar puede estar en:
   // - Thread page: dentro de .msg-form (footer del editor)
   // - Compose page: dentro de .msg-compose-form / artdeco-modal__content / contenedor padre del editor
@@ -4176,9 +4223,12 @@ function findThreadSendButton() {
     )
   }
 
-  // 1. Buscar el editor visible — sirve como anchor para localizar el form
-  const editor = Array.from(document.querySelectorAll('div[contenteditable="true"]'))
-    .find(el => el.offsetParent !== null && el.getBoundingClientRect().width > 100)
+  // 1. Buscar el editor visible — sirve como anchor para localizar el form.
+  // v0.9.8: preferir el editor conocido (puede estar en shadow DOM); si no, deep-buscar.
+  const editor = (knownEditor && knownEditor.offsetParent !== null)
+    ? knownEditor
+    : deepQueryAll('div[contenteditable="true"]')
+        .find(el => el.offsetParent !== null && el.getBoundingClientRect().width > 100)
 
   // 2. Walk up from editor para encontrar el form-like ancestor
   if (editor) {
@@ -4201,15 +4251,18 @@ function findThreadSendButton() {
       }
     }
     // Si no encontramos un form ancestor identificable, buscar en el contenedor más amplio
-    // (e.g. artdeco-modal__content, role=main, etc.)
-    const container = editor.closest('[role="main"], main, .artdeco-modal__content, .msg-overlay-bubble') ?? document.body
+    // (e.g. artdeco-modal__content, role=main, etc.). v0.9.8: si el editor está en shadow
+    // DOM, closest() no sale del shadow → usar el shadow root como contenedor.
+    const root = editor.getRootNode()
+    const container = editor.closest('[role="main"], main, .artdeco-modal__content, .msg-overlay-bubble')
+      || (root instanceof ShadowRoot ? root : document.body)
     const buttons = Array.from(container.querySelectorAll('button, [role="button"]'))
     const hit = buttons.find(isSendCandidate)
     if (hit) return hit
   }
 
-  // 3. Fallback global — TODO el documento
-  const allButtons = Array.from(document.querySelectorAll('button, [role="button"]'))
+  // 3. Fallback global — TODO el documento + shadow DOM (v0.9.8)
+  const allButtons = deepQueryAll('button, [role="button"]')
   return allButtons.find(isSendCandidate) ?? null
 }
 

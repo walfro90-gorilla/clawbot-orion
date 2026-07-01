@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Orion Sync",
-  "version": "0.9.7",
+  "version": "0.9.8",
   "description": "Conecta tu Chrome con Orion para ejecutar acciones de LinkedIn desde tu propia IP/sesión. Sin baneos por multi-IP.",
   "minimum_chrome_version": "116",
   "permissions": [
