@@ -338,6 +338,12 @@ export async function checkAccountHealthAndPause(accountId, opts = {}) {
     }
     if (LEAD_FAULT_ERRORS.has(err)) return false
     if (PAGE_RENDER_ERRORS.has(err)) return false
+    // v0.9.8: los timeouts de µ-fase (typing_complete, editor_focused, send_button_enabled…)
+    // son races de UI/render de LinkedIn, NO account-fault. Antes NO se excluían → el spike
+    // de micro_phase_typing_complete_timeout (bug shadow DOM) auto-pausó a Josh 8× vía este
+    // circuit breaker. Raíz arreglada en la extensión 0.9.8; esto es defensa para que ningún
+    // timeout residual de µ-fase vuelva a auto-pausar la cuenta (Capa 1 los maneja por-lead).
+    if (typeof err === 'string' && err.startsWith('micro_phase_') && err.includes('timeout')) return false
     if (isTransientInfraError(err)) return false
     return true
   })
