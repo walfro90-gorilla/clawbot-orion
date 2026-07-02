@@ -11,6 +11,13 @@
 
 ## ✅ Resuelto
 
+### 🔒 SEGURIDAD: InMail a 2do-grado + destinatario en ruta compose — extensión 0.9.12  [validado]
+- **Reporte de Josh**: el bot mandaba **InMails a contactos fuera de la lista**. **Causa**: el deep-pierce 0.9.10 hizo alcanzable el composer shadow — incluido el de **InMail de un 2do-grado** — y las guardas anti-InMail eran **shadow-ciegas** (`document.*`). Compose además no verificaba destinatario (`headerName` vacío). **Amplificador**: accept-detection marca `connected` a 2do-grados (invitación retirada/expirada ≠ aceptada).
+- **Proceso**: pausé los FU de Josh (`follow_up_paused`) → fix → test → despausé (como pidió el usuario).
+- **Fix (0.9.12)**: guardas fail-closed en compose — InMail **deep** (light+shadow) + verificación de destinatario en `document.body` (el chip "Para:" vive en DOM ligero, NO en el shadow del composer; el 0.9.11 buscaba en el shadow → false-block de TODO, corregido en 0.9.12).
+- **Validado**: Jorge (1er grado) `sent_confirmed`; José Jorge (2do grado) abortó sin enviar.
+- **Pendiente**: Wal + Café reinstalar 0.9.12 (mismo riesgo hasta entonces). Ver [`followups-flujo.md §1`](followups-flujo.md).
+
 ### 🎯 CAUSA RAÍZ REAL del ~82% de FU fallidos: WHITESPACE — extensión 0.9.10  [validado 3/3 en vivo]
 - **El shadow DOM fue red herring.** Evidencia del bot real (`_typingDiag`, build diagnóstico 0.9.9): en la página real del FU el composer está en **DOM ligero** (`inShadow:false`), el texto **SÍ aterriza** (`editorLen 392/405`), pero `typing_complete` fallaba igual.
 - **Causa real**: el mensaje trae `\n\n` → en `expectedHead` normaliza a UN espacio (`"tal! se"`), pero al teclear con `execCommand('insertText')` el `\n` se vuelve `<br>` y **desaparece** de `editor.textContent` (`"tal!se"`) → `actual.startsWith(expectedHead)` **siempre false** → `typing_complete` 15s timeout. Afecta **thread Y overlay** (es por el mensaje, no el composer) → por eso fallaban ambos.

@@ -29,6 +29,18 @@ Al principio se creyó que el composer en shadow DOM era la causa (la consola so
 ### El fix shadow DOM (0.9.8) — queda como DEFENSA (no era la causa)
 Helpers `deepQueryAll`/`deepQuery` (`content.js` ~4132) que **perforan shadow DOM**, aplicados en adquisición del editor, `liveEditor` (~3462), `findThreadSendButton(editor)` (~4187), `readThreadHeader`. Algunas páginas de LinkedIn (el modal "Nuevo mensaje" desde `/search`) SÍ usan composer en shadow root, así que la defensa es válida — pero **NO era la causa del fallo del bot** (su página real es DOM ligero). Regla vigente: para el composer/thread/botón Enviar en la ruta FU usar `deepQuery*`, no `document.querySelector`.
 
+### 🔒 Seguridad de la ruta compose: InMail a 2do-grado + destinatario (0.9.11-0.9.12)
+
+**El problema (02-jul):** al hacer el composer shadow-alcanzable (deep-pierce 0.9.10), el bot empezó a **enviar InMails a leads 2do-grado** — porque las guardas anti-InMail (`detectNotMessageable`, hint "créditos", botones InMail) usaban `document.*`/`innerText` → **ciegas al shadow DOM** del overlay. Y la ruta compose **no verificaba destinatario** (`headerName` vacío → el check de header se salta). **Amplificador:** el accept-detection marca `connected` a leads que salieron de "invitaciones pendientes" por **retirada/expiración** (no solo aceptación) → 2do-grados entran a compose.
+
+**Fix (0.9.12):** dos guardas fail-closed en la ruta compose, ANTES de teclear (`content.js` ~3394):
+1. **InMail deep**: texto "créditos"/InMail vía `deepQueryAll('h1..label')` (light+shadow, con límite de longitud) + botones InMail deep → si detecta → `lead_not_first_degree` (no envía).
+2. **Destinatario**: el nombre del lead debe aparecer en `document.body` (`innerText` + `innerHTML`). **Lección clave:** el composer vive en shadow DOM, pero el **chip "Para:" vive en el DOM LIGERO, en OTRO árbol** — buscar el nombre en el shadow root del composer da `false` SIEMPRE → false-block de TODOS los primeros FU (bug del 0.9.11, corregido en 0.9.12 buscando en `document.body`; confirmado con snippet: `shadowComposer:false, bodyLight:true`).
+
+**Validado (02-jul):** Jorge A. L. (1er grado) → `sent_confirmed`; José Jorge (2do grado, sin composer) → abortó `compose_no_editor_recaptcha_only` sin enviar.
+
+**Residual conocido:** si LinkedIn muestra una variante de InMail sin texto "créditos" ni botón detectable, podría colarse una → pedir el lead exacto y endurecer. **Backlog:** endurecer accept-detection para no marcar `connected` sin verificar grado real.
+
 ---
 
 ## 2. ¿Cuándo un lead es "due" para su próximo FU?
@@ -113,12 +125,13 @@ where id = '<lead_id>';
 | `sent_unconfirmed` | editor se vació pero no se confirmó en DOM → el bridge lo trata como enviado | ✅ (ojo: puede ser falso-positivo si un método sintético vacía sin enviar — backlog) |
 | `already_responded` | el último msg del thread ya es nuestro (pre-send guard) → no duplica | ✅ |
 | `awaiting_response` | LinkedIn aplicó ban-window (composer/send disabled) → no gasta retry | ✅ |
-| `lead_not_first_degree` | 2do grado / sin composer → aborta sin mensajear | ✅ |
-| `recipient_mismatch` | el typeahead no coincide con el nombre del lead → aborta (seguridad 0.9.5) | ✅ (no mensajea al equivocado) |
+| `lead_not_first_degree` | 2do grado / sin composer → aborta sin mensajear. Reasons: `sales_nav_redirect`, `compose_no_editor_recaptcha_only`, `inmail_required`, y **`inmail_overlay_shadow_aware`** (0.9.12: InMail detectado deep en overlay shadow → NO envía InMail) | ✅ |
+| `recipient_mismatch` | el nombre del lead no coincide/no aparece → aborta. Reasons: `typeahead_no_match` (0.9.5, typeahead) y **`lead_name_not_on_compose_page`** (0.9.12: en compose el nombre debe estar en `document.body`; ver §1) | ✅ (no mensajea al equivocado) |
 | `thread_editor_not_found` | no encontró composer (ni en shadow DOM) | ⚠️ investigar |
 | `thread_header_mismatch` | el header del thread no es el lead esperado | ⚠️ |
 | `send_method_exhausted` | ningún método de envío (humanClick/ctrl_enter/plain_enter/form_submit) vació el editor | ⚠️ |
-| `micro_phase_typing_complete_timeout_*` | **el bug shadow DOM (pre-0.9.8)** — no debería reaparecer | ❌ si aparece, el fix falló para algún caso |
+| `micro_phase_typing_complete_timeout_*` | **el bug whitespace (pre-0.9.10)**: el texto aterriza pero `hasHead` no matchea por `\n`→`<br>` perdido. Fix = `noWs`. | ❌ si reaparece → §9 (leer `_typingDiag`) |
+| otros `micro_phase_*_timeout` | una µ-fase (editor_focused, send_button_enabled…) no se cumplió a tiempo — normalmente UI/timing de LinkedIn | ⚠️ §9 |
 
 ---
 
@@ -145,3 +158,45 @@ El popup (0.9.7) muestra el toggle **arriba**: verde=activo, **rojo parpadeante=
 - La campaña de Josh (`linkedin_account_id=2ea4a7f2-…`) tiene **20 pasos de FU** todos `enabled`.
 - El scheduler dispatcha **1 FU por campaña por tick** y ordena por `consecutive_failures ASC` → los leads limpios van primero.
 - El scheduler corre `runTickSafely()` **inmediato al arrancar** (`~2082`) → `pm2 restart prometheus-scheduler` fuerza un tick ya.
+
+---
+
+## 9. 🚑 Playbook: los FU vuelven a fallar (LinkedIn cambió algo)
+
+> La ruta corta. Hoy tardamos días por saltarnos estos pasos y suponer. Síguelos EN ORDEN.
+
+**Paso 0 — Medir de verdad (no confiar en dashboards):**
+```sql
+select action, status, count(*) from extension_commands
+where created_at > now()-interval '2 days' group by 1,2 order by 1,2;
+```
+→ Mira `send_followup`: ¿qué % es `error`/`timeout`? `daily_activity.errors` MIENTE (no cuenta fallos de comando).
+
+**Paso 1 — ¿Qué error domina?** (agrupa por `error`):
+```sql
+select coalesce(nullif(error,''), result->>'error') err, count(*) from extension_commands
+where action='send_followup' and status in ('error','timeout') and created_at > now()-interval '1 day'
+group by 1 order by 2 desc;
+```
+Luego según el error:
+
+- **`micro_phase_typing_complete_timeout_*`** → el composer se encontró y (casi seguro) el texto aterrizó, pero la verificación no confirma. **NO asumas shadow DOM.** Lee el `_typingDiag` del `result` (el build lo incluye automáticamente):
+  ```sql
+  select jsonb_pretty(result->'_typingDiag') from extension_commands
+  where error like '%typing_complete_timeout%' order by created_at desc limit 3;
+  ```
+  Interpretar: `editorLen` vs `expectedLen` (¿aterrizó?), `inShadow` (¿shadow DOM?), `sameElem` (¿liveEditor lee otro?), `sample` (¿qué texto hay?), `activeIsEditor`. Con eso sabes si es whitespace/normalización, elemento equivocado, o typing que no cae. **(Este es el atajo que nos faltó — el `_typingDiag` da la respuesta en 1 query.)**
+- **`thread_editor_not_found` / `compose_editor_not_found_in_overlay`** → LinkedIn cambió el DOM del composer. Diagnóstico en consola (página LinkedIn con el compose abierto) con el snippet shadow-piercing (busca `.msg-form__contenteditable` perforando shadow roots). Si está en shadow y el bot no lo halla → revisar `deepQuery`. Si cambió la clase → actualizar `editorSels`.
+- **`lead_not_first_degree`** → normal para 2do grado (no es bug). Si sube MUCHO, LinkedIn puede estar restringiendo, o los leads no son de 1er grado.
+- **`send_method_exhausted`** → cambió el botón Enviar / su clase. Revisar `findThreadSendButton` (`isSendCandidate`).
+
+**Paso 2 — ¿Una cuenta "no hace nada"?**
+1. `select extension_paused, extension_paused_reason from linkedin_accounts where label='X'`.
+2. Si `paused=true`: **NO asumas manual.** Revisa `account_alerts` (`error_spike`) → si hay, fue el **circuit breaker** (§7). Mira qué error lo tripó y si debe excluirse (`extension-dispatch.js:333`).
+3. Reactivar: `update linkedin_accounts set extension_paused=false, extension_paused_until=null`.
+
+**Paso 3 — ¿Un lead concreto no recibe FU aunque esté "vencido"?** → tabla §4. Revisa `quarantined_at`, `cooldown_until` (futuro), `automation_paused`, lockout, edad >30d. Recuperar = limpiar los **4** campos (§4), no solo `consecutive_failures`.
+
+**Paso 4 — Probar sin esperar el tick:** insertar un `send_followup` directo en `extension_commands` (payload `{threadUrl, profileUrl, leadId, leadName, message, step}`, `status='pending'`, `expires_at=now()+9min`) → el bridge lo despacha en segundos. Resolver `{nombre}` a mano (bypassa el placeholder-guard del scheduler).
+
+**Principio rector:** el `_typingDiag` y `extension_commands.result` traen la verdad del bot real. Los snippets de consola (mundo de la página) **NO replican el isolated world del content script** — úsalos para inspeccionar el DOM, no para concluir que "funciona".
