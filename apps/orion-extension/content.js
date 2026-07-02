@@ -3486,9 +3486,17 @@ async function sendFollowup(payload = {}) {
     const live = liveEditor()
     const actual = (live?.textContent ?? '').toLowerCase().replace(/\s+/g, ' ').trim()
     if (actual.length < Math.min(20, expectedHead.length)) return null
-    const hasHead = actual.startsWith(expectedHead.slice(0, 20))
-    const hasTail = expectedTail.length === 0 || actual.endsWith(expectedTail.slice(-15))
-    const ratio = expectedFullNorm.length > 0 ? actual.length / expectedFullNorm.length : 1
+    // v0.9.10 FIX RAÍZ: comparar SIN espacios. Evidencia (_typingDiag): el texto SÍ
+    // aterriza (editorLen 392/405, inShadow=false) pero hasHead nunca matcheaba porque
+    // el mensaje trae \n\n → en expectedHead normaliza a UN espacio ("tal! se"), pero al
+    // teclear el \n se vuelve <br> y DESAPARECE de editor.textContent ("tal!se"). Sin
+    // espacios, ambos lados coinciden. Causa real del ~82% de typing_complete_timeout.
+    const noWs = (s) => s.replace(/\s+/g, '')
+    const actualNoWs = noWs(actual)
+    const expFullNoWs = noWs(expectedFullNorm)
+    const hasHead = actualNoWs.startsWith(noWs(expectedHead).slice(0, 18))
+    const hasTail = expectedTail.length === 0 || actualNoWs.endsWith(noWs(expectedTail).slice(-12))
+    const ratio = expFullNoWs.length > 0 ? actualNoWs.length / expFullNoWs.length : 1
     const lenOk = ratio >= 0.9 && ratio <= 1.2
     if (hasHead && (hasTail || lenOk)) {
       return { editorLen: actual.length, expectedLen: message.length, ratio: +ratio.toFixed(3), via: hasTail ? 'head+tail' : 'head+ratio' }
@@ -3552,7 +3560,11 @@ async function sendFollowup(payload = {}) {
   const expectedText = canon(expectedRaw)
   const editorLen = editorText.length
   const expectedLen = expectedText.length
-  const lenRatio = expectedLen > 0 ? editorLen / expectedLen : 0
+  // v0.9.10: ratio SIN espacios. canon() colapsa \n→espacio en expected, pero en
+  // editor.textContent el \n (=<br>) DESAPARECE → expectedLen infla vs editorLen y
+  // dispara tooShort falso en mensajes con muchos saltos. Sin whitespace = ratio fiel.
+  const _nw = (s) => String(s ?? '').replace(/\s+/g, '')
+  const lenRatio = _nw(expectedRaw).length > 0 ? _nw(editorRaw).length / _nw(expectedRaw).length : 0
   // Comparamos últimos 30 chars (tail, ya canónico) — si typing fue cortado, el tail no coincide
   const tailExpected = expectedText.slice(-30)
   const tailEditor = editorText.slice(-30)
