@@ -3481,6 +3481,7 @@ async function sendFollowup(payload = {}) {
       || deepQuery('div[contenteditable="true"][role="textbox"]')
       || editor
   }
+  try {
   await runner.runPhase('typing_complete', () => {
     const live = liveEditor()
     const actual = (live?.textContent ?? '').toLowerCase().replace(/\s+/g, ' ').trim()
@@ -3494,6 +3495,29 @@ async function sendFollowup(payload = {}) {
     }
     return null
   }, { timeoutMs: getPhaseTimeout('typing_complete', 4000), intervalMs: 250 })
+  } catch (tcErr) {
+    // v0.9.9 DIAG: estado EXACTO del editor cuando typing_complete NO confirma (isolated world).
+    // Los tests de consola (página) mostraron que encontrar+teclear el composer shadow funciona,
+    // pero el bot real falla → esto captura qué ve el content script en el momento del timeout.
+    const _leD = liveEditor()
+    let inShadow = null, activeInShadow = null
+    try { inShadow = editor?.getRootNode() instanceof ShadowRoot } catch {}
+    try { const rn = editor?.getRootNode(); activeInShadow = (rn && 'activeElement' in rn) ? (rn.activeElement === editor) : null } catch {}
+    const _typingDiag = {
+      editorLen: editor?.textContent?.length ?? -1,
+      liveLen: _leD?.textContent?.length ?? -1,
+      sameElem: editor === _leD,
+      editorConnected: editor?.isConnected ?? null,
+      inShadow,
+      activeIsEditor: (document.activeElement === editor) || activeInShadow,
+      editorCls: (editor?.className ?? '').toString().slice(0, 40),
+      sample: (editor?.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 60),
+      expectedHead: expectedHead.slice(0, 30),
+      expectedLen: message.length,
+    }
+    console.warn('[Orion content] v0.9.9 typing_complete DIAG:', JSON.stringify(_typingDiag))
+    return { action: 'send_followup', status: 'error', error: String(tcErr?.message || tcErr), _typingDiag, headerName, currentUrl: location.href }
+  }
 
   await setPhase('typed', { leadName, charsTyped: editor.textContent?.length ?? 0 })
   await sleep(randInt(500, 1000))
