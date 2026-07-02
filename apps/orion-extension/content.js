@@ -3398,30 +3398,29 @@ async function sendFollowup(payload = {}) {
   // verificaba destinatario (headerName vacío). Esto corre sobre el shadow root REAL del
   // composer. Fail-closed: si es InMail, o no confirmo que el destinatario sea el lead → NO envía.
   if (isComposePage) {
-    const _root = editor.getRootNode()
-    const _scope = (_root && _root.nodeType === 11)  // 11 = DocumentFragment/ShadowRoot
-      ? _root
-      : (editor.closest('[class*="msg-overlay"], [class*="compose"], .msg-form, [role="dialog"]') || document.body)
-    const _txt = (_scope.textContent || '')
-    const _html = (_scope.innerHTML || _scope.textContent || '')
-    // (1) InMail / 2do grado — texto de créditos + botones InMail (deep = shadow-aware)
-    const _inmailText = /cr[eé]ditos disponibles|inmail credits?|de \d+ cr[eé]ditos|mensaje inmail|enviar inmail/i.test(_txt)
+    // (1) InMail / 2do grado — DEEP (light + shadow): texto "créditos"/InMail + botones InMail.
+    const _inmailRe = /cr[eé]ditos disponibles|inmail credits?|de \d+ cr[eé]ditos|mensaje inmail|enviar inmail/i
+    const _inmailText = deepQueryAll('h1, h2, h3, h4, p, span, a, button, label')
+      .some(el => el.offsetParent !== null && (el.textContent || '').length < 200 && _inmailRe.test(el.textContent || ''))
     const _inmailBtn = deepQueryAll('button[aria-label*="InMail" i], a[aria-label*="InMail" i], [class*="inmail-cta" i], button[class*="inmail" i]')
       .some(b => b.offsetParent !== null)
     if (_inmailText || _inmailBtn) {
-      console.warn('[Orion content] v0.9.11 — InMail/2do-grado en overlay (shadow-aware) → ABORT, no InMail')
+      console.warn('[Orion content] v0.9.12 — InMail/2do-grado en overlay → ABORT, no InMail')
       return { action: 'send_followup', status: 'error', error: 'lead_not_first_degree', reason: 'inmail_overlay_shadow_aware', signal: _inmailText ? 'text' : 'button', url: location.href }
     }
-    // (2) destinatario = lead — el nombre del lead DEBE aparecer en el overlay de compose
+    // (2) destinatario = lead — el nombre vive en el DOM LIGERO (chip "Para:"), FUERA del shadow
+    // root del composer (confirmado: shadowComposer=false, bodyLight=true). v0.9.11 buscaba solo
+    // en el shadow → false-block de TODO primer FU. Ahora se busca en document.body (innerText
+    // visible + innerHTML para atributos). Fail-closed: si el nombre no está en la página → abort.
     const _norm = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ').trim()
     const _parts = _norm(leadName).split(' ').filter(w => w.length >= 3)
     if (_parts.length >= 1) {
-      const _h = _norm(_html)
+      const _page = _norm((document.body.innerText || '') + ' ' + (document.body.innerHTML || ''))
       const _first = _parts[0], _last = _parts[_parts.length - 1]
-      const _match = (_parts.length === 1) ? _h.includes(_first) : (_h.includes(_first) && _h.includes(_last))
+      const _match = (_parts.length === 1) ? _page.includes(_first) : (_page.includes(_first) && _page.includes(_last))
       if (!_match) {
-        console.warn(`[Orion content] v0.9.11 — destinatario NO verificado para "${leadName}" en overlay → ABORT recipient_mismatch`)
-        return { action: 'send_followup', status: 'error', error: 'recipient_mismatch', reason: 'lead_name_not_in_compose_overlay', leadName, url: location.href }
+        console.warn(`[Orion content] v0.9.12 — destinatario NO verificado para "${leadName}" en la página → ABORT recipient_mismatch`)
+        return { action: 'send_followup', status: 'error', error: 'recipient_mismatch', reason: 'lead_name_not_on_compose_page', leadName, url: location.href }
       }
     }
   }
