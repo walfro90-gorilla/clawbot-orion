@@ -3143,8 +3143,8 @@ async function sendFollowup(payload = {}) {
     }
   }
   // El overlay InMail tiene texto "créditos disponibles" o "Mensaje InMail"
-  const inmailHint = Array.from(document.querySelectorAll('h2, h3, p, span'))
-    .slice(0, 50)
+  const inmailHint = deepQueryAll('h2, h3, p, span')  // v0.9.11: shadow-aware (overlay en shadow DOM)
+    .slice(0, 150)
     .find(el => /créditos disponibles|InMail credits|de \d+ créditos/i.test(el.textContent ?? ''))
   if (inmailHint) {
     return {
@@ -3387,6 +3387,41 @@ async function sendFollowup(payload = {}) {
         error:  'thread_header_mismatch',
         expected: leadName,
         gotHeader: headerName,
+      }
+    }
+  }
+
+  // 4.4 v0.9.11 SAFETY (compose): verificación SHADOW-AWARE de InMail(2do grado) + destinatario.
+  // Las guardas viejas (~3136, detectNotMessageable) usan document.*/innerText → CIEGAS al
+  // shadow DOM del overlay "Nuevo mensaje". Tras el deep-pierce de 0.9.10 el bot encontraba y
+  // tecleaba el composer shadow — INCLUIDO el de InMail de un 2do-grado — y compose no
+  // verificaba destinatario (headerName vacío). Esto corre sobre el shadow root REAL del
+  // composer. Fail-closed: si es InMail, o no confirmo que el destinatario sea el lead → NO envía.
+  if (isComposePage) {
+    const _root = editor.getRootNode()
+    const _scope = (_root && _root.nodeType === 11)  // 11 = DocumentFragment/ShadowRoot
+      ? _root
+      : (editor.closest('[class*="msg-overlay"], [class*="compose"], .msg-form, [role="dialog"]') || document.body)
+    const _txt = (_scope.textContent || '')
+    const _html = (_scope.innerHTML || _scope.textContent || '')
+    // (1) InMail / 2do grado — texto de créditos + botones InMail (deep = shadow-aware)
+    const _inmailText = /cr[eé]ditos disponibles|inmail credits?|de \d+ cr[eé]ditos|mensaje inmail|enviar inmail/i.test(_txt)
+    const _inmailBtn = deepQueryAll('button[aria-label*="InMail" i], a[aria-label*="InMail" i], [class*="inmail-cta" i], button[class*="inmail" i]')
+      .some(b => b.offsetParent !== null)
+    if (_inmailText || _inmailBtn) {
+      console.warn('[Orion content] v0.9.11 — InMail/2do-grado en overlay (shadow-aware) → ABORT, no InMail')
+      return { action: 'send_followup', status: 'error', error: 'lead_not_first_degree', reason: 'inmail_overlay_shadow_aware', signal: _inmailText ? 'text' : 'button', url: location.href }
+    }
+    // (2) destinatario = lead — el nombre del lead DEBE aparecer en el overlay de compose
+    const _norm = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ').trim()
+    const _parts = _norm(leadName).split(' ').filter(w => w.length >= 3)
+    if (_parts.length >= 1) {
+      const _h = _norm(_html)
+      const _first = _parts[0], _last = _parts[_parts.length - 1]
+      const _match = (_parts.length === 1) ? _h.includes(_first) : (_h.includes(_first) && _h.includes(_last))
+      if (!_match) {
+        console.warn(`[Orion content] v0.9.11 — destinatario NO verificado para "${leadName}" en overlay → ABORT recipient_mismatch`)
+        return { action: 'send_followup', status: 'error', error: 'recipient_mismatch', reason: 'lead_name_not_in_compose_overlay', leadName, url: location.href }
       }
     }
   }
