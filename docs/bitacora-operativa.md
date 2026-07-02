@@ -2,15 +2,23 @@
 
 > Log vivo del monitoreo. Cada entrada: hallazgo → acción/estado. Lo mantiene Orion (Claude) en modo monitor.
 
-## Estado actual (2026-07-01)
-- **Extensión**: las 3 cuentas en `0.9.8` (fix shadow DOM). 
+## Estado actual (2026-07-02)
+- **Extensión**: `0.9.10` (fix raíz whitespace en `typing_complete`). Josh confirmado; Wal/Café pueden ir detrás.
+- **✅ FU FUNCIONANDO**: validado en vivo 3/3 `sent_confirmed` (overlay + thread), 0 timeouts.
 - **PM2**: 4 procesos online (orion, extension-bridge, prometheus-scheduler, xvfb).
 - **Agente de publicación diaria** (Fases A+B+C) en producción — 3 borradores en `pending_review` esperando revisión.
 - **✅ Josh "pausa manual" recurrente = era el CIRCUIT BREAKER** (no un humano — el operador lo confirmó). El spike de `typing_complete_timeout` (bug shadow DOM) tripeaba el account circuit breaker (Capa 2, `extension-dispatch.js`) → auto-pausa 8× (alertas `error_spike` 29-jun→01-jul). El label `extension_paused_by_user` del gate es genérico y engañó. **Fix**: (1) raíz = shadow DOM 0.9.8; (2) defensa = excluir `micro_phase_*_timeout` de account-fault en el breaker. Ver [`followups-flujo.md §7`](followups-flujo.md).
 
 ## ✅ Resuelto
 
-### 🎯 CAUSA RAÍZ del ~82% de FU fallidos: SHADOW DOM — extensión 0.9.8  [EL más grande, validado]
+### 🎯 CAUSA RAÍZ REAL del ~82% de FU fallidos: WHITESPACE — extensión 0.9.10  [validado 3/3 en vivo]
+- **El shadow DOM fue red herring.** Evidencia del bot real (`_typingDiag`, build diagnóstico 0.9.9): en la página real del FU el composer está en **DOM ligero** (`inShadow:false`), el texto **SÍ aterriza** (`editorLen 392/405`), pero `typing_complete` fallaba igual.
+- **Causa real**: el mensaje trae `\n\n` → en `expectedHead` normaliza a UN espacio (`"tal! se"`), pero al teclear con `execCommand('insertText')` el `\n` se vuelve `<br>` y **desaparece** de `editor.textContent` (`"tal!se"`) → `actual.startsWith(expectedHead)` **siempre false** → `typing_complete` 15s timeout. Afecta **thread Y overlay** (es por el mensaje, no el composer) → por eso fallaban ambos.
+- **Fix (0.9.10)**: comparar head/tail/ratio **SIN espacios** (`noWs`) en `typing_complete` + verificación 6.5.
+- **Validado en vivo (02-jul)**: 3/3 FU forzados → **`sent_confirmed`** (Denis+Mariano overlay, Martin thread), **0 typing_complete_timeout**, leads avanzaron a `follow_up_sent`. Ver [`followups-flujo.md §1`](followups-flujo.md).
+- El fix shadow DOM (0.9.8, `deepQuery`) queda como **defensa** (algunas páginas de LinkedIn sí usan composer en shadow root), pero no era la causa.
+
+### 🎯 (red herring) SHADOW DOM — extensión 0.9.8  [defensa, no era la causa raíz]
 - **Retrospectiva (mar 30-jun)**: `send_followup` 61 errores vs 13 ok (~82% falla), todos Josh, `typing_complete_timeout` ~15s. `daily_activity.errors=0` lo ocultaba.
 - **Diagnóstico en vivo** (consola en el overlay "Nuevo mensaje"): el composer `.msg-form__contenteditable` existe pero **dentro de un SHADOW ROOT** (`path top>shadow[div]`) → `document.querySelector` NO lo alcanza. LinkedIn movió el composer del overlay (leads sin thread previo) a shadow DOM. FU por **thread existente** (DOM ligero) → funcionan; por **overlay nuevo** (shadow) → siempre fallaban.
 - **Fix (0.9.8)**: helpers `deepQueryAll`/`deepQuery` que perforan shadow DOM, aplicados en: adquisición del editor (`send_followup` + `sendFollowupFromProfile`), `liveEditor`, `findThreadSendButton` (ahora recibe el editor y busca en su shadow root), `readThreadHeader`.

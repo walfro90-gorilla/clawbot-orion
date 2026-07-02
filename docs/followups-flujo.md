@@ -1,12 +1,12 @@
 # Cómo funcionan los Follow-ups (ground truth verificado)
 
-> Verificado contra el código vivo el **2026-07-01** (raíz del bug shadow DOM + gates de elegibilidad).
+> Verificado contra el código vivo el **2026-07-01/02**. Causa raíz del ~82% de FU fallidos = **mismatch de whitespace en `typing_complete`** (fix 0.9.10, ver §1); shadow DOM fue red herring. + gates de elegibilidad.
 > Si algo aquí contradice el código, **gana el código** — pero esto existe para **no re-suponer** lo ya investigado.
 > Archivos clave: `apps/prometheus/scheduler-extension.js` (orquestador) · `apps/orion-extension/content.js` (ejecución) · `apps/prometheus/extension-bridge.js` (dispatch + ingest).
 
 ---
 
-## 1. Dos rutas de composer (CRÍTICO — origen del ~82% de FU fallidos)
+## 1. Dos rutas de composer + la causa raíz real del ~82% de fallos
 
 Cuando el scheduler decide un FU, el `navUrl` depende de si el lead tiene thread previo (`scheduler-extension.js`, ~742):
 
@@ -18,20 +18,16 @@ Cuando el scheduler decide un FU, el `navUrl` depende de si el lead tiene thread
 - El `thread_id` sale del JOIN a `conversations` (`conversations.linkedin_thread_id`), **NO de una columna en `leads`** (la tabla `leads` no tiene `linkedin_thread_id`).
 - **El composer del overlay vive en un SHADOW ROOT** (`path top>shadow[div]`). Es literalmente `<div contenteditable="true" class="msg-form__contenteditable" role="textbox">`, pero encapsulado → `document.querySelector()` **NO lo alcanza**.
 
-### El bug (pre-0.9.8)
-Los selectores de `content.js` usaban `document.querySelector` (no perforan shadow DOM) → en la ruta overlay nunca encontraban el composer → `humanType` tecleaba en la nada → la µ-fase `typing_complete` leía vacío → **timeout de 15s** (`micro_phase_typing_complete_timeout_XXXms`). Los FU por thread (DOM ligero) siempre funcionaron; los por overlay (shadow) siempre fallaban.
+### ⚠️ La causa REAL del ~82% NO fue shadow DOM — fue WHITESPACE (corrección 02-jul)
 
-### El fix (0.9.8)
-Helpers que **perforan shadow DOM** en `content.js` (~4132):
-```js
-function deepQueryAll(selector, root = document) { /* recorre shadow roots recursivamente */ }
-function deepQuery(selector, root = document) { return deepQueryAll(selector, root)[0] || null }
-```
-Aplicados en: adquisición del editor (`send_followup` ~3180 + `sendFollowupFromProfile` ~3890), `liveEditor` (~3462), `findThreadSendButton(editor)` (~4187, ahora recibe el editor y busca dentro de su shadow root), `readThreadHeader` (~4132).
+Al principio se creyó que el composer en shadow DOM era la causa (la consola sobre el modal "Nuevo mensaje" abierto desde `/search` SÍ mostró shadow DOM). **La evidencia del bot real (`_typingDiag`) lo refutó:** en la página real del FU (`/messaging/compose/` por top-nav) el composer está en **DOM ligero** (`inShadow: false`), el texto **SÍ aterriza** (`editorLen 392/405`), y aun así `typing_complete` fallaba.
 
-Regla: **cualquier consulta al composer/thread/botón Enviar en la ruta FU debe usar `deepQuery*`, no `document.querySelector`.**
+**Causa real (fix 0.9.10):** mismatch de whitespace en la verificación. El mensaje trae `\n\n`; en `expectedHead` normaliza a **un espacio** (`"tal! se"`), pero al teclear con `execCommand('insertText')` el `\n` se vuelve `<br>` y **desaparece** de `editor.textContent` (`"tal!se"`) → `actual.startsWith(expectedHead)` **siempre false** aunque el mensaje esté completo → `typing_complete` 15s timeout. Afecta a **thread Y overlay** (es por el MENSAJE, no por el composer) — por eso fallaban ambos, incl. Martin por thread.
 
-Validación (01-jul): snippet con la lógica de 0.9.8 sobre el overlay real 1er grado → `✅ ENCUENTRA el composer` con el texto tecleado. En vivo → 0 `typing_complete_timeout`; los 2do-grado abortan rápido (`lead_not_first_degree`) en vez de colgarse.
+**Fix (0.9.10):** comparar head/tail/ratio **SIN espacios** (`noWs = s => s.replace(/\s+/g,'')`) en la µ-fase `typing_complete` (~3486) y en la verificación 6.5 (~3563). **Validado en vivo (02-jul): 3/3 FU `sent_confirmed` (Denis+Mariano overlay, Martin thread), 0 timeouts, leads avanzaron a `follow_up_sent`.**
+
+### El fix shadow DOM (0.9.8) — queda como DEFENSA (no era la causa)
+Helpers `deepQueryAll`/`deepQuery` (`content.js` ~4132) que **perforan shadow DOM**, aplicados en adquisición del editor, `liveEditor` (~3462), `findThreadSendButton(editor)` (~4187), `readThreadHeader`. Algunas páginas de LinkedIn (el modal "Nuevo mensaje" desde `/search`) SÍ usan composer en shadow root, así que la defensa es válida — pero **NO era la causa del fallo del bot** (su página real es DOM ligero). Regla vigente: para el composer/thread/botón Enviar en la ruta FU usar `deepQuery*`, no `document.querySelector`.
 
 ---
 
