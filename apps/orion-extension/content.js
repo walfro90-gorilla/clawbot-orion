@@ -3397,32 +3397,11 @@ async function sendFollowup(payload = {}) {
   // tecleaba el composer shadow — INCLUIDO el de InMail de un 2do-grado — y compose no
   // verificaba destinatario (headerName vacío). Esto corre sobre el shadow root REAL del
   // composer. Fail-closed: si es InMail, o no confirmo que el destinatario sea el lead → NO envía.
+  // v0.9.13: guarda compartida fail-closed (InMail 2do-grado + destinatario). Misma función
+  // que usa sendFollowupFromProfile → las dos rutas de compose ya no divergen.
   if (isComposePage) {
-    // (1) InMail / 2do grado — DEEP (light + shadow): texto "créditos"/InMail + botones InMail.
-    const _inmailRe = /cr[eé]ditos disponibles|inmail credits?|de \d+ cr[eé]ditos|mensaje inmail|enviar inmail/i
-    const _inmailText = deepQueryAll('h1, h2, h3, h4, p, span, a, button, label')
-      .some(el => el.offsetParent !== null && (el.textContent || '').length < 200 && _inmailRe.test(el.textContent || ''))
-    const _inmailBtn = deepQueryAll('button[aria-label*="InMail" i], a[aria-label*="InMail" i], [class*="inmail-cta" i], button[class*="inmail" i]')
-      .some(b => b.offsetParent !== null)
-    if (_inmailText || _inmailBtn) {
-      console.warn('[Orion content] v0.9.12 — InMail/2do-grado en overlay → ABORT, no InMail')
-      return { action: 'send_followup', status: 'error', error: 'lead_not_first_degree', reason: 'inmail_overlay_shadow_aware', signal: _inmailText ? 'text' : 'button', url: location.href }
-    }
-    // (2) destinatario = lead — el nombre vive en el DOM LIGERO (chip "Para:"), FUERA del shadow
-    // root del composer (confirmado: shadowComposer=false, bodyLight=true). v0.9.11 buscaba solo
-    // en el shadow → false-block de TODO primer FU. Ahora se busca en document.body (innerText
-    // visible + innerHTML para atributos). Fail-closed: si el nombre no está en la página → abort.
-    const _norm = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ').trim()
-    const _parts = _norm(leadName).split(' ').filter(w => w.length >= 3)
-    if (_parts.length >= 1) {
-      const _page = _norm((document.body.innerText || '') + ' ' + (document.body.innerHTML || ''))
-      const _first = _parts[0], _last = _parts[_parts.length - 1]
-      const _match = (_parts.length === 1) ? _page.includes(_first) : (_page.includes(_first) && _page.includes(_last))
-      if (!_match) {
-        console.warn(`[Orion content] v0.9.12 — destinatario NO verificado para "${leadName}" en la página → ABORT recipient_mismatch`)
-        return { action: 'send_followup', status: 'error', error: 'recipient_mismatch', reason: 'lead_name_not_on_compose_page', leadName, url: location.href }
-      }
-    }
+    const _guard = composeInmailRecipientGuard(leadName)
+    if (_guard) return _guard
   }
 
   // 4.5 v0.6.45 PRE-SEND GUARD: leer los últimos mensajes del thread y verificar
@@ -4012,6 +3991,15 @@ async function sendFollowupFromProfile(payload) {
     }
   }
 
+  // v0.9.13 SAFETY: guarda compartida ANTES de teclear — cierra el hueco de InMail a 2do-grado
+  // que la auditoría (02-jul) encontró: esta ruta (sendFollowupFromProfile, la PRIMARIA del primer
+  // FU) no tenía ninguna verificación anti-InMail/destinatario. Fail-closed: si es InMail o no
+  // confirmo el destinatario → NO envía.
+  {
+    const _guard = composeInmailRecipientGuard(leadName)
+    if (_guard) return _guard
+  }
+
   // 4. Type humanizado
   console.log(`[Orion content] Typing en compose overlay (${message.length} chars)`)
   editor.focus()
@@ -4123,6 +4111,37 @@ function isInvitePending() {
 }
 
 // Find botón "Enviar mensaje" / "Mensaje" / "Message" en el top card del LEAD.
+// v0.9.13: GUARDA COMPARTIDA fail-closed contra InMail (2do grado) + destinatario equivocado,
+// para CUALQUIER ruta de compose (send_followup overlay + sendFollowupFromProfile). DEEP: perfora
+// el shadow DOM del overlay "Nuevo mensaje". Devuelve null si OK, o un objeto error si debe
+// abortar SIN enviar. Única fuente de verdad → las rutas ya no divergen (auditoría 02-jul).
+function composeInmailRecipientGuard(leadName) {
+  // (1) InMail / 2do grado — texto "créditos"/InMail + botones InMail (deep = shadow-aware)
+  const inmailRe = /cr[eé]ditos disponibles|inmail credits?|de \d+ cr[eé]ditos|mensaje inmail|enviar inmail/i
+  const inmailText = deepQueryAll('h1, h2, h3, h4, p, span, a, button, label')
+    .some(el => el.offsetParent !== null && (el.textContent || '').length < 200 && inmailRe.test(el.textContent || ''))
+  const inmailBtn = deepQueryAll('button[aria-label*="InMail" i], a[aria-label*="InMail" i], [class*="inmail-cta" i], button[class*="inmail" i]')
+    .some(b => b.offsetParent !== null)
+  if (inmailText || inmailBtn) {
+    console.warn('[Orion content] v0.9.13 guard — InMail/2do-grado detectado → ABORT, no InMail')
+    return { action: 'send_followup', status: 'error', error: 'lead_not_first_degree', reason: 'inmail_overlay_shadow_aware', signal: inmailText ? 'text' : 'button', url: location.href }
+  }
+  // (2) destinatario = lead — el nombre vive en el DOM ligero (chip "Para:"), fuera del shadow
+  // del composer. Buscar en document.body (innerText visible + innerHTML atributos). Fail-closed.
+  const norm = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ').trim()
+  const parts = norm(leadName).split(' ').filter(w => w.length >= 3)
+  if (parts.length >= 1) {
+    const page = norm((document.body.innerText || '') + ' ' + (document.body.innerHTML || ''))
+    const first = parts[0], last = parts[parts.length - 1]
+    const match = (parts.length === 1) ? page.includes(first) : (page.includes(first) && page.includes(last))
+    if (!match) {
+      console.warn(`[Orion content] v0.9.13 guard — destinatario NO verificado para "${leadName}" → ABORT recipient_mismatch`)
+      return { action: 'send_followup', status: 'error', error: 'recipient_mismatch', reason: 'lead_name_not_on_compose_page', leadName, url: location.href }
+    }
+  }
+  return null
+}
+
 function findProfileMessageButton(expectedLeadName) {
   const h1 = Array.from(document.querySelectorAll('main h1')).find(h => h.offsetParent !== null)
   let topCard = h1?.closest('section.artdeco-card, .pv-top-card, [class*="top-card"], [class*="ph5"]') ?? findTopCard() ?? document
@@ -4130,31 +4149,39 @@ function findProfileMessageButton(expectedLeadName) {
   const buttons = Array.from(topCard.querySelectorAll('button, a[role="button"], a[href*="/messaging/"]'))
   const expectsName = expectedLeadName ? expectedLeadName.toLowerCase().split(/\s+/)[0] : null
 
-  // Prioridad 1: aria-label CON nombre del lead (más específico)
+  // v0.9.13 SEGURIDAD: NUNCA devolver un botón InMail (2do grado). Antes matcheaba 'inmail' a
+  // propósito → clickeaba InMail → enviaba InMail a no-conexiones (hueco de la auditoría 02-jul).
+  // Si SOLO hay InMail → return null → el caller detecta 2do-grado (Seguir/Conectar) y aborta.
+  const isInmail = (b) => {
+    const aria = (b.getAttribute('aria-label') ?? '').toLowerCase()
+    const t = (b.textContent ?? '').trim().toLowerCase()
+    return aria.includes('inmail') || t.includes('inmail')
+  }
+
+  // Prioridad 1: aria-label CON nombre del lead (más específico) — SIN InMail
   if (expectsName) {
     const byNameAria = buttons.find(b => {
-      if (b.offsetParent === null) return false
+      if (b.offsetParent === null || isInmail(b)) return false
       const aria = (b.getAttribute('aria-label') ?? '').toLowerCase()
-      return aria.includes(expectsName) && /mensaje|message|inmail/i.test(aria)
+      return aria.includes(expectsName) && /mensaje|message/i.test(aria)
     })
     if (byNameAria) return byNameAria
   }
 
-  // Prioridad 2: texto exacto (literal del button) — "Enviar mensaje", "Mensaje", etc.
+  // Prioridad 2: texto exacto (literal del button) — "Enviar mensaje", "Mensaje" — SIN InMail
   const byText = buttons.find(b => {
-    if (b.offsetParent === null) return false
+    if (b.offsetParent === null || isInmail(b)) return false
     const t = (b.textContent ?? '').trim().toLowerCase()
     return t === 'enviar mensaje' || t === 'mensaje' ||
-           t === 'send message' || t === 'send a message' || t === 'message' ||
-           t === 'enviar inmail' || t === 'send inmail' || t === 'inmail'
+           t === 'send message' || t === 'send a message' || t === 'message'
   })
   if (byText) return byText
 
-  // Prioridad 3: aria-label genérico
+  // Prioridad 3: aria-label genérico — SIN InMail
   const byAria = buttons.find(b => {
-    if (b.offsetParent === null) return false
+    if (b.offsetParent === null || isInmail(b)) return false
     const aria = (b.getAttribute('aria-label') ?? '').toLowerCase()
-    return /^enviar mensaje|^send (a )?message|^send inmail|^enviar inmail|^message |^mensaje /i.test(aria)
+    return /^enviar mensaje|^send (a )?message|^message |^mensaje /i.test(aria)
   })
   if (byAria) return byAria
 

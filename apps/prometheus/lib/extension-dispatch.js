@@ -384,6 +384,7 @@ export async function checkAccountHealthAndPause(accountId, opts = {}) {
   // Pause + insert alert critical
   await supabase.from('linkedin_accounts').update({
     extension_paused: true,
+    extension_paused_reason: 'circuit_breaker_error_spike',  // v0.9.13: razón HONESTA (no "by_user")
   }).eq('id', accountId)
 
   await supabase.from('account_alerts').insert({
@@ -716,7 +717,9 @@ export async function dispatchFollowup(account, lead, step, message, threadUrl, 
 export async function checkCampaignActiveGates(campaign, account) {
   if (!campaign.is_active) return 'campaign_inactive'
   if (account.status === 'banned') return 'account_banned'
-  if (account.extension_paused) return 'extension_paused_by_user'
+  // v0.9.13: reflejar la razón REAL de la pausa, no el literal engañoso "by_user"
+  // (circuit breaker/banner pausan sin ser humano). Solo se usa para logs/skip-reason.
+  if (account.extension_paused) return `extension_paused:${account.extension_paused_reason ?? 'by_user'}`
 
   // Schedule hours (default 9-19h Lun-Vie) — respeta timezone de la cuenta
   const tz = account.timezone || DEFAULT_TZ
@@ -805,7 +808,9 @@ export async function dispatchCommentOnPost(account, opportunity) {
 export async function checkPostCampaignActiveGates(postCampaign, account) {
   if (!postCampaign.is_active) return 'post_campaign_inactive'
   if (account.status === 'banned') return 'account_banned'
-  if (account.extension_paused) return 'extension_paused_by_user'
+  // v0.9.13: reflejar la razón REAL de la pausa, no el literal engañoso "by_user"
+  // (circuit breaker/banner pausan sin ser humano). Solo se usa para logs/skip-reason.
+  if (account.extension_paused) return `extension_paused:${account.extension_paused_reason ?? 'by_user'}`
 
   const tz = account.timezone || DEFAULT_TZ
   const startHour = postCampaign.schedule_start_hour ?? 9
