@@ -557,19 +557,23 @@ export async function tryFollowupsForCampaign(campaign, account) {
     return { skipped: true, reason: 'daily_messages_cap_reached', msgsToday, cap: maxMsgs }
   }
 
-  // Priorizamos steps avanzados (FU5 > FU4 > ... > FU1) para evitar que un backlog
-  // grande en FU1 starve a los FUs avanzados. Leads más profundos en el funnel
-  // están más cerca de meeting → progresarlos primero tiene mayor ROI.
-  // Más Fisher-Yates shuffle ligero para humanización (no siempre mismo orden).
+  // (2026-07-04) FU1 = PRIMER toque a una conexión nueva = lo MÁS valioso; NO debe starve
+  // detrás de FUs avanzados (era el bug de Josh: recién-conectados sin FU1 por días porque el
+  // motor priorizaba pasos altos + cap diario). → FU1 va PRIMERO; el resto (FU2+) de mayor a
+  // menor (leads más profundos, más cerca de meeting) con shuffle ligero anti-pattern. Como los
+  // leads FU1-due son pocos (conexiones nuevas/día) y el cap diario limita el total, esto NO
+  // starve a los avanzados: FU1 consume unos pocos slots y el resto queda para FU2+.
   const fuSteps = await loadFollowupSteps(campaign.id)
   if (fuSteps.length === 0) return { skipped: true, reason: 'no_followup_steps_configured' }
-  const stepsOrdered = [...fuSteps].reverse()
-  if (Math.random() < 0.3) {  // 30% de ticks: random shuffle (anti-pattern detection)
-    for (let i = stepsOrdered.length - 1; i > 0; i--) {
+  const step1 = fuSteps.find(s => s.step === 1)
+  const rest = fuSteps.filter(s => s.step !== 1).reverse()
+  if (Math.random() < 0.3) {  // 30% de ticks: shuffle del resto (anti-pattern detection)
+    for (let i = rest.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1))
-      ;[stepsOrdered[i], stepsOrdered[j]] = [stepsOrdered[j], stepsOrdered[i]]
+      ;[rest[i], rest[j]] = [rest[j], rest[i]]
     }
   }
+  const stepsOrdered = step1 ? [step1, ...rest] : rest
 
   for (const step of stepsOrdered) {
     const stepNum = step.step
