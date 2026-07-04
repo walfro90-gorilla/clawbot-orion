@@ -11,7 +11,9 @@
 // PM2 corre este script en lugar del scheduler.js viejo.
 
 import dotenv from 'dotenv'
-import { supabase, logActivity } from './lib/supabase.js'
+import fs from 'fs'
+import { supabase, logActivity, setTickSignal } from './lib/supabase.js'
+import { notifyOps } from './lib/notify-ops.js'
 import {
   mxTime, mxDateStr, minutesSince,
   isBusinessHours, isInboxHours,
@@ -145,6 +147,9 @@ async function readStressTestLock() {
 let lastTickAt = Date.now()
 let tickInFlight = false
 let tickStartedAt = 0  // v0.8: timestamp de cuándo arrancó el tick ACTUAL (el watchdog mide ESTO)
+// v0.9.x (post-mortem 2026-07-03): rachas para backoff dinámico + alerta out-of-band.
+let consecutiveTickFailures = 0
+let slowTickStreak = 0
 
 function watchdog() {
   const sinceTick = Date.now() - lastTickAt
@@ -2092,46 +2097,89 @@ async function runTickSafely() {
   tickInFlight = true
   const start = Date.now()
   tickStartedAt = start  // v0.8: el watchdog mide cuánto lleva ESTE tick, no sinceTick
+  // Post-mortem 2026-07-03: señal de tick → si el tick hace soft-timeout, la abortamos y se
+  // CANCELAN todas las queries en vuelo (mata los zombie ticks que se apilaban y martillaban).
+  const ctrl = new AbortController()
+  setTickSignal(ctrl.signal)
   try {
     await withTimeout(tick(), TICK_SOFT_TIMEOUT_MS, 'tick')
     lastTickAt = Date.now()
+    consecutiveTickFailures = 0
     const dur = Date.now() - start
-    if (dur > 30_000) console.warn(`[SCH-EXT] ⚠️  tick lento: ${dur}ms`)
+    if (dur > 30_000) { slowTickStreak++; console.warn(`[SCH-EXT] ⚠️  tick lento: ${dur}ms (racha ${slowTickStreak})`) }
+    else slowTickStreak = 0
+    if (slowTickStreak >= 3) notifyOps('scheduler_slow', `Scheduler lento: ${slowTickStreak} ticks >30s consecutivos (¿DB degradada?).`).catch(() => {})
+    setTickSignal(null)  // ÉXITO: limpia la señal (en FALLO se deja ABORTADA, ver catch)
   } catch (err) {
-    console.error(`[SCH-EXT] Tick error: ${err?.message ?? err}`)
-    console.error(`[SCH-EXT] Err shape: type=${typeof err} isError=${err instanceof Error} ctor=${err?.constructor?.name} keys=${err && typeof err === 'object' ? Object.keys(err).join(',') : 'n/a'}`)
-    if (err?.stack) console.error(`[SCH-EXT] Stack: ${err.stack.split('\n').slice(0, 8).join('\n')}`)
-    else console.error(`[SCH-EXT] Err raw: ${JSON.stringify(err, Object.getOwnPropertyNames(err ?? {})).slice(0, 500)}`)
-    // Si fue por timeout, watchdog matará si se repite — pero sí actualizamos
-    // lastTickAt para no doble-matar por el mismo tick lento
-    lastTickAt = Date.now()
+    consecutiveTickFailures++
+    // Deja la señal ABORTADA (no la nulifica): así TODA query futura del tick huérfano aborta
+    // al instante en vez de correr 20s c/u → mata el pile-up de zombie ticks de raíz. El
+    // siguiente tick setea una señal fresca al arrancar, para cuando el zombie ya terminó.
+    ctrl.abort(new Error('tick_soft_timeout'))
+    console.error(`[SCH-EXT] Tick error (${consecutiveTickFailures} consecutivos): ${err?.message ?? err}`)
+    if (err?.stack) console.error(`[SCH-EXT] Stack: ${err.stack.split('\n').slice(0, 6).join('\n')}`)
+    lastTickAt = Date.now()  // el watchdog HUNG no debe doble-matar por el mismo tick lento
+    if (consecutiveTickFailures >= 3) notifyOps('scheduler_tick_fail', `Scheduler: ${consecutiveTickFailures} ticks fallidos consecutivos (último: ${err?.message ?? err}).`).catch(() => {})
   } finally {
     tickInFlight = false
   }
 }
 
+// Post-mortem 2026-07-03: delay + jitter antes del PRIMER tick (no martillar la DB al bootear)
+// + detección de crash-loop (N boots en 10 min → backoff largo + alerta out-of-band).
+function computeBootDelay() {
+  const jitter = randInt(5_000, 30_000)
+  const BOOT_FILE = process.env.SCHED_BOOTS_FILE || '/root/.pm2/sched-boots.json'
+  try {
+    const now = Date.now()
+    let boots = []
+    try { boots = JSON.parse(fs.readFileSync(BOOT_FILE, 'utf8')) } catch { boots = [] }
+    boots = boots.filter(t => now - t < 10 * 60_000)
+    boots.push(now)
+    fs.writeFileSync(BOOT_FILE, JSON.stringify(boots))
+    if (boots.length >= 5) {
+      console.error(`[SCH-EXT] 🔴 CRASH-LOOP: ${boots.length} arranques en 10 min → backoff de boot`)
+      notifyOps('scheduler_crash_loop', `Scheduler en CRASH-LOOP: ${boots.length} arranques en 10 min.`).catch(() => {})
+      return 90_000 + jitter   // deja respirar a la DB antes del primer tick
+    }
+  } catch { /* best-effort */ }
+  return jitter
+}
+
+// Self-scheduling con backoff en fallos consecutivos (reemplaza el setInterval fijo): una DB
+// lenta hace al scheduler IR MÁS LENTO en vez de seguir martillando a cadencia fija.
+async function scheduleTickLoop() {
+  await runTickSafely()
+  const backoff = consecutiveTickFailures > 0
+    ? Math.min(TICK_INTERVAL_MS * (2 ** Math.min(consecutiveTickFailures, 4)), 30 * 60_000)
+    : TICK_INTERVAL_MS
+  if (consecutiveTickFailures > 0) console.warn(`[SCH-EXT] backoff: próximo tick en ${Math.round(backoff/1000)}s (${consecutiveTickFailures} fallos consecutivos)`)
+  setTimeout(scheduleTickLoop, backoff)
+}
+
 async function run() {
   console.log(`[SCH-EXT] 🚀 Scheduler-extension iniciando (tick=${TICK_INTERVAL_MS/1000}s, tickTimeout=${TICK_TIMEOUT_MS/1000}s, hungTimeout=${HUNG_TIMEOUT_MS/1000}s, DRY_RUN=${DRY_RUN})`)
-  // Watchdog cada 60s
   setInterval(watchdog, 60_000)
-  // Heartbeat to log file for external monitoring (e.g., bash `tail`)
   setInterval(() => {
     console.log(`[SCH-EXT] ♥ heartbeat — lastTickAt ${Math.floor((Date.now()-lastTickAt)/1000)}s ago, tickInFlight=${tickInFlight}`)
   }, 120_000)
-  // First tick immediate
-  runTickSafely()
-  // Then on interval
-  setInterval(runTickSafely, TICK_INTERVAL_MS)
+  const bootDelay = computeBootDelay()
+  console.log(`[SCH-EXT] primer tick en ${Math.round(bootDelay/1000)}s (jitter/backoff de boot)`)
+  setTimeout(scheduleTickLoop, bootDelay)
 }
 
-// Handlers para que crash logs sean visibles
+// Handlers. Post-mortem 2026-07-03: un unhandledRejection transitorio NO debe crash-loopear
+// (una promesa flotante que rechaza no corrompe el proceso) → solo loguea + alerta. El
+// uncaughtException SÍ deja estado indefinido → salir, pero tras un delay corto (deja salir la
+// alerta), y el jitter/backoff de boot evita el re-martilleo instantáneo al reiniciar PM2.
+process.on('unhandledRejection', (reason) => {
+  console.error(`[SCH-EXT] ⚠️ unhandledRejection (no fatal): ${reason?.stack ?? reason?.message ?? reason}`)
+  notifyOps('scheduler_rejection', `Scheduler unhandledRejection: ${reason?.message ?? reason}`).catch(() => {})
+})
 process.on('uncaughtException', (err) => {
   console.error(`[SCH-EXT] 💥 uncaughtException: ${err.stack ?? err.message ?? err}`)
-  process.exit(1)
-})
-process.on('unhandledRejection', (reason) => {
-  console.error(`[SCH-EXT] 💥 unhandledRejection: ${reason?.stack ?? reason?.message ?? reason}`)
-  process.exit(1)
+  notifyOps('scheduler_uncaught', `Scheduler uncaughtException (reiniciando): ${err.message ?? err}`).catch(() => {})
+  setTimeout(() => process.exit(1), 1500)
 })
 
 // Auto-arranque salvo en modo test (un harness puede importar funciones sin arrancar el loop).

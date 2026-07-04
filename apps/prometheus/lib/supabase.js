@@ -19,15 +19,23 @@ if (!key || key.includes('your_service')) {
 // Cubre TODAS las queries (también mata las "lecturas flaky"). Configurable por env.
 const QUERY_TIMEOUT_MS = parseInt(process.env.SUPABASE_QUERY_TIMEOUT_MS ?? '20000');
 
+// v0.9.x (post-mortem 2026-07-03): señal de TICK. runTickSafely la setea al empezar el tick
+// y la abortea si el tick hace soft-timeout → cancela TODAS las queries en vuelo de ese tick.
+// Sin esto, un tick timed-out dejaba queries "zombie" corriendo que se apilaban y martillaban
+// la DB (el amplificador real del outage). null = fuera de un tick (queries sin señal de tick).
+let currentTickSignal = null;
+export function setTickSignal(sig) { currentTickSignal = sig; }
+
 function fetchWithTimeout(input, init = {}) {
   const ctrl = new AbortController();
   const timer = setTimeout(
     () => ctrl.abort(new Error(`supabase_query_timeout_${QUERY_TIMEOUT_MS}ms`)),
     QUERY_TIMEOUT_MS
   );
-  // Respeta un AbortSignal externo (p.ej. .abortSignal() de supabase) encadenándolo.
-  const external = init.signal;
-  if (external) {
+  // Encadena AbortSignals externos: (1) el de init (p.ej. .abortSignal() de supabase) y
+  // (2) la señal del TICK → cancela las queries en vuelo cuando el tick hace soft-timeout.
+  for (const external of [init.signal, currentTickSignal]) {
+    if (!external) continue;
     if (external.aborted) ctrl.abort(external.reason);
     else external.addEventListener('abort', () => ctrl.abort(external.reason), { once: true });
   }
