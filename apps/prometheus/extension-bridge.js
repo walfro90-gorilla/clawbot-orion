@@ -908,29 +908,28 @@ async function ingestCheckSentInvites(commandId, pending, statedTotal = null) {
     if (isPending(lead)) continue  // sigue pendiente → no aceptado
 
     // Ausente del pending. ¿Dentro de la ventana capturada?
-    // v0.7.50: detección AGRESIVA de aceptaciones VIEJAS. El boundary salta las invites
-    // bajo la ventana (parcial) como "ambiguas" → las aceptaciones viejas nunca se detectaban
-    // (caso 8-jun). PERO un invite pendiente >OLD_ACCEPT_DAYS que está AUSENTE del /sent/ casi
-    // seguro fue aceptado (LinkedIn las muestra newest-first; las viejas-pendientes seguirían
-    // ahí). Si fuera falso positivo (sigue 2º grado), el FU falla con lead_not_first_degree →
-    // se flaggea detected_not_first_degree → excluido de futuros checks (sin loop) y SIN mandar
-    // mensaje al equivocado (no se puede mensajear a un no-conectado). Riesgo asimétrico OK.
-    const OLD_ACCEPT_DAYS = 10
-    const isOldEnoughToAssumeAccept = (Date.now() - sentMs) > OLD_ACCEPT_DAYS * 86_400_000
-    if (incomplete && !isOldEnoughToAssumeAccept) {
+    // (2026-07-04) DESACTIVADA la ruta AGRESIVA >10d (era v0.7.50). Motivo: la paginación de
+    // /sent/ se rompió (LinkedIn cambió el control "Mostrar más resultados") → el scrape captura
+    // solo ~10 pending de N, así que casi todo invite viejo está AUSENTE de esa ventana parcial y
+    // la heurística ">10d ausente = aceptó" fabricaba falsos-accept en masa (churn
+    // detected_not_first_degree: Josh 49 / Wal 16 / Café 16 → FU1 desperdiciados navegando a
+    // no-conexiones). Ya es REDUNDANTE: check_connections da detección POSITIVA por presencia
+    // (scrapea la lista COMPLETA de conexiones y marca connected sin inferencia). Ahora
+    // check_sent_invites vuelve a ser CONSERVADOR: solo concluye accept con scrape COMPLETO o con
+    // lead más nuevo que el boundary (ventana confiable); lo demás → ambiguo, lo cierra check_connections.
+    if (incomplete) {
       if (boundaryTime === null || sentMs <= boundaryTime) {
-        skippedAmbiguous++  // reciente pero bajo la ventana → ambiguo, no marcar
+        skippedAmbiguous++  // ausente pero bajo/sin ventana confiable → ambiguo, no marcar
         continue
       }
     }
-    // Seguro concluir accept: scrape completo, lead más nuevo que el boundary, o invite viejo.
+    // Seguro concluir accept: scrape completo, o lead más nuevo que el boundary.
     const { error } = await supabase.from('leads').update({
       status: 'connected', connected_at: new Date().toISOString(),
     }).eq('id', lead.id)
     if (!error) {
       accepted++
-      const via = (incomplete && isOldEnoughToAssumeAccept) ? ' [viejo>10d, agresivo]' : ''
-      console.log(`[bridge] ✅ Accept detectado: ${lead.full_name} (invite_sent → connected)${via}`)
+      console.log(`[bridge] ✅ Accept detectado: ${lead.full_name} (invite_sent → connected)`)
     }
   }
   console.log(`[bridge] check_sent_invites ingest: ${accepted} accepts de ${invitedLeads.length} invite_sent (${skippedAmbiguous} ambiguos saltados por ventana)`)
