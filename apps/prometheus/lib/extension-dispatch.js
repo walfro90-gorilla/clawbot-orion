@@ -695,6 +695,14 @@ export async function dispatchCheckSentInvites(account) {
   })
 }
 
+// (2026-07-04) Accept-detection POSITIVA: scrapea la lista de conexiones y marca connected
+// por PRESENCIA (no por ausencia como check_sent_invites). Backstop que cierra las zonas ciegas.
+export async function dispatchCheckConnections(account) {
+  return dispatchCommand(account.id, 'check_connections', {}, {
+    expiresInMinutes: 10,
+  })
+}
+
 export async function dispatchFollowup(account, lead, step, message, threadUrl, profileUrl) {
   // v0.7.26 BUG extension_did_not_respond fix B3: expiry DINÁMICO alineado con
   // el hard timeout de content.js (calcHardTimeout = msgLen*550 + 120s, cap 480s).

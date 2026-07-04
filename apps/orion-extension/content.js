@@ -129,6 +129,7 @@ function actionShort(a) {
   return ({
     send_followup: 'enviando mensaje', send_invite: 'invitando',
     check_inbox: 'leyendo inbox', check_sent_invites: 'verificando',
+    check_connections: 'verificando conexiones',
     search: 'buscando leads',
   })[a] ?? 'trabajando'
 }
@@ -1435,6 +1436,8 @@ async function executeAction(action, payload) {
       return await checkInbox(payload)
     case 'check_sent_invites':
       return await checkSentInvites(payload)
+    case 'check_connections':
+      return await checkConnections(payload)
     case 'send_invite':
       return await sendInvite(payload)
     case 'send_followup':
@@ -5323,6 +5326,57 @@ async function goToNextSearchPage(nextPageNum) {
     }
   } catch {}
   return false  // siempre page-1 clean; no orfanar el comando
+}
+
+// ── check_connections — scrape /mynetwork/invite-connect/connections/ ─────────
+// (2026-07-04) Accept-detection POSITIVA: si un lead invite_sent APARECE en nuestra lista de
+// conexiones → aceptó DE VERDAD (presencia, no inferencia por ausencia como check_sent_invites).
+// Cierra las zonas ciegas (ventana/boundary/timing) que dejaban accepts sin detectar. El bridge
+// cruza con la DB por URL/nombre; content.js solo scrape.
+async function checkConnections(payload = {}) {
+  console.log(`[Orion content] checkConnections currentUrl=${location.href}`)
+  if (!/\/mynetwork\/.*connections/.test(location.pathname)) {
+    return { action: 'check_connections', status: 'error', error: 'not_on_connections_page', currentUrl: location.href }
+  }
+  const found = await waitForSelector(['main section', 'main a[href*="/in/"]', 'main'], 12000)
+  if (!found) return { action: 'check_connections', status: 'error', error: 'container_not_found' }
+  await sleep(1500)
+
+  // La lista viene ordenada "Añadidos recientemente" → los accepts nuevos están arriba.
+  // Scroll infinito hasta estabilizar el conteo (o cap) — no necesitamos los 1000+, solo
+  // cubrir los invites recientes de varios días. Cap generoso.
+  const main = document.querySelector('main') || document.body
+  let prevN = -1, stable = 0
+  for (let i = 0; i < 25 && stable < 3; i++) {
+    window.scrollTo(0, document.body.scrollHeight)
+    await sleep(randInt(500, 900))
+    const n = main.querySelectorAll('a[href*="/in/"]').length
+    if (n === prevN) stable++; else { stable = 0; prevN = n }
+    if (n >= 400) break  // cobertura suficiente
+  }
+  window.scrollTo({ top: 0 }); await sleep(500)
+
+  const links = Array.from(main.querySelectorAll('a[href*="/in/"]'))
+  const connections = []
+  const seen = new Set()
+  for (const link of links) {
+    const href = link.getAttribute('href') || ''
+    const full = href.startsWith('http') ? href : `https://www.linkedin.com${href}`
+    const url = full.split('?')[0].replace(/\/$/, '') + '/'
+    if (!url.includes('/in/')) continue
+    if (seen.has(url)) continue
+    let name = Array.from(link.childNodes).filter(n => n.nodeType === 3).map(n => n.textContent.trim()).filter(Boolean).join(' ').trim()
+    if (!name) name = (link.textContent || '').trim()
+    if (!name) name = (link.getAttribute('aria-label') || '').trim()
+    if (name.length > 80) name = name.slice(0, 80)
+    seen.add(url)
+    connections.push({ profileUrl: url, name })
+  }
+  return {
+    action: 'check_connections', status: 'ok',
+    connections, count: connections.length,
+    scrapedAt: new Date().toISOString(),
+  }
 }
 
 // ── 3.5 — check_sent_invites — scrape /mynetwork/invitation-manager/sent/ ────

@@ -21,7 +21,7 @@ import {
   getEffectiveDailyCap, getDailyActivityToday, getPendingLeadsCount,
   hasInFlightCommand, wasMessageRecentlySent,
   passesTitleFilters,
-  dispatchSearch, dispatchInvite, dispatchCheckInbox, dispatchCheckSentInvites, dispatchFollowup,
+  dispatchSearch, dispatchInvite, dispatchCheckInbox, dispatchCheckSentInvites, dispatchCheckConnections, dispatchFollowup,
   dispatchCommand,
   checkCampaignActiveGates,
   dispatchPostSearch, dispatchCommentOnPost, checkPostCampaignActiveGates,
@@ -43,6 +43,7 @@ const TICK_TIMEOUT_MS  = parseInt(process.env.TICK_TIMEOUT_MS  ?? '240000')  // 
 const TICK_SOFT_TIMEOUT_MS = parseInt(process.env.TICK_SOFT_TIMEOUT_MS ?? '120000')  // 2 min
 const HUNG_TIMEOUT_MS  = parseInt(process.env.HUNG_TIMEOUT_MS  ?? '600000')  // 10 min: watchdog mata el proceso
 const MAX_DAILY_MESSAGES = parseInt(process.env.MAX_DAILY_MESSAGES ?? '30')  // FU+FM combinado por cuenta/día
+const CONNECTIONS_CHECK_GAP_MIN = parseInt(process.env.CONNECTIONS_CHECK_GAP_MIN ?? '240')  // check_connections backstop cada ~4h
 const DRY_RUN = process.env.DRY_RUN === 'true'
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
@@ -1361,6 +1362,31 @@ async function tryCheckSentInvitesForAccount(account) {
   return { dispatched: true, commandId: cmdId }
 }
 
+// (2026-07-04) Accept-detection POSITIVA (backstop): scrapea la lista de conexiones y marca
+// connected por PRESENCIA. Cierra las zonas ciegas de check_sent_invites (que infiere por ausencia).
+async function tryCheckConnectionsForAccount(account) {
+  const gapMin = CONNECTIONS_CHECK_GAP_MIN
+  const minsSince = minutesSince(account.last_connections_check_at)
+  if (minsSince < gapMin) {
+    return { skipped: true, reason: 'connections_gap_not_met', minsSince: Math.floor(minsSince), gapMin }
+  }
+  if (DRY_RUN) {
+    console.log(`[SCH-EXT] DRY_RUN check_connections for ${account.label}`)
+    return { dispatched: false, dryRun: true }
+  }
+  const cmdId = await dispatchCheckConnections(account)
+  if (!cmdId) return { skipped: true, reason: 'dispatch_failed' }
+  await supabase.from('linkedin_accounts')
+    .update({ last_connections_check_at: new Date().toISOString() })
+    .eq('id', account.id)
+  await logJob({
+    accountId: account.id, jobType: 'check_connections',
+    status: 'dispatched',
+    details: { commandId: cmdId },
+  })
+  return { dispatched: true, commandId: cmdId }
+}
+
 // ── Main tick ────────────────────────────────────────────────────────────────
 
 // ── Connectivity health check ───────────────────────────────────────────────
@@ -1903,7 +1929,7 @@ async function tick() {
         id, label, status, daily_connection_limit,
         warmup_status, warmup_started_at,
         inbox_gap_min, inbox_paused, last_inbox_check_at,
-        sent_invites_gap_min, last_sent_invites_check_at,
+        sent_invites_gap_min, last_sent_invites_check_at, last_connections_check_at,
         reply_delay_min, reply_delay_max,
         extension_paused, extension_paused_reason, extension_paused_until, timezone, cal_com_url,
         extension_last_seen_at
@@ -2078,6 +2104,17 @@ async function tick() {
       const sentRes = await tryCheckSentInvitesForAccount(account)
       if (sentRes.dispatched) {
         console.log(`[SCH-EXT]   ✅ check_sent_invites dispatched for ${account.label} (prioridad — detecta aceptaciones)`)
+        continue
+      }
+    }
+
+    // check_connections: backstop de accept-detection por PRESENCIA (cada ~4h). Corre cuando
+    // check_sent_invites NO está due (para no competir por el único worker de la extensión).
+    const connDue = minutesSince(account.last_connections_check_at) >= CONNECTIONS_CHECK_GAP_MIN
+    if (connDue) {
+      const connRes = await tryCheckConnectionsForAccount(account)
+      if (connRes.dispatched) {
+        console.log(`[SCH-EXT]   ✅ check_connections dispatched for ${account.label} (accept-detection positiva)`)
         continue
       }
     }

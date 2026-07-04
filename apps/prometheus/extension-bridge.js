@@ -783,6 +783,14 @@ async function handleCommandResult(msg) {
       console.error(`[bridge] ingest check_sent_invites failed:`, err.message)
     }
   }
+  // check_connections ingest — accept-detection POSITIVA (presencia en la lista de conexiones)
+  if (!isError && action === 'check_connections' && result?.status === 'ok' && Array.isArray(result?.connections)) {
+    try {
+      await ingestCheckConnections(commandId, result.connections)
+    } catch (err) {
+      console.error(`[bridge] ingest check_connections failed:`, err.message)
+    }
+  }
   // ── Post-Prospecting (v0.9) ──────────────────────────────────────────────
   // search_posts ingest — inserta post_opportunities nuevas (status='scraped')
   if (!isError && action === 'search_posts' && result?.status === 'ok' && Array.isArray(result?.posts)) {
@@ -926,6 +934,55 @@ async function ingestCheckSentInvites(commandId, pending, statedTotal = null) {
     }
   }
   console.log(`[bridge] check_sent_invites ingest: ${accepted} accepts de ${invitedLeads.length} invite_sent (${skippedAmbiguous} ambiguos saltados por ventana)`)
+}
+
+// ── Ingest: check_connections → accept-detection POSITIVA por presencia en conexiones ──
+// (2026-07-04) Un lead invite_sent que APARECE en la lista de conexiones ACEPTÓ (definitivo,
+// no inferencia por ausencia). Cierra las zonas ciegas de check_sent_invites (ventana/boundary/
+// timing). La presencia positiva OVERRIDE el flag detected_not_first_degree (si de verdad
+// conectó, era un falso revert). Solo AÑADE marks connected → seguro ante scrape parcial (marca
+// menos, nunca falsos-accept masivos como el modo ausencia).
+async function ingestCheckConnections(commandId, connections) {
+  const { data: cmd } = await supabase.from('extension_commands').select('account_id').eq('id', commandId).single()
+  if (!cmd?.account_id) return
+  if (!Array.isArray(connections) || connections.length === 0) {
+    console.warn(`[bridge] check_connections: 0 conexiones scrapeadas → nada que marcar (posible parser fail)`)
+    return
+  }
+  const { data: invitedLeads } = await supabase
+    .from('leads')
+    .select('id, full_name, linkedin_url, sent_at, dead_reason, campaigns!inner(linkedin_account_id)')
+    .eq('campaigns.linkedin_account_id', cmd.account_id)
+    .eq('status', 'invite_sent')
+  if (!invitedLeads || invitedLeads.length === 0) {
+    console.log(`[bridge] check_connections: 0 leads invite_sent para esta cuenta`); return
+  }
+  const normalize = (url) => {
+    let u = (url || '').toLowerCase().split('?')[0]
+    try { u = decodeURIComponent(u) } catch {}
+    return u.replace(/^https?:\/\/(www\.)?linkedin\.com/, '').replace(/\/$/, '')
+      .replace(/\/(es|en|pt|fr|de|it|nl|es-es|en-us|pt-br)$/, '').replace(/\/$/, '')
+  }
+  const connUrls = new Set(connections.map(c => normalize(c.profileUrl)))
+  const connNames = new Set(connections.map(c => (c.name ?? '').toLowerCase().trim()).filter(Boolean))
+  const isConnection = (lead) =>
+    connUrls.has(normalize(lead.linkedin_url)) ||
+    (lead.full_name && connNames.has(lead.full_name.toLowerCase().trim()))
+
+  let accepted = 0
+  const minSentAgeMs = 30 * 60 * 1000  // ignora invites <30min (evita carreras de UI)
+  for (const lead of invitedLeads) {
+    if (lead.sent_at && Date.now() - new Date(lead.sent_at).getTime() < minSentAgeMs) continue
+    if (!isConnection(lead)) continue   // no está en conexiones → sigue pendiente
+    const { error } = await supabase.from('leads').update({
+      status: 'connected',
+      connected_at: new Date().toISOString(),
+      inmail_revert_count: 0,
+      dead_reason: lead.dead_reason === 'detected_not_first_degree' ? null : lead.dead_reason,
+    }).eq('id', lead.id)
+    if (!error) { accepted++; console.log(`[bridge] ✅ Accept CONFIRMADO (en conexiones): ${lead.full_name} (invite_sent → connected)`) }
+  }
+  console.log(`[bridge] check_connections ingest: ${accepted} accepts confirmados de ${invitedLeads.length} invite_sent (${connections.length} conexiones scrapeadas)`)
 }
 
 // ── Ingest: search → insertar leads nuevos en DB ───────────────────────────

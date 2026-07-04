@@ -569,6 +569,8 @@ async function executeCommand(commandId, action, payload) {
       }
     } else if (action === 'check_sent_invites') {
       tab = await navigateTabAndWait('https://www.linkedin.com/mynetwork/invitation-manager/sent/', 15000)
+    } else if (action === 'check_connections') {
+      tab = await navigateTabAndWait('https://www.linkedin.com/mynetwork/invite-connect/connections/', 15000)
     } else if (action === 'publish_post') {
       tab = await navigateTabAndWait('https://www.linkedin.com/feed/', 12000)
     } else {
