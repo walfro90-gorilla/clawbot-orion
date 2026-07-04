@@ -642,6 +642,27 @@ function detectNotMessageable() {
     }
   } catch {}
 
+  // Signal 6 (2026-07-04): botón "Conectar"/"Connect" visible en el ÁREA de la conversación
+  // = el participante NO es 1er grado (nos ELIMINÓ, o nunca fue conexión). Cierra el hueco de
+  // la ruta thread donde LinkedIn muestra el editor normal pero ofrece "Conectar". Scopeado a
+  // la conversación (no la nav global ni sugerencias del sidebar) para evitar falsos positivos.
+  // reason incluye "2nd_degree" para que extension-bridge lo escale a Super DEAD (anti-ban).
+  try {
+    const convArea = document.querySelector(
+      '.msg-thread, [class*="msg-thread"], .msg-overlay-conversation-bubble, .msg-s-message-list-container, .msg-title-bar'
+    )
+    if (convArea) {
+      const hasConnect = Array.from(convArea.querySelectorAll('button, a[role="button"]'))
+        .filter(b => b.offsetParent !== null)
+        .some(b => {
+          const t = (b.textContent ?? '').trim().toLowerCase()
+          const aria = (b.getAttribute('aria-label') ?? '').toLowerCase()
+          return t === 'conectar' || t === 'connect' || /^(conectar|connect|invitar|invite)\b/.test(aria)
+        })
+      if (hasConnect) { signals.connect_cta_in_thread = true; reasons.push('connect_cta_2nd_degree'); detected = true }
+    }
+  } catch {}
+
   const reason = reasons.length > 0 ? reasons.join('+') : null
   return { detected, reason, signals }
 }
