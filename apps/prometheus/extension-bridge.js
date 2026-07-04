@@ -20,7 +20,7 @@
 import { WebSocketServer } from 'ws'
 import http from 'http'
 import { URL } from 'url'
-import { createClient } from '@supabase/supabase-js'
+import { supabase } from './lib/supabase.js'
 import dotenv from 'dotenv'
 import { checkAndKillLeadIfStuck, checkAccountHealthAndPause, dispatchInvite } from './lib/extension-dispatch.js'
 import { isSystemLinkedInAccount } from './lib/system-accounts.js'
@@ -30,7 +30,10 @@ import { applyLeadAttemptOutcome, isNonFaultError } from './lib/lead-failure.js'
 dotenv.config()
 
 const PORT = parseInt(process.env.EXTENSION_BRIDGE_PORT ?? '4002')
-const POLL_INTERVAL_MS = parseInt(process.env.EXTENSION_POLL_INTERVAL_MS ?? '3000')
+// Post-mortem 2026-07-03: 3s = ~115k queries/día de piso (haya o no trabajo), principal
+// drenaje continuo del IO-burst en Nano. 10s = −67% carga base; la latencia de dispatch ≤10s
+// es irrelevante para automatización de LinkedIn (los command_result llegan por WS push, no poll).
+const POLL_INTERVAL_MS = parseInt(process.env.EXTENSION_POLL_INTERVAL_MS ?? '10000')
 // Reduced from 5min to 90s (2026-05-29 "Reloj Suizo" plan) — antes el server
 // creía conectado mientras el SW dormía, dejando un gap de hasta 5min antes
 // de detectar disconnect. 90s = 6× margen sobre alarm keep-alive cada 15s.
@@ -43,10 +46,11 @@ const AUTH_FAIL_WINDOW_MS = 2 * 60 * 1000
 const AUTH_FAIL_THRESHOLD = 5
 const AUTH_LOCKOUT_MS = 5 * 60 * 1000
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY,
-)
+// Cliente Supabase con timeout (fetchWithTimeout 20s) desde lib/supabase.js.
+// Post-mortem 2026-07-03: el bridge usaba createClient CRUDO sin timeout → sus queries
+// colgaban ~indefinidamente bajo un 522 de Cloudflare, fugando sockets y sumando presión
+// al pooler ya saturado. El cliente compartido acota cada query y libera el socket al abortar.
+// (supabase importado arriba desde ./lib/supabase.js)
 
 // ── Estado: account_id → { ws, label, lastSeen } ────────────────────────────
 
@@ -914,6 +918,25 @@ async function ingestCheckSentInvites(commandId, pending, statedTotal = null) {
 }
 
 // ── Ingest: search → insertar leads nuevos en DB ───────────────────────────
+// #3 (2026-07-03): backoff yield-aware de búsqueda. net-new=0 → +1 al streak seco (cap 6);
+// >0 → reset a 0. Lo lee trySearchForCampaign para hacer backoff del piso de drought y no
+// martillar un pool agotado cada 30min. Best-effort (nunca rompe el ingest). Búsqueda es
+// infrecuente → el read-modify-write (2 queries en el path seco) es despreciable.
+async function bumpDrySearchStreak(campaignId, netNew) {
+  if (!campaignId) return
+  try {
+    if (netNew > 0) {
+      await supabase.from('campaigns').update({ dry_search_streak: 0 }).eq('id', campaignId)
+    } else {
+      const { data } = await supabase.from('campaigns').select('dry_search_streak').eq('id', campaignId).single()
+      const next = Math.min((data?.dry_search_streak ?? 0) + 1, 6)
+      await supabase.from('campaigns').update({ dry_search_streak: next }).eq('id', campaignId)
+    }
+  } catch (e) {
+    console.warn(`[bridge] bumpDrySearchStreak falló:`, e?.message)
+  }
+}
+
 async function ingestSearch(commandId, result) {
   const { data: cmd } = await supabase
     .from('extension_commands')
@@ -931,6 +954,7 @@ async function ingestSearch(commandId, result) {
   const profiles = result.profiles ?? []
   if (profiles.length === 0) {
     console.log(`[bridge] search ${commandId.slice(0,8)}: 0 perfiles`)
+    await bumpDrySearchStreak(campaignId, 0)
     return
   }
 
@@ -957,6 +981,7 @@ async function ingestSearch(commandId, result) {
 
   if (toInsert.length === 0) {
     console.log(`[bridge] search ${commandId.slice(0,8)}: ${profiles.length} perfiles, todos duplicados`)
+    await bumpDrySearchStreak(campaignId, 0)
     return
   }
 
@@ -967,6 +992,7 @@ async function ingestSearch(commandId, result) {
   }
 
   console.log(`[bridge] ✅ search ingested: ${toInsert.length} leads nuevos (${profiles.length - toInsert.length} duplicados) en campaña ${campaignId.slice(0,8)}`)
+  await bumpDrySearchStreak(campaignId, toInsert.length)
 }
 
 // ── Ingest: search_posts → inserta post_opportunities (status='scraped') ─────

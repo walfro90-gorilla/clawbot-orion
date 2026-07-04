@@ -539,6 +539,11 @@ function blacklistHit(h, blacklist) {
   })
 }
 
+// v0.9.x (hallazgo Wal 2026-07-03 #4): normaliza para comparar quitando acentos
+// (á→a, ü→u) pero PRESERVANDO la ñ (no se toca U+0303). Antes el whitelist por substring
+// fallaba "Dirección" vs "Direccion". No aplica a blacklist (queda igual, ya robusto).
+const _stripAcc = (s) => (s ?? '').toLowerCase().normalize('NFD').replace(/[\u0301\u0308]/g, '')
+
 export function passesTitleFilters(headline, whitelist = [], blacklist = []) {
   const h = (headline ?? '').toLowerCase()
   if (blacklist?.length) {
@@ -550,7 +555,11 @@ export function passesTitleFilters(headline, whitelist = [], blacklist = []) {
     // necesario refilter aquí cuando no tenemos headline data. Esto desbloquea
     // pools donde el scrape no captura headlines (~80% de leads tienen null).
     if (h.length === 0) return true
-    if (!whitelist.some(w => h.includes(w.toLowerCase()))) return false
+    // Substring permisivo a propósito ("Director" caza "Directores"), pero insensible
+    // a acentos. NOTA: variantes de OTRA raíz ("Directivo") requieren añadir el término
+    // al whitelist (config) — el substring no las alcanza por diseño.
+    const hn = _stripAcc(h)
+    if (!whitelist.some(w => hn.includes(_stripAcc(w)))) return false
   }
   return true
 }

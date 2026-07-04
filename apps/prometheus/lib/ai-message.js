@@ -1,4 +1,4 @@
-// ai-message.js — Generación de mensajes LinkedIn vía Gemini.
+// ai-message.js — Generación de mensajes LinkedIn vía LLM (Groq primario + Gemini fallback).
 //
 // Sub-Fase 3.6 + 3.8 update: ahora soporta `fm_reply` con conversation history
 // y cal.com URL para que las respuestas sean contextuales y dirijan a la cita.
@@ -11,7 +11,14 @@
 
 import { GoogleGenAI } from '@google/genai'
 
-const MODEL = 'gemini-2.5-flash'
+const GEMINI_MODEL = 'gemini-2.5-flash'
+const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile'
+// Cadena de proveedores LLM: primario → fallback. Post-mortem 2026-07-03: el billing de
+// Gemini ("dunning deny") rompió TODA la generación por ser proveedor único. Groq primario
+// (rápido, free-tier, calidad Llama 3.3 70B validada) + Gemini fallback. Config por env:
+//   LLM_PROVIDERS="groq,gemini"  ·  GROQ_MODEL="llama-3.3-70b-versatile"
+const LLM_PROVIDERS = (process.env.LLM_PROVIDERS || 'groq,gemini')
+  .split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
 
 // Detecta placeholders/variables sin resolver en un mensaje listo para enviar:
 //   - corchetes con contenido: "[menciona algo]", "[Nombre]", "[CAL_URL]"
@@ -145,6 +152,12 @@ export function calUrlWithLeadId(calUrl, leadId) {
   }
 }
 
+// Regla anti-"título como empresa" (hallazgo Wal 2026-07-03 #1): la ruta VIVA no
+// pre-extrae la empresa (currentCompany suele ser null) y muchos headlines son títulos
+// puros ("Director de Operaciones") → sin esta regla Gemini podría inventar/usar el título
+// como si fuera el nombre de la empresa. La regex que lo evitaba vive en worker.js (MUERTO).
+const NO_INVENT_COMPANY_RULE = '🏢 EMPRESA: NUNCA inventes ni asumas el nombre de una empresa. Si el perfil NO incluye una línea "Empresa:" explícita, NO menciones ninguna empresa. NUNCA uses el cargo, título o rol de la persona (ej. "Director de Operaciones", "Gerente de Logística") como si fuera el nombre de su empresa — es un error grave.'
+
 function buildSystemPrompt({ campaignPrompt, type, exampleReply, calUrl, lastFuTemplate, lastFuStepNum }) {
   const typeConf = TYPE_RULES[type] ?? TYPE_RULES.invite
   const sections = [
@@ -179,6 +192,7 @@ function buildSystemPrompt({ campaignPrompt, type, exampleReply, calUrl, lastFuT
   }
   sections.push('', 'FORMATO DE RESPUESTA: SOLO el mensaje a enviar, texto plano. Sin comillas envolventes, sin prefijos tipo "Respuesta:", sin firma.')
   sections.push('', '🚫 PROHIBIDO: corchetes [ ], llaves { } o cualquier placeholder/instrucción de relleno (ej. "[menciona algo de su perfil]", "[Nombre]", "[empresa]"). Si te falta un dato del lead, OMÍTELO de forma natural — escribe la frase completa sin ese dato. El mensaje debe quedar 100% listo para enviarse tal cual, sin nada por rellenar.')
+  sections.push('', NO_INVENT_COMPANY_RULE)
   return sections.join('\n')
 }
 
@@ -227,32 +241,80 @@ function buildReplyUserPrompt(lead, conversationHistory, calUrl) {
   return parts.join('\n')
 }
 
-async function callGemini(systemPrompt, userPrompt, maxChars, opts) {
+// ── Llamadas CRUDAS por proveedor (devuelven texto trimmed, o lanzan) ───────────
+async function callGroqRaw(systemPrompt, userPrompt, opts) {
+  const apiKey = process.env.GROQ_API_KEY
+  if (!apiKey) throw new Error('GROQ_API_KEY missing')
+  const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: GROQ_MODEL,
+      messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
+      temperature: opts.temperature ?? 0.85,
+      max_tokens: 500,
+    }),
+  })
+  const j = await resp.json()
+  if (j.error) throw new Error(`groq_${resp.status}: ${j.error.message || JSON.stringify(j.error)}`)
+  return (j.choices?.[0]?.message?.content ?? '').trim()
+}
+
+async function callGeminiRaw(systemPrompt, userPrompt, opts) {
   const apiKey = process.env.GEMINI_API_KEY
-  if (!apiKey) return { error: 'GEMINI_API_KEY missing' }
+  if (!apiKey) throw new Error('GEMINI_API_KEY missing')
   const ai = new GoogleGenAI({ apiKey })
+  const response = await ai.models.generateContent({
+    model: GEMINI_MODEL,
+    config: {
+      systemInstruction: systemPrompt,
+      temperature: opts.temperature ?? 0.85,
+      maxOutputTokens: 500,
+      thinkingConfig: { thinkingBudget: 0 },
+    },
+    contents: userPrompt,
+  })
+  return (response.text ?? '').trim()
+}
+
+function callProviderRaw(provider, systemPrompt, userPrompt, opts) {
+  if (provider === 'groq')   return callGroqRaw(systemPrompt, userPrompt, opts)
+  if (provider === 'gemini') return callGeminiRaw(systemPrompt, userPrompt, opts)
+  return Promise.reject(new Error(`unknown LLM provider: ${provider}`))
+}
+
+// Punto ÚNICO de generación con FALLBACK entre proveedores. Intenta cada proveedor de
+// LLM_PROVIDERS en orden; si uno falla (billing/timeout/vacío/placeholder irresoluble),
+// cae al siguiente. Si todos fallan → { error } y el caller usa su fallback (template
+// literal en FU / skip en auto-reply). Mata la fragilidad de proveedor único.
+async function callLLM(systemPrompt, userPrompt, maxChars, opts = {}) {
+  let lastError = 'no_llm_provider'
+  for (let i = 0; i < LLM_PROVIDERS.length; i++) {
+    const provider = LLM_PROVIDERS[i]
+    const res = await callProvider(provider, systemPrompt, userPrompt, maxChars, opts)
+    if (res.message) {
+      if (i > 0) console.warn(`[ai] ✅ generado con fallback '${provider}' (proveedor primario falló)`)
+      return res
+    }
+    lastError = `${provider}: ${res.error}`
+    console.warn(`[ai] ⚠️ proveedor '${provider}' falló: ${res.error}${i < LLM_PROVIDERS.length - 1 ? ' → fallback' : ' (sin más fallbacks)'}`)
+  }
+  return { error: lastError }
+}
+
+async function callProvider(provider, systemPrompt, userPrompt, maxChars, opts) {
   const retries = opts.retries ?? 2
   let lastError
-  // Timeout duro por llamada — sin esto, si la red a Gemini se estanca, el await
+  // Timeout duro por llamada — sin esto, si la red al proveedor se estanca, el await
   // cuelga el tick completo del scheduler → watchdog mata el proceso (297s hang).
-  const GEMINI_TIMEOUT_MS = opts.timeoutMs ?? 30_000
-  const withGeminiTimeout = (p) => Promise.race([
+  const LLM_TIMEOUT_MS = opts.timeoutMs ?? 30_000
+  const withLlmTimeout = (p) => Promise.race([
     p,
-    new Promise((_, rej) => setTimeout(() => rej(new Error(`gemini_timeout_${GEMINI_TIMEOUT_MS}ms`)), GEMINI_TIMEOUT_MS)),
+    new Promise((_, rej) => setTimeout(() => rej(new Error(`${provider}_timeout_${LLM_TIMEOUT_MS}ms`)), LLM_TIMEOUT_MS)),
   ])
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      const response = await withGeminiTimeout(ai.models.generateContent({
-        model: MODEL,
-        config: {
-          systemInstruction: systemPrompt,
-          temperature: opts.temperature ?? 0.85,
-          maxOutputTokens: 500,
-          thinkingConfig: { thinkingBudget: 0 },
-        },
-        contents: userPrompt,
-      }))
-      let text = (response.text ?? '').trim()
+      let text = await withLlmTimeout(callProviderRaw(provider, systemPrompt, userPrompt, opts))
       if ((text.startsWith('"') && text.endsWith('"')) ||
           (text.startsWith("'") && text.endsWith("'"))) {
         text = text.slice(1, -1).trim()
@@ -334,7 +396,7 @@ export async function generateLinkedInMessage(campaign, lead, type = 'invite', o
   })
   const userPrompt = buildUserPrompt(lead)
   const maxChars = TYPE_RULES[type]?.maxChars ?? 150
-  return await callGemini(systemPrompt, userPrompt, maxChars, opts)
+  return await callLLM(systemPrompt, userPrompt, maxChars, opts)
 }
 
 /**
@@ -371,7 +433,7 @@ export async function personalizeFollowupMessage(campaign, lead, template, fuSte
     `MEJORA QUE QUEREMOS:`,
     `- MISMA intención y tono que el template original (si es un saludo cálido de relación, mantenlo así).`,
     `- Mismas piezas estructurales que el template: pregunta SOLO si el template tiene, dato SOLO si el template tiene, CTA SOLO si el template tiene.`,
-    `- Lenguaje adaptado al cargo, empresa, industria y headline del lead.`,
+    `- Lenguaje adaptado al cargo, industria y headline del lead (menciona su empresa SOLO si aparece abajo como "Empresa:").`,
     `- Tono: mismo que el template original (natural, cálido, humano).`,
     '',
     `LO QUE NO HAGAS:`,
@@ -379,6 +441,7 @@ export async function personalizeFollowupMessage(campaign, lead, template, fuSte
     `- NO agregues CTA, pregunta de venta, datos ni cifras que el template no tenga explícitamente.`,
     `- NO inventes datos numéricos (porcentajes, cifras).`,
     `- NO añadas información que no esté en el template o en el perfil del lead.`,
+    `- ${NO_INVENT_COMPANY_RULE}`,
     `- NO uses emojis a menos que el template original los tenga.`,
     `- NO incluyas tu firma o nombre.`,
     '',
@@ -407,9 +470,9 @@ export async function personalizeFollowupMessage(campaign, lead, template, fuSte
   if (lead.profile_data?.currentCompany)  userSections.push(`- Empresa: ${lead.profile_data.currentCompany}`)
   if (lead.profile_data?.location)        userSections.push(`- Ubicación: ${lead.profile_data.location}`)
   if (lead.profile_data?.about)           userSections.push(`- Acerca de: ${lead.profile_data.about.slice(0, 300)}`)
-  userSections.push('', `Personaliza el template para este lead. Adapta lenguaje, ejemplos y referencias a su contexto (empresa, industria, cargo).`)
+  userSections.push('', `Personaliza el template para este lead. Adapta lenguaje, ejemplos y referencias a su contexto (cargo e industria; su empresa SOLO si aparece arriba como "Empresa:").`)
 
-  return await callGemini(systemPrompt, userSections.join('\n'), maxChars, opts)
+  return await callLLM(systemPrompt, userSections.join('\n'), maxChars, opts)
 }
 
 /**
@@ -437,56 +500,91 @@ export async function generateLinkedInReply(campaign, lead, ctx = {}, opts = {})
   })
   const userPrompt = buildReplyUserPrompt(lead, ctx.conversationHistory ?? [], calUrl)
   const maxChars = TYPE_RULES[type]?.maxChars ?? 700
-  return await callGemini(systemPrompt, userPrompt, maxChars, opts)
+  return await callLLM(systemPrompt, userPrompt, maxChars, opts)
 }
 
 // ============================================================================
 // Post-Prospecting (v0.9): calificar posts + redactar comentarios value-first
 // ============================================================================
 
-// Helper JSON: igual que callGemini pero pide application/json y parsea el objeto.
-// Se usa para tareas de clasificación (qualifyPost) donde queremos datos, no prosa.
-// NO aplica el guard anti-placeholder ni la truncación de oraciones (eso es para DMs).
-async function callGeminiJson(systemPrompt, userPrompt, opts = {}) {
+// ── JSON mode con fallback de proveedor (clasificación, p.ej. qualifyPost) ───────
+// Pide JSON y parsea el objeto. NO aplica guard anti-placeholder ni truncación (eso es
+// para DMs). Mismo patrón Groq-primario/Gemini-fallback que callLLM.
+async function callGroqJsonRaw(systemPrompt, userPrompt, opts) {
+  const apiKey = process.env.GROQ_API_KEY
+  if (!apiKey) throw new Error('GROQ_API_KEY missing')
+  const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: GROQ_MODEL,
+      messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
+      temperature: opts.temperature ?? 0.2,
+      max_tokens: 300,
+      response_format: { type: 'json_object' },
+    }),
+  })
+  const j = await resp.json()
+  if (j.error) throw new Error(`groq_${resp.status}: ${j.error.message || JSON.stringify(j.error)}`)
+  return (j.choices?.[0]?.message?.content ?? '').trim()
+}
+
+async function callGeminiJsonRaw(systemPrompt, userPrompt, opts) {
   const apiKey = process.env.GEMINI_API_KEY
-  if (!apiKey) return { error: 'GEMINI_API_KEY missing' }
+  if (!apiKey) throw new Error('GEMINI_API_KEY missing')
   const ai = new GoogleGenAI({ apiKey })
+  const response = await ai.models.generateContent({
+    model: GEMINI_MODEL,
+    config: {
+      systemInstruction: systemPrompt,
+      temperature: opts.temperature ?? 0.2,
+      maxOutputTokens: 300,
+      thinkingConfig: { thinkingBudget: 0 },
+      responseMimeType: 'application/json',
+    },
+    contents: userPrompt,
+  })
+  return (response.text ?? '').trim()
+}
+
+function callProviderJsonRaw(provider, systemPrompt, userPrompt, opts) {
+  if (provider === 'groq')   return callGroqJsonRaw(systemPrompt, userPrompt, opts)
+  if (provider === 'gemini') return callGeminiJsonRaw(systemPrompt, userPrompt, opts)
+  return Promise.reject(new Error(`unknown LLM provider: ${provider}`))
+}
+
+async function callLLMJson(systemPrompt, userPrompt, opts = {}) {
   const retries = opts.retries ?? 2
-  const GEMINI_TIMEOUT_MS = opts.timeoutMs ?? 30_000
-  const withGeminiTimeout = (p) => Promise.race([
+  const LLM_TIMEOUT_MS = opts.timeoutMs ?? 30_000
+  const withLlmTimeout = (provider, p) => Promise.race([
     p,
-    new Promise((_, rej) => setTimeout(() => rej(new Error(`gemini_timeout_${GEMINI_TIMEOUT_MS}ms`)), GEMINI_TIMEOUT_MS)),
+    new Promise((_, rej) => setTimeout(() => rej(new Error(`${provider}_timeout_${LLM_TIMEOUT_MS}ms`)), LLM_TIMEOUT_MS)),
   ])
-  let lastError
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      const response = await withGeminiTimeout(ai.models.generateContent({
-        model: MODEL,
-        config: {
-          systemInstruction: systemPrompt,
-          temperature: opts.temperature ?? 0.2,
-          maxOutputTokens: 300,
-          thinkingConfig: { thinkingBudget: 0 },
-          responseMimeType: 'application/json',
-        },
-        contents: userPrompt,
-      }))
-      let text = (response.text ?? '').trim()
-      if (!text) { lastError = 'empty_response'; continue }
-      // Por si el modelo envuelve en ```json ... ```
-      text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim()
+  let lastError = 'no_llm_provider'
+  for (let i = 0; i < LLM_PROVIDERS.length; i++) {
+    const provider = LLM_PROVIDERS[i]
+    for (let attempt = 1; attempt <= retries; attempt++) {
       try {
-        return { data: JSON.parse(text) }
-      } catch {
-        lastError = 'json_parse_error'
-        if (attempt < retries) { await new Promise(r => setTimeout(r, 600)); continue }
+        let text = await withLlmTimeout(provider, callProviderJsonRaw(provider, systemPrompt, userPrompt, opts))
+        if (!text) { lastError = `${provider}: empty_response`; continue }
+        // Por si el modelo envuelve en ```json ... ```
+        text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim()
+        try {
+          const data = JSON.parse(text)
+          if (i > 0) console.warn(`[ai] ✅ JSON generado con fallback '${provider}'`)
+          return { data }
+        } catch {
+          lastError = `${provider}: json_parse_error`
+          if (attempt < retries) { await new Promise(r => setTimeout(r, 600)); continue }
+        }
+      } catch (err) {
+        lastError = `${provider}: ${err.message ?? String(err)}`
+        if (attempt < retries) await new Promise(r => setTimeout(r, 1500 * attempt))
       }
-    } catch (err) {
-      lastError = err.message ?? String(err)
-      if (attempt < retries) await new Promise(r => setTimeout(r, 1500 * attempt))
     }
+    console.warn(`[ai] ⚠️ JSON proveedor '${provider}' falló: ${lastError}${i < LLM_PROVIDERS.length - 1 ? ' → fallback' : ''}`)
   }
-  return { error: lastError ?? 'unknown' }
+  return { error: lastError }
 }
 
 /**
@@ -518,7 +616,7 @@ export async function qualifyPost(postText, serviceDescription, opts = {}) {
   ].join('\n')
 
   const userPrompt = `POST A EVALUAR:\n"""${text.slice(0, 1500)}"""`
-  const res = await callGeminiJson(systemPrompt, userPrompt, { temperature: 0.2, ...opts })
+  const res = await callLLMJson(systemPrompt, userPrompt, { temperature: 0.2, ...opts })
   if (res.error) return { error: res.error }
   const d = res.data ?? {}
   const score = Math.max(0, Math.min(10, Math.round(Number(d.score) || 0)))
@@ -565,5 +663,5 @@ export async function generatePostComment(post, postCampaign, opts = {}) {
   userParts.push('', 'CONTENIDO DEL POST:', '"""', String(post.post_text ?? '').slice(0, 1500), '"""')
   userParts.push('', 'Escribe un comentario público breve y genuinamente útil sobre lo que pide. Aporta valor real, sin vender.')
 
-  return await callGemini(systemPrompt, userParts.join('\n'), typeConf.maxChars, { temperature: 0.8, ...opts })
+  return await callLLM(systemPrompt, userParts.join('\n'), typeConf.maxChars, { temperature: 0.8, ...opts })
 }

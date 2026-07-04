@@ -50,7 +50,30 @@ const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min
 // número con default si no existe o no es número.
 // v0.7.47 — accountId opcional: si se pasa, account_config[account_id][key] GANA sobre el
 // runtime_config global. Null-safe: sin accountId o sin fila → cae al global (idéntico a hoy).
+// ── Caché TTL en proceso para config casi-estática (post-mortem 2026-07-03) ──────
+// runtime_config/account_config cambian rara vez pero se leían cientos de veces por
+// tick — round-trips puros que, bajo starvation de IO en el tier Nano, eran carga sin
+// valor que ayudó a wedgear la DB. Caché con TTL corto: un cambio de config surte
+// efecto en ≤TTL. Solo cachea LECTURAS de config estática (readRuntimeNumber /
+// getAccountConfigRaw); NO se toca readStressTestLock ni flags de pausa (time-sensitive,
+// leídos por otras vías). Ver docs/postmortem-2026-07-03-db-outage.md §5 (P1 #9).
+const CONFIG_CACHE_TTL_MS = parseInt(process.env.CONFIG_CACHE_TTL_MS ?? '60000')
+const _configCache = new Map()  // cacheKey → { val, exp }
+function _cfgGet(k) {
+  const e = _configCache.get(k)
+  if (e && e.exp > Date.now()) return e
+  if (e) _configCache.delete(k)
+  return null
+}
+function _cfgSet(k, val) { _configCache.set(k, { val, exp: Date.now() + CONFIG_CACHE_TTL_MS }) }
+
 async function readRuntimeNumber(key, def, accountId = null) {
+  // Cachea el valor RESUELTO crudo (número o null=no-encontrado), NO el def:
+  // así cada caller aplica su propio default sobre un hit compartido.
+  const ck = `rn:${accountId ?? '-'}:${key}`
+  const hit = _cfgGet(ck)
+  if (hit) return hit.val ?? def
+  let resolved = null
   if (accountId) {
     const { data: acc } = await supabase
       .from('account_config')
@@ -59,31 +82,39 @@ async function readRuntimeNumber(key, def, accountId = null) {
       .eq('key', key)
       .maybeSingle()
     const av = acc?.value
-    if (typeof av === 'number') return av
-    if (typeof av === 'string' && !isNaN(Number(av))) return Number(av)
+    if (typeof av === 'number') resolved = av
+    else if (typeof av === 'string' && !isNaN(Number(av))) resolved = Number(av)
   }
-  const { data } = await supabase
-    .from('runtime_config')
-    .select('value')
-    .eq('key', key)
-    .maybeSingle()
-  const v = data?.value
-  if (typeof v === 'number') return v
-  if (typeof v === 'string' && !isNaN(Number(v))) return Number(v)
-  return def
+  if (resolved === null) {
+    const { data } = await supabase
+      .from('runtime_config')
+      .select('value')
+      .eq('key', key)
+      .maybeSingle()
+    const v = data?.value
+    if (typeof v === 'number') resolved = v
+    else if (typeof v === 'string' && !isNaN(Number(v))) resolved = Number(v)
+  }
+  _cfgSet(ck, resolved)
+  return resolved ?? def
 }
 
 // v0.7.47 — lee un valor CRUDO de account_config (objeto/array/escalar) para esa cuenta.
 // Null si no hay fila. Para overrides no-numéricos (p.ej. inbox_hours {start,end}).
 async function getAccountConfigRaw(accountId, key) {
   if (!accountId) return null
+  const ck = `ac:${accountId}:${key}`
+  const hit = _cfgGet(ck)
+  if (hit) return hit.val
   const { data } = await supabase
     .from('account_config')
     .select('value')
     .eq('account_id', accountId)
     .eq('key', key)
     .maybeSingle()
-  return data?.value ?? null
+  const val = data?.value ?? null
+  _cfgSet(ck, val)
+  return val
 }
 
 // v0.7.13 — también reset lockout_skip_count cuando un FU succeeds.
@@ -167,14 +198,17 @@ const lastSkipReason = new Map()
 // invitables), no el conteo crudo. Sin esto, un pool lleno de junk del company-scoped
 // bloqueaba nuevas búsquedas. El pool scraped suele ser <50, así que el fetch es barato.
 async function getEligiblePendingCount(campaign) {
+  // Solo se necesita el headline para passesTitleFilters — extraerlo server-side con
+  // ->>headline en vez de traer el profile_data JSON completo (payload sin valor por
+  // tick por campaña). Post-mortem 2026-07-03 §5 (P2).
   const { data } = await supabase
     .from('leads')
-    .select('profile_data')
+    .select('hl:profile_data->>headline')
     .eq('campaign_id', campaign.id)
     .in('status', ['scraped', 'pending'])
   let n = 0
   for (const l of (data ?? [])) {
-    if (passesTitleFilters(l.profile_data?.headline ?? '', campaign.title_whitelist, campaign.title_blacklist)) n++
+    if (passesTitleFilters(l.hl ?? '', campaign.title_whitelist, campaign.title_blacklist)) n++
   }
   return n
 }
@@ -203,11 +237,17 @@ async function trySearchForCampaign(campaign, account) {
     return { skipped: true, reason: 'enough_eligible_leads', eligibleCount, minPending }
   }
   const criticalDrought = eligibleCount <= criticalPending
-  const effGapMin = criticalDrought ? CRIT_FLOOR_MIN : searchGapHours * 60
+  // #3 (2026-07-03): backoff yield-aware del piso de drought. Si las últimas búsquedas
+  // vinieron SECAS (dry_search_streak, seteado en ingestSearch al no traer leads netos),
+  // multiplicamos el piso para no martillar un pool agotado cada 30min: 30→60→120→240→cap
+  // 360min. Se resetea a 0 en cuanto una búsqueda trae leads netos nuevos.
+  const dryStreak = campaign.dry_search_streak ?? 0
+  const critFloorMin = Math.min(CRIT_FLOOR_MIN * (2 ** Math.min(dryStreak, 4)), 360)
+  const effGapMin = criticalDrought ? critFloorMin : searchGapHours * 60
   if (minsSince < effGapMin) {
-    return { skipped: true, reason: criticalDrought ? 'search_crit_floor_not_met' : 'search_gap_not_met', eligibleCount, minsSince: Math.floor(minsSince) }
+    return { skipped: true, reason: criticalDrought ? 'search_crit_floor_not_met' : 'search_gap_not_met', eligibleCount, minsSince: Math.floor(minsSince), dryStreak, effGapMin: Math.round(effGapMin) }
   }
-  if (criticalDrought) console.log(`[SCH-EXT]   ⚡ drought CRÍTICO ${campaign.name}: ${eligibleCount} ejecutivos elegibles (≤${criticalPending}) → búsqueda forzada, ignora gap ${searchGapHours}h`)
+  if (criticalDrought) console.log(`[SCH-EXT]   ⚡ drought CRÍTICO ${campaign.name}: ${eligibleCount} elegibles (≤${criticalPending}), dryStreak=${dryStreak} → piso ${effGapMin}min, búsqueda forzada`)
 
   // Rotación per-search (fix 29-may-2026): antes usaba hour-of-day como índice,
   // pero si search corre 1×/día siempre cae en la misma hora → siempre misma keyword.
