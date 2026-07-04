@@ -616,6 +616,12 @@ async function handleCommandResult(msg) {
         // para que check_sent_invites lo re-verifique (no kill permanente).
         if (reason.includes('2nd_degree') || reason.includes('3rd_degree') ||
             reason.includes('inmail_required') || reason.includes('inmail_credits')) {
+          // (2026-07-04) Si estuvo GENUINAMENTE conectado, ser 2do/3er grado AHORA = el
+          // contacto nos ELIMINÓ → Super DEAD (no re-invitar). Solo si NO hubo conexión real
+          // aplicamos el revert-con-cap (falso accept / lead InMail-only de siempre).
+          if (await wasGenuinelyConnected(cmd.related_lead_id)) {
+            await markDisconnectedSuperDead(cmd.related_lead_id, `not_messageable_${reason}`)
+          } else {
           // v0.7.13 P1-1: contar reverts. Si >= cap → dead (evita loop infinito).
           // Antes de v0.7.13, un lead InMail-only se quedaba rebotando entre
           // invite_sent → check_inbox → revert → infinito.
@@ -643,6 +649,7 @@ async function handleCommandResult(msg) {
               inmail_revert_count: newCount,
             }).eq('id', cmd.related_lead_id)
             console.log(`[bridge] 🚫 lead ${cmd.related_lead_id.slice(0,8)} reverted ${newCount}/${cap}: not_messageable (${reason})`)
+          }
           }
         } else if (reason.includes('sponsored')) {
           // Sponsored thread = no es real lead, mark dead permanent
@@ -739,18 +746,22 @@ async function handleCommandResult(msg) {
         .eq('id', commandId)
         .single()
       if (cmd?.related_lead_id) {
-        // Ambos errores significan que el lead NO es 1er grado / NO aceptó la invite.
-        // Revertimos a invite_sent para que el lead siga en pipeline (puede aceptar
-        // después). Marcamos dead_reason como FLAG para que check_sent_invites NO
-        // lo vuelva a marcar connected automáticamente — evita ping-pong status.
-        const updates = {
-          status: 'invite_sent',
-          connected_at: null,
-          last_followup_at: null,
-          dead_reason: 'detected_not_first_degree',
+        // (2026-07-04) Si el lead estuvo GENUINAMENTE conectado, este not_first_degree = el
+        // contacto nos ELIMINÓ de su red → Super DEAD (NO re-invitar: anti-ban / denuncia).
+        // Solo si NO hay evidencia de conexión real es un falso-positivo de accept-detection
+        // → revert a invite_sent + FLAG (para que check_sent_invites no haga ping-pong).
+        if (await wasGenuinelyConnected(cmd.related_lead_id)) {
+          await markDisconnectedSuperDead(cmd.related_lead_id, result.error)
+        } else {
+          const updates = {
+            status: 'invite_sent',
+            connected_at: null,
+            last_followup_at: null,
+            dead_reason: 'detected_not_first_degree',
+          }
+          await supabase.from('leads').update(updates).eq('id', cmd.related_lead_id)
+          console.log(`[bridge] ⚙️  Lead ${cmd.related_lead_id.slice(0,8)} revertido (falso accept): ${result.error} → invite_sent + flag`)
         }
-        await supabase.from('leads').update(updates).eq('id', cmd.related_lead_id)
-        console.log(`[bridge] ⚙️  Lead ${cmd.related_lead_id.slice(0,8)} revertido: ${result.error} → status=invite_sent + flag`)
       }
     } catch (err) {
       console.error(`[bridge] revert lead status failed:`, err.message)
@@ -918,6 +929,52 @@ async function ingestCheckSentInvites(commandId, pending, statedTotal = null) {
 }
 
 // ── Ingest: search → insertar leads nuevos en DB ───────────────────────────
+// ── Detección de DESCONEXIÓN (el contacto nos eliminó) → Super DEAD ──────────────
+// (2026-07-04) Un contacto que ACEPTÓ y luego nos ELIMINÓ de su red NO debe re-invitarse
+// ni re-mensajearse (riesgo anti-ban / que nos denuncien). Cuando un envío falla con
+// "not_first_degree"/"not_messageable" distinguimos:
+//   - estuvo GENUINAMENTE conectado (FU enviado / respondió / etapa post-conexión) → nos
+//     ELIMINÓ → Super DEAD irreversible (status=dead + disconnected_at + automation_paused).
+//   - sin evidencia (posible falso-positivo de accept-detection) → revert a invite_sent (previo).
+async function wasGenuinelyConnected(leadId) {
+  const { data: lead } = await supabase.from('leads')
+    .select('followup_step, last_followup_at, status, replied_at')
+    .eq('id', leadId).maybeSingle()
+  if (!lead) return false
+  if ((lead.followup_step ?? 0) > 0) return true                 // le mandamos un FU → estaba conectado
+  if (lead.last_followup_at) return true
+  if (lead.replied_at) return true                               // nos respondió → definitivamente conectado
+  if (['replied', 'follow_up_sent', 'awaiting_response', 'meeting_booked'].includes(lead.status)) return true
+  const { data: conv } = await supabase.from('conversations').select('id').eq('lead_id', leadId).maybeSingle()
+  if (conv) {
+    const { count } = await supabase.from('conversation_events')
+      .select('id', { count: 'exact', head: true })
+      .eq('conversation_id', conv.id).eq('direction', 'inbound')
+    if ((count ?? 0) > 0) return true                            // recibió inbound → conexión real
+  }
+  return false
+}
+
+async function markDisconnectedSuperDead(leadId, detail) {
+  await supabase.from('leads').update({
+    status: 'dead',
+    dead_reason: 'disconnected_by_contact',
+    disconnected_at: new Date().toISOString(),
+    automation_paused: true,   // fail-closed: bloquea cualquier ruta que filtre por automation_paused
+  }).eq('id', leadId)
+  try {
+    const { data: conv } = await supabase.from('conversations').select('id').eq('lead_id', leadId).maybeSingle()
+    if (conv) {
+      await supabase.from('conversation_events').insert({
+        conversation_id: conv.id, event_type: 'note_added', direction: 'outbound',
+        content: `El contacto nos eliminó de su red (detectado: ${detail}). Lead → Super DEAD: no más contacto (anti-ban).`,
+      })
+      await supabase.from('conversations').update({ status: 'dead' }).eq('lead_id', leadId)
+    }
+  } catch { /* best-effort: el marcado del lead es lo crítico */ }
+  console.log(`[bridge] ⛔ lead ${leadId.slice(0,8)} SUPER-DEAD: el contacto nos eliminó (${detail}) — no re-invitar/re-mensajear`)
+}
+
 // #3 (2026-07-03): backoff yield-aware de búsqueda. net-new=0 → +1 al streak seco (cap 6);
 // >0 → reset a 0. Lo lee trySearchForCampaign para hacer backoff del piso de drought y no
 // martillar un pool agotado cada 30min. Best-effort (nunca rompe el ingest). Búsqueda es
