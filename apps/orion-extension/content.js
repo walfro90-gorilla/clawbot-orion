@@ -5338,40 +5338,50 @@ async function checkConnections(payload = {}) {
   if (!/\/mynetwork\/.*connections/.test(location.pathname)) {
     return { action: 'check_connections', status: 'error', error: 'not_on_connections_page', currentUrl: location.href }
   }
-  const found = await waitForSelector(['main section', 'main a[href*="/in/"]', 'main'], 12000)
+  const found = await waitForSelector(['main a[href*="/in/"]', 'main section', 'main'], 12000)
   if (!found) return { action: 'check_connections', status: 'error', error: 'container_not_found' }
   await sleep(1500)
 
-  // La lista viene ordenada "Añadidos recientemente" → los accepts nuevos están arriba.
-  // Scroll infinito hasta estabilizar el conteo (o cap) — no necesitamos los 1000+, solo
-  // cubrir los invites recientes de varios días. Cap generoso.
-  const main = document.querySelector('main') || document.body
-  let prevN = -1, stable = 0
-  for (let i = 0; i < 25 && stable < 3; i++) {
-    window.scrollTo(0, document.body.scrollHeight)
-    await sleep(randInt(500, 900))
-    const n = main.querySelectorAll('a[href*="/in/"]').length
-    if (n === prevN) stable++; else { stable = 0; prevN = n }
-    if (n >= 400) break  // cobertura suficiente
-  }
-  window.scrollTo({ top: 0 }); await sleep(500)
+  // (0.9.15) La lista de conexiones scrollea DENTRO de un contenedor (main con overflow), NO
+  // la window → window.scroll no dispara el lazy-load (quedaba en 10 de 658). Detectamos el
+  // contenedor scrollable y lo scrolleamos. Además ACUMULAMOS URLs por si la lista está
+  // virtualizada (solo ~10 items en el DOM a la vez). Y preferimos el anchor CON nombre (cada
+  // card tiene 2 anchors /in/: avatar sin texto + nombre con texto; antes nos quedábamos con el avatar).
+  const findScrollEl = () => [...document.querySelectorAll('main, main *')]
+    .find(el => el.scrollHeight > el.clientHeight + 300 && /auto|scroll/.test(getComputedStyle(el).overflowY))
+    || document.scrollingElement || document.documentElement
 
-  const links = Array.from(main.querySelectorAll('a[href*="/in/"]'))
-  const connections = []
-  const seen = new Set()
-  for (const link of links) {
-    const href = link.getAttribute('href') || ''
-    const full = href.startsWith('http') ? href : `https://www.linkedin.com${href}`
-    const url = full.split('?')[0].replace(/\/$/, '') + '/'
-    if (!url.includes('/in/')) continue
-    if (seen.has(url)) continue
-    let name = Array.from(link.childNodes).filter(n => n.nodeType === 3).map(n => n.textContent.trim()).filter(Boolean).join(' ').trim()
-    if (!name) name = (link.textContent || '').trim()
-    if (!name) name = (link.getAttribute('aria-label') || '').trim()
-    if (name.length > 80) name = name.slice(0, 80)
-    seen.add(url)
-    connections.push({ profileUrl: url, name })
+  const byUrl = new Map()  // url → mejor nombre visto
+  const collect = () => {
+    for (const a of document.querySelectorAll('main a[href*="/in/"]')) {
+      const href = a.getAttribute('href') || ''
+      const full = href.startsWith('http') ? href : `https://www.linkedin.com${href}`
+      const url = full.split('?')[0].replace(/\/$/, '') + '/'
+      if (!url.includes('/in/')) continue
+      let name = (a.textContent || '').trim()
+      if (!name) name = (a.getAttribute('aria-label') || '').trim()
+      if (name.length > 80) name = name.slice(0, 80)
+      const prev = byUrl.get(url)
+      if (prev === undefined || (!prev && name)) byUrl.set(url, name)  // prefiere el que tenga nombre
+    }
   }
+
+  collect()
+  let prevSize = -1, stable = 0
+  for (let i = 0; i < 80 && stable < 4; i++) {
+    const sc = findScrollEl()
+    if (sc.scrollBy) sc.scrollBy(0, Math.round((sc.clientHeight || window.innerHeight) * 0.85))
+    else sc.scrollTop = sc.scrollHeight
+    await sleep(randInt(450, 750))
+    const moreBtn = [...document.querySelectorAll('main button, main [role="button"]')]
+      .find(b => b.offsetParent !== null && /mostrar m[áa]s|ver m[áa]s|m[áa]s resultados|show more|load more/i.test((b.textContent || '').trim()))
+    if (moreBtn) { moreBtn.click(); await sleep(randInt(800, 1300)) }
+    collect()
+    if (byUrl.size === prevSize && !moreBtn) stable++; else { stable = 0; prevSize = byUrl.size }
+    if (byUrl.size >= 800) break  // cap de seguridad
+  }
+
+  const connections = [...byUrl.entries()].map(([profileUrl, name]) => ({ profileUrl, name }))
   return {
     action: 'check_connections', status: 'ok',
     connections, count: connections.length,
