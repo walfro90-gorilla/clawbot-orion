@@ -359,7 +359,21 @@ pm2 restart prometheus-scheduler extension-bridge   # reiniciar JUNTOS (comparte
 pm2 save                          # persistir para sobrevivir reboots
 ```
 
-> ⏰ **Horario (hora de México):** invitaciones/búsqueda Lun–Vie 09–19h · lectura de inbox Lun–Sáb 08–21h · tick base ~30 min con jitter. Configurable por campaña y por cuenta.
+> ⏰ **Horario (hora local de cada cuenta):** ventana operativa por campaña vía `schedule_start_hour` / `schedule_end_hour` / `schedule_days` (default **6–21h los 7 días**, configurable — p.ej. Wal **8–22h**). El alert `ext_offline_business_hours` respeta el schedule real de cada cuenta. Tick con jitter.
+
+---
+
+## 🆕 Actualizaciones recientes (jul-2026 — era "madurez / hard-testing")
+
+> Endurecimiento post-outage. Bitácora de fixes con detalle en [`docs/bitacora-operativa.md`](docs/bitacora-operativa.md); huella histórica con timing en [`docs/EVOLUTION.md`](docs/EVOLUTION.md).
+
+- **Accept-detection POSITIVA** (`check_connections`): detecta aceptaciones por **presencia** en la lista de conexiones (definitivo), no por ausencia del `/sent/`. Se **desactivó** la vieja heurística agresiva `OLD_ACCEPT_DAYS` que fabricaba falsos-accept (churn `detected_not_first_degree`).
+- **FU1 prioritario**: el primer follow-up a una conexión nueva ya no queda atrás de los FU avanzados (bug de *starvation*).
+- **Super DEAD** — contacto que nos eliminó (`disconnected_at` + `automation_paused`): nunca re-invitar ni re-mensajear (anti-ban).
+- **Reaper de leads `replied` rancios** (>21d sin nuevo inbound → `dead`), cerrando el limbo que ni auto-reply ni `auto_dead` tocaban.
+- **LLM resiliente**: **Groq primario** (`llama-3.3-70b`) + **Gemini fallback** + template — sin proveedor único.
+- **Horario por cuenta** + alert `ext_offline_business_hours` que respeta el schedule real de cada cuenta.
+- **Resiliencia del orquestador**: `AbortController` por tick, boot jitter + detección de crash-loop, backoff auto-programado, y **watchdog DB-independiente** (cron `*/2`) con alertas out-of-band + dead-man's-switch.
 
 ---
 
