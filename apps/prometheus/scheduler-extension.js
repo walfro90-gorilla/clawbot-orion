@@ -1445,6 +1445,23 @@ async function runConnectivityHealthCheck(connectedIds) {
       .select('id, label, timezone, extension_paused')
     if (!accounts) return
 
+    // v0.8 (2026-07-04): ventana "debería estar online" POR CUENTA = unión de los schedules de
+    // sus campañas activas (min start, max end, unión de días). Antes 6-21/7d hardcodeado para
+    // TODAS; ahora respeta el horario real de cada cuenta (p.ej. Wal 8-22). Fallback 6-21/7d si
+    // la cuenta no tiene campañas activas con schedule.
+    const { data: schedRows } = await supabase
+      .from('campaigns')
+      .select('linkedin_account_id, schedule_start_hour, schedule_end_hour, schedule_days')
+      .eq('is_active', true)
+    const schedByAccount = new Map()
+    for (const r of (schedRows ?? [])) {
+      const cur = schedByAccount.get(r.linkedin_account_id) ?? { start: null, end: null, days: new Set() }
+      if (r.schedule_start_hour != null) cur.start = cur.start == null ? r.schedule_start_hour : Math.min(cur.start, r.schedule_start_hour)
+      if (r.schedule_end_hour != null)   cur.end   = cur.end   == null ? r.schedule_end_hour   : Math.max(cur.end,   r.schedule_end_hour)
+      for (const d of (r.schedule_days ?? [])) cur.days.add(d)
+      schedByAccount.set(r.linkedin_account_id, cur)
+    }
+
     for (const acc of accounts) {
       // ── AUTO-RESOLUCIÓN de alertas cuya condición ya no aplica ──
       // Evita banners rojos fantasma: si la cuenta NO está pausada, resolver
@@ -1473,7 +1490,11 @@ async function runConnectivityHealthCheck(connectedIds) {
       // 7 días + 6-21h para que la caída SÍ genere ext_offline_business_hours (debounce 60min).
       const tz = acc.timezone ?? 'America/Mexico_City'
       const ALL_DAYS_7 = ['lunes','martes','miércoles','jueves','viernes','sábado','domingo']
-      const inBH = isBusinessHours(6, 21, ALL_DAYS_7, tz)
+      const _sch = schedByAccount.get(acc.id)
+      const _startH = _sch?.start ?? 6
+      const _endH   = _sch?.end   ?? 21
+      const _days   = (_sch && _sch.days.size > 0) ? [..._sch.days] : ALL_DAYS_7
+      const inBH = isBusinessHours(_startH, _endH, _days, tz)
       if (!inBH) continue
 
       // ── Detector de CONEXIÓN INESTABLE (infiere background mode OFF) ──

@@ -2,14 +2,22 @@
 
 > Log vivo del monitoreo. Cada entrada: hallazgo → acción/estado. Lo mantiene Orion (Claude) en modo monitor.
 
-## Estado actual (2026-07-02)
-- **Extensión**: `0.9.10` (fix raíz whitespace en `typing_complete`). Josh confirmado; Wal/Café pueden ir detrás.
-- **✅ FU FUNCIONANDO**: validado en vivo 3/3 `sent_confirmed` (overlay + thread), 0 timeouts.
+## Estado actual (2026-07-04)
+- **Extensión**: `0.9.15` en las 3 cuentas (Wal/Josh/Café) — check_connections (accept-detection positiva) + disconnect Super DEAD.
+- **Backend en `74e7c2a`+** (prod `/root/clawbot`): P1 `OLD_ACCEPT_DAYS` desactivado (`extension-bridge`), reaper de `replied` rancios (`prometheus-scheduler`), alert offline per-cuenta.
+- **✅ Barrido de salud 04-jul**: 4 agentes (search/invite/auto-reply/follow-up) × 3 cuentas CERTIFICADO SANO, 0 bloqueantes.
+- **Horarios**: Wal 8-22h/7d (Transporte+Tech); Josh/Café 6-21h/7d. El alert `ext_offline_business_hours` ahora respeta el schedule real por cuenta.
 - **PM2**: 4 procesos online (orion, extension-bridge, prometheus-scheduler, xvfb).
 - **Agente de publicación diaria** (Fases A+B+C) en producción — 3 borradores en `pending_review` esperando revisión.
 - **✅ Josh "pausa manual" recurrente = era el CIRCUIT BREAKER** (no un humano — el operador lo confirmó). El spike de `typing_complete_timeout` (bug shadow DOM) tripeaba el account circuit breaker (Capa 2, `extension-dispatch.js`) → auto-pausa 8× (alertas `error_spike` 29-jun→01-jul). El label `extension_paused_by_user` del gate es genérico y engañó. **Fix**: (1) raíz = shadow DOM 0.9.8; (2) defensa = excluir `micro_phase_*_timeout` de account-fault en el breaker. Ver [`followups-flujo.md §7`](followups-flujo.md).
 
 ## ✅ Resuelto
+
+### ⏰ Horario de Wal 8-22/7d + alert offline per-cuenta + fix tokens company-lists  [04-jul]
+- **Wal activo 8am-10pm diario**: campañas Transporte (`91f116e3`) + Tech (`c39fab66`) → `schedule_start_hour=8`, `schedule_end_hour=22`, 7 días. El gate `checkCampaignActiveGates` (`extension-dispatch.js:743`) usa estos campos → controla cuándo opera el bot.
+- **Alert offline per-cuenta** (`scheduler-extension.js` `runConnectivityHealthCheck`): antes `isBusinessHours(6,21,7d)` HARDCODEADO para todas → con Wal en 8-22 daba falsos-offline 6-8am y ceguera 21-22h. Ahora deriva la ventana por cuenta = unión (min start, max end, unión de días) de sus campañas activas; fallback 6-21/7d. Josh/Café sin cambio (6-21/7d), Wal → 8-22/7d.
+- **Fix tokens rotos company-lists** (Josh `6e2964ad` + Café `5f3b43b7`, aprobado por Walfre): `Forvia ationMexico`→`Forvia Mexico`, `Draexlmaie`→`Draexlmaier Mexico`, `Martinrea Internal`→`Martinrea International`, `(Tupy)/(TAMSA)/(Sabritas)`→sin paréntesis, splits (`Pentair Mexico Rexnord Mexico`, `Viakable Panduit Mexico`, `Alpek Cydsa`, `Grupo Bimbo Grupo Herdez`, `Arca Continental Grupo Modelo / AB`), remove `International`+`GE` sueltos. Re-dedup: Café 174→177, Josh 196→196.
+- **Modal upsell Sales Navigator** (captura de Walfre): confirmado que `dismissUpsellModals()` (ext 0.9.3, `content.js:1383`) SÍ cubre la variante "Entabla nuevas relaciones… SalesNavigator" (regex matchea) y se llama antes de teclear en ambas rutas del composer. Aparece tras N mensajes (throttle de LinkedIn), el bot la cierra (X/ESC) y continúa. No es bloqueo.
 
 ### 🧽 Higiene P3: dedup company-lists + consolidar [Post] + hold de Jose + diag offline Wal  [04-jul]
 - **Dedup `search_company_names`** (case-insensitive, preserva orden, quita vacíos — SOLO duplicados exactos, no adivina correcciones de nombres): Josh (`6e2964ad`) 203→**196**, Café (`5f3b43b7`) 176→**174**. Pendiente (requiere confirmación de Walfre, es data de targeting): tokens rotos/concatenados `Forvia ationMexico`, `Draexlmaie`, `Martinrea Internal`, `International`, `GE`, `(Tupy)`, `(TAMSA)`, `(Sabritas)`, `Pentair Mexico Rexnord Mexico`, `Viakable Panduit Mexico`, `Alpek Cydsa`, `Grupo Bimbo Grupo Herdez`, `Arca Continental Grupo Modelo / AB`.
