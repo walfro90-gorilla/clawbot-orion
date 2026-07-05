@@ -11,6 +11,11 @@
 
 ## ✅ Resuelto
 
+### 🧹 Reaper de leads 'replied' rancios + reactivación de campaña Tech (drenaje)  [04-jul]
+- **Hueco cerrado (código)**: un lead `status='replied'` que respondió pero lleva >N días sin nuevo inbound quedaba en LIMBO — auto-reply lo ignora (safety gate `fm_max_age=7d`) y ningún sweep lo tocaba (`auto_dead_after_days` corre DENTRO del flujo FU y `'replied'` está en `FU_DISPATCH_EXCLUDED_STATUSES`). Se acumulaban indefinidamente (60+ solo en la campaña Tech de Wal). **Fix**: `sweepRepliedTimeout()` en `scheduler-extension.js` (espejo de `sweepAwaitingResponseTimeout`) — mata `replied` con `replied_at` > `REPLIED_STALE_KILL_DAYS` (default 21d, env-configurable) → `dead` con `dead_reason='replied_no_action_21d'`. Excluye `automation_paused=true` (respeta holds manuales). Seguro: `replied_at` se refresca en cada inbound (bridge) → un lead en conversación activa nunca envejece. Radio 1er run: **60 leads** (los más viejos 36d).
+- **Reactivación campaña 'Tech & Innovation Leaders - Wal' (`c39fab66`)**: estaba `is_active=false` con 74 connected + 81 replied varados. Set `is_active=true` + **`search_paused=true`** (drenar el backlog tibio SIN reabrir prospección nueva — no diluir el cap frío de Wal con leads nuevos). Drenaje: 74 connected → FU1 (throttle 30/día compartido); 3 replied fresh → auto-reply; 60 replied ≥21d → reaper; 20 en limbo 7-21d → reaper al cruzar 21d.
+- **Jose Cruz (`f9c38050`)**: prospecto genuino ("okey avísame"), replied 4.2d (dentro de ventana auto-reply). **Retenido** (`automation_paused=true`) para respuesta MANUAL de Walfre — no dispara auto-reply. Liberar/responder cuando Walfre lo atienda.
+
 ### 🩺 Certificación de salud de los 4 agentes IA (search/invite/auto-reply/follow-up) × 3 cuentas  [barrido read-only, 04-jul]
 - **Veredicto: CERTIFICADO SANO, 0 hallazgos bloqueantes.** Barrido multi-agente (4 analistas paralelos) contra código vivo + DB tras los fixes. Los 4 agentes aprobados.
 - **Confirmado en producción con datos**: FU1-prioritario (Josh 7 FU1 hoy + 20 accepts encolados en su delay); `check_connections` positivo (Josh 434→20 accepts, Wal 407→5); Fix#2 Wal-MX (keyword 0 USA→10 MX); Groq primario (0 `ai_fallback_used`/30d); Super DEAD seguro (13 falsos-positivos `not_first_degree` revertidos limpios, `disconnected_at=null` en todos → 0 super-dead erróneos).

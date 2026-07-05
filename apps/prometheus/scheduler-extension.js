@@ -515,6 +515,15 @@ const AWAITING_RESPONSE_KILL_DAYS = parseInt(process.env.AWAITING_RESPONSE_KILL_
 // Configurable via env QUARANTINE_KILL_DAYS, default 7d.
 const QUARANTINE_KILL_DAYS = parseInt(process.env.QUARANTINE_KILL_DAYS ?? '7')
 
+// v0.8 (2026-07-04): leads 'replied' rancios → dead. Un lead que respondió pero lleva N días
+// sin nuevo inbound quedaba en LIMBO: auto-reply lo ignora (safety gate fm_max_age=7d) y ningún
+// sweep lo tocaba (auto_dead_after_days corre DENTRO del flujo FU, y 'replied' está en
+// FU_DISPATCH_EXCLUDED_STATUSES → nunca entra). Se acumulaban indefinidamente (caso Tech de Wal:
+// 60+ replied rancios). replied_at se REFRESCA en cada inbound nuevo (extension-bridge.js) → un
+// lead en conversación activa nunca envejece; solo los genuinamente callados cruzan el umbral.
+// Espejo de sweepAwaitingResponseTimeout. Configurable via env, default 21d.
+const REPLIED_STALE_KILL_DAYS = parseInt(process.env.REPLIED_STALE_KILL_DAYS ?? '21')
+
 async function sweepAwaitingResponseTimeout() {
   const cutoffIso = new Date(Date.now() - AWAITING_RESPONSE_KILL_DAYS * 86_400_000).toISOString()
   const { data: stale, error } = await supabase
@@ -540,6 +549,40 @@ async function sweepAwaitingResponseTimeout() {
     }
     swept++
     console.log(`[SCH-EXT] 💀 awaiting_response → dead: ${lead.full_name || lead.id.slice(0,8)} (${AWAITING_RESPONSE_KILL_DAYS}d sin reply)`)
+  }
+  return { swept }
+}
+
+// v0.8 (2026-07-04): reaper de leads 'replied' rancios (ver REPLIED_STALE_KILL_DAYS).
+// Excluye automation_paused=true (respeta holds manuales: un lead que respondió y un humano
+// pausó a propósito NO debe morir por timeout). Barato, indexado, idempotente (al morir sale
+// del filtro). dead_reason auditable y revivible desde el CRM.
+async function sweepRepliedTimeout() {
+  const cutoffIso = new Date(Date.now() - REPLIED_STALE_KILL_DAYS * 86_400_000).toISOString()
+  const { data: stale, error } = await supabase
+    .from('leads')
+    .select('id, full_name, replied_at')
+    .eq('status', 'replied')
+    .eq('automation_paused', false)
+    .lt('replied_at', cutoffIso)
+    .limit(200)
+  if (error) {
+    console.error(`[SCH-EXT] sweepReplied query failed:`, error.message)
+    return { swept: 0 }
+  }
+  if (!stale || stale.length === 0) return { swept: 0 }
+  let swept = 0
+  for (const lead of stale) {
+    const { error: updErr } = await supabase.from('leads').update({
+      status: 'dead',
+      dead_reason: `replied_no_action_${REPLIED_STALE_KILL_DAYS}d`,
+    }).eq('id', lead.id)
+    if (updErr) {
+      console.error(`[SCH-EXT] sweepReplied update lead ${lead.id.slice(0,8)} failed:`, updErr.message)
+      continue
+    }
+    swept++
+    console.log(`[SCH-EXT] 💀 replied → dead: ${lead.full_name || lead.id.slice(0,8)} (${REPLIED_STALE_KILL_DAYS}d sin nuevo inbound)`)
   }
   return { swept }
 }
@@ -1954,6 +1997,15 @@ async function tick() {
     if (sweepRes.swept > 0) console.log(`[SCH-EXT] sweepAwaitingResponse: ${sweepRes.swept} leads → dead`)
   } catch (err) {
     console.error(`[SCH-EXT] sweepAwaitingResponse threw:`, err.message)
+  }
+
+  // v0.8 (04-jul): sweep de 'replied' rancios → dead tras N días sin nuevo inbound.
+  // Cierra el hueco: auto-reply ignora replies >7d (fm_max_age) y ningún otro sweep los tocaba.
+  try {
+    const sweepReplRes = await sweepRepliedTimeout()
+    if (sweepReplRes.swept > 0) console.log(`[SCH-EXT] sweepReplied: ${sweepReplRes.swept} leads → dead`)
+  } catch (err) {
+    console.error(`[SCH-EXT] sweepReplied threw:`, err.message)
   }
 
   // Quarantine cleanup: leads con quarantined_at > QUARANTINE_KILL_DAYS sin
