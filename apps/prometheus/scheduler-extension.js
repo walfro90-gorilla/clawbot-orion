@@ -302,6 +302,37 @@ async function trySearchForCampaign(campaign, account) {
   return { dispatched: true, commandId: cmdId, keyword }
 }
 
+// ── Junk reaper (06-jul): mantiene 'scraped' limpio de leads que NUNCA pasarán el whitelist ──
+// El search company-scoped rinde ~1 ejecutivo por decenas de empleados; el junk que falla el
+// whitelist se quedaba en 'scraped' para siempre (nunca se invita) y, al acumularse, TAPABA la
+// ventana de selección de invites (limit) → starving a ejecutivos válidos más viejos (caso Josh
+// 06-jul: top-10 = puro Procurement/Consultant mientras Director General/CEO esperaban >15 rank).
+// Barremos junk CON headline y >2 días → disqualified. Headline vacío PASA (passesTitleFilters),
+// así que nunca tocamos leads sin headline. Idempotente y barato (el pool 'scraped' es chico).
+async function sweepJunkScraped(campaign) {
+  try {
+    const staleIso = new Date(Date.now() - 2 * 86_400_000).toISOString()
+    const { data } = await supabase
+      .from('leads')
+      .select('id, hl:profile_data->>headline')
+      .eq('campaign_id', campaign.id)
+      .eq('status', 'scraped')
+      .lt('scraped_at', staleIso)
+    if (!data?.length) return 0
+    const junkIds = data
+      .filter(l => !passesTitleFilters(l.hl ?? '', campaign.title_whitelist, campaign.title_blacklist))
+      .map(l => l.id)
+    if (!junkIds.length) return 0
+    await supabase.from('leads')
+      .update({ status: 'disqualified', dead_reason: 'not_whitelist_junk' })
+      .in('id', junkIds)
+    return junkIds.length
+  } catch (e) {
+    console.warn(`[SCH-EXT] sweepJunkScraped error (${campaign.name}):`, e?.message)
+    return 0
+  }
+}
+
 // ── Invite trigger (3.3) ─────────────────────────────────────────────────────
 // 1 invite por tick cuando: !batch_paused, gap respetado, bajo cap diario,
 // hay leads scraped que pasan whitelist/blacklist.
@@ -357,7 +388,11 @@ async function tryInvitesForCampaign(campaign, account) {
     .order('consecutive_failures', { ascending: true })
     .order('last_attempt_at', { ascending: true, nullsFirst: true })
     .order('scraped_at', { ascending: false })
-    .limit(10)
+    // (06-jul) limit 10→100: el whitelist se filtra EN MEMORIA después del fetch, así que un
+    // limit chico dejaba fuera de la ventana a ejecutivos válidos cuando el junk (más nuevo)
+    // copaba el top. El pool 'scraped' es <50 por diseño + el reaper lo mantiene chico → 100
+    // trae el pool completo y el filtro siempre ve a los válidos. Fetch sigue barato.
+    .limit(100)
 
   if (!candidates || candidates.length === 0) {
     return { skipped: true, reason: 'no_pending_leads' }
@@ -2098,6 +2133,11 @@ async function tick() {
     } else {
       console.log(`[SCH-EXT]   ⏭️  search: ${searchRes.reason}`)
     }
+
+    // JUNK REAPER (06-jul): limpia 'scraped' no-whitelist viejo ANTES de invites, para no
+    // starvar la ventana de selección con junk acumulado (company-scoped rinde mucho junk).
+    const reaped = await sweepJunkScraped(campaign)
+    if (reaped > 0) console.log(`[SCH-EXT]   🧹 junk reaper: ${reaped} scraped no-whitelist → disqualified`)
 
     // INVITES (3.3 — stub)
     const inviteRes = await tryInvitesForCampaign(campaign, account)
