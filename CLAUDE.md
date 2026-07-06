@@ -109,6 +109,15 @@ pm2 resurrect        # ✅ recuperación real tras reboot (depende de pm2 save)
 
 > ⚠️ **`ecosystem.config.cjs` está STALE**: solo define `orion` + `prometheus-scheduler` apuntando al viejo `scheduler.js`, sin `extension-bridge` ni `xvfb`. **NO uses `pm2 start ecosystem.config.cjs`** — levanta el set equivocado. Usa `pm2 resurrect`.
 
+> ⚠️ **`git push` NO despliega solo — verifica SIEMPRE (lección 06-jul-2026).** `deploy-orion` hace el `git pull` a `/root/clawbot` con **delay** (no instantáneo) y **NO reinicia los procesos PM2**. Se han "confirmado" fixes que en realidad corrían código viejo. Después de pushear, el flujo correcto es:
+> ```bash
+> ssh clawbot 'cd /root/clawbot && git pull --ff-only origin main && git log --oneline -1'   # confirmar HEAD = tu commit
+> ssh clawbot 'grep -c <símbolo-nuevo> /root/clawbot/apps/prometheus/<archivo>'                # confirmar que el código llegó al disco
+> ssh clawbot 'pm2 restart prometheus-scheduler extension-bridge'                              # cargar cambios de prometheus
+> ssh clawbot 'cd /root/clawbot/apps/orion && npm run build && pm2 restart orion'              # cargar cambios de orion
+> ```
+> Un cambio en `lib/ai-message.js`/`lib/*` afecta al proceso que lo importa (`prometheus-scheduler`). `extension-bridge.js` → `extension-bridge`. Si tocaste ambos, reinicia ambos.
+
 ---
 
 ## 5. Base de datos (Supabase)
@@ -170,6 +179,27 @@ Los FU **no están hardcodeados**. Cada campaña define **1..20 pasos** en `camp
 - **Proveedores** (`lib/ai-message.js`, jul-2026): punto único **`callLLM` / `callLLMJson`** con cadena `LLM_PROVIDERS` (default `groq,gemini`) → **Groq primario** (`llama-3.3-70b-versatile`, API OpenAI-compatible) + **Gemini 2.5 Flash de fallback** + template literal como red final. Config por env `LLM_PROVIDERS` / `GROQ_MODEL`. Mata la fragilidad de proveedor único (un billing caído no rompe la generación). El post-proceso (truncado por oración, guard anti-placeholder) es agnóstico de proveedor.
 - **Templates por campaña**: `campaign_followups.message` (FU) + `gemini_system_prompt` / `fmN_example_reply` (campaña). ⚠️ La tabla `message_templates` la lee solo código **MUERTO** (`worker.js`) — NO afecta la ruta viva.
 - **Regla crítica "empresa"**: la ruta viva **NO** pre-extrae la empresa (`currentCompany` suele ser null; la regex `headlineCompany` vive en `worker.js`/`ai.js` **MUERTOS**). La regla "**NUNCA uses el título/rol como empresa ni inventes una**" está codificada como texto en el prompt vivo (`NO_INVENT_COMPANY_RULE`), no como pre-extracto.
+
+### 7.1 Qué LEE la ruta viva vs qué GUARDA Orion web (⚠️ trampa — audit jul-2026)
+
+> **El error a NO repetir**: se configuraba persona/contexto en Orion web y el FM seguía saliendo genérico, porque los campos que el usuario editaba NO eran los que la ruta viva lee. Antes de "arreglar por qué la IA ignora la config", consulta este mapa. Ground truth completo: memoria `msg-generation-flow-jul2026`.
+
+**Interruptor maestro = `campaigns.gemini_system_prompt`.** `hasAiFallback = trim().length > 20` (`scheduler-extension.js`) decide el FU:
+- **vacío → FU verbatim**: `campaign_followups.message` se manda tal cual (solo sustituye `{nombre}`/`{empresa}` vía `substituteTemplate`).
+- **>20 → FU-LLM**: `personalizeFollowupMessage` lo reescribe por lead. ⚠️ **Llenar `gemini_system_prompt` VOLTEA el FU de literal a IA.**
+- **FM/auto-reply**: SIEMPRE LLM (`generateLinkedInReply` → `buildSystemPrompt`).
+
+| Campo (Orion web lo escribe) | ¿La ruta VIVA lo lee? |
+|---|---|
+| `campaign_followups.message` | ✅ FU (verbatim, o seed del LLM si hay gemini) |
+| `campaigns.gemini_system_prompt` | ✅ system prompt (invite/FM/FU-LLM). Editable en Centro de Control → tab IA **desde 716e928** (antes solo al crear) |
+| `campaigns.fmN_example_reply` | ✅ ejemplo de tono en FM |
+| `campaigns.ai_sender_persona` / `ai_company_context` / `ai_tone` | ✅ **desde commit 716e928** (`campaignPersonaBlock` en `ai-message.js`) — antes se cargaban en el SELECT pero NUNCA llegaban al prompt |
+| `campaigns.ai_example_messages` | ❌ ni se selecciona |
+| `campaigns.target_audience` | ❌ se selecciona, nunca se interpola |
+| **`message_templates.*`** (message_rules, opening_hint, example_good…) | ❌ **código MUERTO** (`worker.js`/`ai.js`). NO reconectar — migrar su contenido a `gemini_system_prompt`/`ai_*` |
+
+`campaignPersonaBlock` inyecta persona/contexto/tono **solo si hay persona o contexto** (tono solo no dispara → campañas tono-only quedan idénticas), con caps 2000/3000 chars anti-bloat. El FU verbatim NO se toca (no llama LLM).
 
 ---
 
