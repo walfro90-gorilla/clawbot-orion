@@ -91,6 +91,8 @@ export const FIELDS: ConfigField[] = [
   { key: "fm1_example_reply", store: "campaign", type: "textarea", tab: "ia", label: "Ejemplo respuesta FM1 (rapport)" },
   { key: "fm2_example_reply", store: "campaign", type: "textarea", tab: "ia", label: "Ejemplo respuesta FM2 (pitch)" },
   { key: "fm3_example_reply", store: "campaign", type: "textarea", tab: "ia", label: "Ejemplo respuesta FM3 (cierre + cal.com)" },
+  { key: "gemini_system_prompt", store: "campaign", type: "textarea", tab: "ia", label: "Prompt de sistema base (avanzado, opcional)",
+    hint: "Instrucción base para la IA en TODOS los mensajes. Normalmente déjalo VACÍO — la Persona + Contexto + Tono de arriba ya guían a la IA. ⚠️ Si lo llenas (>20 caracteres), los seguimientos (FU) dejan de enviarse literal y pasan a reescribirse por IA por-lead." },
 
   // ── Anti-ban avanzado (account_config → runtime_config global → default) ─────
   { key: "max_daily_messages", store: "account_config", type: "int", tab: "antiban", label: "Cap diario de mensajes (FU+auto-reply)",

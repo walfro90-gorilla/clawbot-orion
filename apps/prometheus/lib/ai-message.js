@@ -158,10 +158,34 @@ export function calUrlWithLeadId(calUrl, leadId) {
 // como si fuera el nombre de la empresa. La regex que lo evitaba vive en worker.js (MUERTO).
 const NO_INVENT_COMPANY_RULE = '🏢 EMPRESA: NUNCA inventes ni asumas el nombre de una empresa. Si el perfil NO incluye una línea "Empresa:" explícita, NO menciones ninguna empresa. NUNCA uses el cargo, título o rol de la persona (ej. "Director de Operaciones", "Gerente de Logística") como si fuera el nombre de su empresa — es un error grave.'
 
-function buildSystemPrompt({ campaignPrompt, type, exampleReply, calUrl, lastFuTemplate, lastFuStepNum }) {
+// (2026-07-06) Bloque de identidad/contexto de campaña configurado en Orion web (Centro de
+// Control → tab IA: Persona del remitente / Contexto de empresa / Tono). Se inyecta al system
+// prompt de TODA generación por IA (invite full-gen, FM/auto-reply, FU-LLM) cuando la campaña
+// los tiene. Antes se cargaban pero NUNCA llegaban al prompt → el FM salía genérico. Guards
+// if(campo): campañas sin estos campos quedan idénticas. NO afecta el FU verbatim (no llama LLM).
+function campaignPersonaBlock(campaign) {
+  if (!campaign) return null
+  // Dispara SOLO si hay identidad/contexto sustantivo (persona o empresa). ai_tone por sí solo
+  // NO cuenta → campañas que solo tienen tono (Wal Tech/Transporte/[Post], que ya funcionan)
+  // quedan idénticas. Caps defensivos: un persona/context enorme (Café: 25k chars) no aporta a
+  // un DM y encarece cada llamada — acotamos sin perder el núcleo.
+  if (!campaign.ai_sender_persona && !campaign.ai_company_context) return null
+  const parts = []
+  if (campaign.ai_sender_persona)
+    parts.push(`QUIÉN ERES (tu identidad y voz — escribe SIEMPRE en primera persona como esta persona, nunca como un bot):\n${campaign.ai_sender_persona.slice(0, 2000)}`)
+  if (campaign.ai_company_context)
+    parts.push(`CONTEXTO DE TU EMPRESA / OFERTA (para dar color y credibilidad — NO lo recites literal ni lo pegues entero):\n${campaign.ai_company_context.slice(0, 3000)}`)
+  if (campaign.ai_tone)
+    parts.push(`TONO OBJETIVO: ${campaign.ai_tone}`)
+  return parts.length ? parts.join('\n\n') : null
+}
+
+function buildSystemPrompt({ campaignPrompt, personaBlock, type, exampleReply, calUrl, lastFuTemplate, lastFuStepNum }) {
   const typeConf = TYPE_RULES[type] ?? TYPE_RULES.invite
   const sections = [
     campaignPrompt || 'Eres un SDR experto que envía mensajes en LinkedIn en español.',
+    // (2026-07-06) identidad/contexto de campaña (Orion web IA) — solo si está configurado.
+    ...(personaBlock ? ['', personaBlock] : []),
     '',
     `TIPO DE MENSAJE: ${typeConf.description}`,
     `LÍMITE: máximo ${typeConf.maxChars} caracteres (cuenta uno por uno).`,
@@ -392,6 +416,7 @@ export async function generateLinkedInMessage(campaign, lead, type = 'invite', o
   const exampleReply = exampleField ? campaign[exampleField] : null
   const systemPrompt = buildSystemPrompt({
     campaignPrompt: campaign.gemini_system_prompt,
+    personaBlock: campaignPersonaBlock(campaign),
     type, exampleReply,
   })
   const userPrompt = buildUserPrompt(lead)
@@ -423,8 +448,10 @@ export async function personalizeFollowupMessage(campaign, lead, template, fuSte
   // 'followup_tone_directive' (default abajo) o por campaña editando los templates.
   const toneDirective = opts.toneDirective
     || `Los follow-ups de LinkedIn buscan CONSTRUIR RELACIÓN y mantener el contacto, NO vender. Sé cálido, humano y genuino — en plan de conocer a la persona, no de cerrar una venta.`
+  const personaBlock = campaignPersonaBlock(campaign)
   const systemSections = [
     campaign.gemini_system_prompt || 'Eres una persona que escribe mensajes de LinkedIn naturales, cálidos y humanos en español.',
+    ...(personaBlock ? ['', personaBlock] : []),
     '',
     toneDirective,
     '',
@@ -494,6 +521,7 @@ export async function generateLinkedInReply(campaign, lead, ctx = {}, opts = {})
   const calUrl = calUrlWithLeadId(ctx.calUrl ?? null, lead?.id)  // v0.7.45: link rastreable por lead
   const systemPrompt = buildSystemPrompt({
     campaignPrompt: campaign.gemini_system_prompt,
+    personaBlock: campaignPersonaBlock(campaign),
     type, exampleReply, calUrl,
     lastFuTemplate: ctx.lastFuTemplate ?? null,
     lastFuStepNum:  ctx.lastFuStepNum ?? null,
