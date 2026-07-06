@@ -682,6 +682,11 @@ export async function tryFollowupsForCampaign(campaign, account) {
       .not('linkedin_url', 'is', null)  // necesitamos URL del perfil
       .is('quarantined_at', null)
       .or(`cooldown_until.is.null,cooldown_until.lt.${nowIsoForCooldown}`)
+      // (2026-07-06) GAP-3 defensa-en-profundidad: excluye del despacho de FU cualquier lead
+      // flagged detected_not_first_degree (2do-grado confirmado por un FU previo), aunque algún
+      // detector le haya volteado el status a connected. null-safe (.neq es NULL para filas null,
+      // por eso el .or con is.null). Neutraliza en el chokepoint cualquier fuga de accept-detection.
+      .or('dead_reason.is.null,dead_reason.neq.detected_not_first_degree')
       .order('consecutive_failures', { ascending: true })
       .order('last_attempt_at', { ascending: true, nullsFirst: true })
       .limit(3)
@@ -1023,6 +1028,11 @@ async function tryAutoReplyForCampaign(campaign, account) {
     .gte('replied_at', tooOldIso)  // ★ safety: no procesar replies >7d
     .is('quarantined_at', null)
     .or(`cooldown_until.is.null,cooldown_until.lt.${nowIsoForCooldown}`)
+    // (2026-07-06) GAP-3b: mismo guard fail-closed que el lane de FU. Un homónimo flagged
+    // detected_not_first_degree que cae en 'replied' (fuzzy-match de un inbound ajeno) NO debe
+    // recibir auto-reply hacia un contacto 2do-grado confirmado. null-safe (.neq es NULL para
+    // filas null → se necesita el is.null). Backstop final del composer en la extensión aparte.
+    .or('dead_reason.is.null,dead_reason.neq.detected_not_first_degree')
     // v0.8 P1 FIX: replied_at DESC PRIMARIO (replies más recientes = los sin-contestar).
     // Antes consecutive_failures/last_attempt_at dominaban → con backlog grande de
     // contestados (Wal: 61 replied/7d), el limit(10) devolvía solo CONTESTADOS y los

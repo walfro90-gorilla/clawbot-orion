@@ -645,10 +645,14 @@ async function handleCommandResult(msg) {
             await supabase.from('leads').update({
               status: 'invite_sent',
               connected_at: null,
-              dead_reason: `not_messageable_${reason}`.slice(0, 100),
+              // (2026-07-06) GAP-2: flag CANÓNICO. 2do/3er-grado/InMail ES no-first-degree → usar el
+              // mismo string que reconocen los guards (846 check_sent_invites / 976 check_connections /
+              // 1743 check_inbox / dispatch) para que NO se re-marque connected ni se re-despache FU.
+              // (`reason` queda en el log para diagnóstico; inmail_revert_count sigue como telemetría.)
+              dead_reason: 'detected_not_first_degree',
               inmail_revert_count: newCount,
             }).eq('id', cmd.related_lead_id)
-            console.log(`[bridge] 🚫 lead ${cmd.related_lead_id.slice(0,8)} reverted ${newCount}/${cap}: not_messageable (${reason})`)
+            console.log(`[bridge] 🚫 lead ${cmd.related_lead_id.slice(0,8)} reverted ${newCount}/${cap}: not_first_degree via not_messageable (${reason})`)
           }
           }
         } else if (reason.includes('sponsored')) {
@@ -964,9 +968,23 @@ async function ingestCheckConnections(commandId, connections) {
   }
   const connUrls = new Set(connections.map(c => normalize(c.profileUrl)))
   const connNames = new Set(connections.map(c => (c.name ?? '').toLowerCase().trim()).filter(Boolean))
-  const isConnection = (lead) =>
-    connUrls.has(normalize(lead.linkedin_url)) ||
-    (lead.full_name && connNames.has(lead.full_name.toLowerCase().trim()))
+  // (2026-07-06) Anti-loop de falso-accept por HOMÓNIMO. El match por nombre es evidencia
+  // DÉBIL: con el scrape masivo de 0.9.15 (~400-940 conexiones) un lead 2do-grado colisiona
+  // por nombre exacto con una conexión real de 1er grado → se marca connected falsamente →
+  // FU → compose ve InMail/2do-grado → re-flag detected_not_first_degree → loop (pico 05-jul).
+  // El match por URL (profileUrl vanity) es evidencia FUERTE y no colisiona → siempre cuenta.
+  const isConnection = (lead) => {
+    if (connUrls.has(normalize(lead.linkedin_url))) return true   // URL = fuerte → siempre
+    // (a) NUNCA dejar que un match de nombre overridee el flag: si un FU llegó al compose y
+    //     detectó 2do-grado, esa es evidencia DIRECTA de no-1er-grado; un homónimo no la revierte.
+    if (lead.dead_reason === 'detected_not_first_degree') return false
+    // (b) exigir nombre distintivo: >=2 tokens y el último no es inicial abreviada
+    //     ("Carlos R." / "Ana G." colisionan trivialmente contra cientos de conexiones).
+    const nm = (lead.full_name || '').toLowerCase().trim()
+    const toks = nm.split(/\s+/).filter(Boolean)
+    if (toks.length < 2 || /^[a-z]\.?$/.test(toks[toks.length - 1])) return false
+    return connNames.has(nm)
+  }
 
   let accepted = 0
   const minSentAgeMs = 30 * 60 * 1000  // ignora invites <30min (evita carreras de UI)
@@ -1524,7 +1542,7 @@ async function ingestCheckInbox(commandId, conversations) {
   // 2. Cargar leads activos de la cuenta para matchear
   const { data: leads } = await supabase
     .from('leads')
-    .select('id, full_name, status, linkedin_url, campaigns!inner(linkedin_account_id)')
+    .select('id, full_name, status, linkedin_url, dead_reason, campaigns!inner(linkedin_account_id)')
     .eq('campaigns.linkedin_account_id', cmd.account_id)
     .in('status', ['invite_sent', 'connected', 'follow_up_sent', 'replied'])
 
@@ -1725,8 +1743,12 @@ async function ingestCheckInbox(commandId, conversations) {
     }
     matches.push({ scrapedName: convo.name, leadName: lead.full_name, status: lead.status, unread: convo.unread })
 
-    // Si invite_sent y aparece en inbox → conexión aceptada
-    if (lead.status === 'invite_sent') {
+    // Si invite_sent y aparece en inbox → conexión aceptada.
+    // (2026-07-06) GAP-1 fail-closed: NO promover si el lead está flagged detected_not_first_degree
+    // (evidencia DIRECTA de 2do-grado por un FU que llegó al compose). Un match difuso por nombre/
+    // thread es evidencia DÉBIL y no revierte esa señal → evita resucitar el loop de falso-accept.
+    // El reply REAL (más abajo) SÍ se sigue procesando: una respuesta genuina es conexión real.
+    if (lead.status === 'invite_sent' && lead.dead_reason !== 'detected_not_first_degree') {
       const { error } = await supabase.from('leads').update({
         status: 'connected',
         connected_at: new Date().toISOString(),
