@@ -1,6 +1,7 @@
 import { createAdminClient } from "@/lib/supabase/admin"
 import { requireRole } from "@/lib/auth/role"
 import { AutoRefresh } from "@/components/auto-refresh"
+import { classifyCommandError } from "@/lib/error-class"
 
 // Oficina IA — tiempo real, no cachear.
 export const dynamic = "force-dynamic"
@@ -11,7 +12,7 @@ type AgentDef = {
   name: string
   role: string
   actions: string[]
-  did: string // qué hace en pasado (lo que "hizo")
+  did: string
 }
 
 // Cada agente operativo mapea a una o más `actions` de extension_commands.
@@ -24,12 +25,13 @@ const AGENTS: AgentDef[] = [
   { key: "posts",   icon: "📝", name: "Prospector de Posts",       role: "Busca posts y comenta value-first",               actions: ["search_posts", "comment_on_post", "publish_post"], did: "Trabajó posts" },
 ]
 
-type AgentState = "activo" | "idle" | "error" | "inactivo"
+type AgentState = "activo" | "idle" | "falla" | "esperado" | "inactivo"
 
 const STATE_STYLE: Record<AgentState, { dot: string; pill: string; label: string }> = {
   activo:    { dot: "bg-green-500 shadow-[0_0_8px_2px] shadow-green-500/40", pill: "bg-green-500/15 text-green-300 border-green-500/40", label: "Activo" },
   idle:      { dot: "bg-amber-400", pill: "bg-amber-500/15 text-amber-300 border-amber-500/40", label: "En espera" },
-  error:     { dot: "bg-red-500 animate-pulse", pill: "bg-red-500/15 text-red-300 border-red-500/40", label: "Con error" },
+  falla:     { dot: "bg-red-500 animate-pulse", pill: "bg-red-500/15 text-red-300 border-red-500/40", label: "Falla — revisar" },
+  esperado:  { dot: "bg-blue-400", pill: "bg-blue-500/15 text-blue-300 border-blue-500/40", label: "OK (regla LinkedIn)" },
   inactivo:  { dot: "bg-gray-600", pill: "bg-gray-500/15 text-gray-400 border-gray-600/40", label: "Sin actividad 24h" },
 }
 
@@ -44,16 +46,20 @@ function hace(iso: string | null): string {
   return `hace ${Math.floor(h / 24)} d`
 }
 
+type Row = { action: string | null; status: string | null; created_at: string; error: string | null; reason: string | null }
+
 export default async function OfficePage() {
   await requireRole("admin")
   const db = createAdminClient()
   const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString()
 
   const [cmdsRes, junkRes] = await Promise.all([
-    db.from("extension_commands").select("action, status, created_at").gte("created_at", since).order("created_at", { ascending: false }).limit(3000),
+    db.from("extension_commands")
+      .select("action, status, created_at, error:result->>error, reason:result->>reason")
+      .gte("created_at", since).order("created_at", { ascending: false }).limit(3000),
     db.from("leads").select("id", { count: "exact", head: true }).eq("dead_reason", "not_whitelist_junk"),
   ])
-  const rows = (cmdsRes.data ?? []) as { action: string | null; status: string | null; created_at: string }[]
+  const rows = (cmdsRes.data ?? []) as Row[]
   const junkTotal = junkRes.count ?? 0
 
   const lastOverall = rows[0]?.created_at ?? null
@@ -63,18 +69,36 @@ export default async function OfficePage() {
     const mine = rows.filter(r => r.action && a.actions.includes(r.action))
     const last = mine[0] ?? null
     const ok = mine.filter(r => r.status === "completed").length
-    const err = mine.filter(r => r.status === "error").length
+    const errs = mine.filter(r => r.status === "error")
     const lastAt = last?.created_at ?? null
     const recent = lastAt ? Date.now() - new Date(lastAt).getTime() < 60 * 60 * 1000 : false
+
+    // Errores: clasificar el más reciente (fault real vs resultado esperado de LinkedIn).
+    const lastErr = errs[0] ?? null
+    const errClass = lastErr ? classifyCommandError(lastErr.error, "error") : null
+    const realFaults = errs.filter(r => classifyCommandError(r.error, "error").isFault).length
+    const errInfo = lastErr
+      ? {
+          code: lastErr.error ?? "desconocido",
+          reason: lastErr.reason ?? null,
+          fault: !!errClass?.isFault,
+          klass: errClass?.label ?? "Otro",
+          hint: errClass?.hint ?? "",
+          when: lastErr.created_at,
+          count24h: errs.length,
+        }
+      : null
+
     let state: AgentState = "inactivo"
     if (lastAt) {
-      if (last?.status === "error") state = "error"
+      if (last?.status === "error") state = errInfo?.fault ? "falla" : "esperado"
       else if (recent) state = "activo"
       else state = "idle"
     }
-    const didLabel = last?.status === "error" ? `${a.did} — falló` : last?.status === "pending" ? `${a.did} — en curso` : a.did
-    return { ...a, lastAt, total: mine.length, ok, err, state, didLabel }
+    return { ...a, lastAt, total: mine.length, ok, errCount: errs.length, realFaults, state, lastStatus: last?.status ?? null, errInfo }
   })
+
+  const totalFaults = agents.filter(a => a.state === "falla").length
 
   return (
     <div className="p-4 sm:p-8 space-y-6 max-w-6xl mx-auto">
@@ -85,6 +109,11 @@ export default async function OfficePage() {
           <p className="text-gray-400 text-sm mt-0.5">Cada agente, su estado y su última acción — en vivo desde <code className="text-gray-500">extension_commands</code> (24h).</p>
         </div>
         <div className="flex items-center gap-3">
+          {totalFaults > 0 && (
+            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium border bg-red-500/15 text-red-300 border-red-500/40">
+              <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" /> {totalFaults} agente{totalFaults > 1 ? "s" : ""} con falla
+            </span>
+          )}
           <span className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium border ${schedulerLive ? "bg-green-500/15 text-green-300 border-green-500/40" : "bg-red-500/15 text-red-300 border-red-500/40"}`}>
             <span className={`w-2 h-2 rounded-full ${schedulerLive ? "bg-green-500" : "bg-red-500 animate-pulse"}`} />
             Scheduler {schedulerLive ? "activo" : "inactivo"}
@@ -97,8 +126,11 @@ export default async function OfficePage() {
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         {agents.map(a => {
           const st = STATE_STYLE[a.state]
+          const didLabel = a.lastStatus === "error"
+            ? (a.errInfo?.fault ? `${a.did} — falló` : `${a.did} — resultado esperado`)
+            : a.lastStatus === "pending" ? `${a.did} — en curso` : a.did
           return (
-            <div key={a.key} className="bg-gray-900 border border-gray-800 rounded-xl p-4 flex flex-col gap-3 hover:border-gray-700 transition-colors">
+            <div key={a.key} className={`bg-gray-900 border rounded-xl p-4 flex flex-col gap-3 transition-colors ${a.state === "falla" ? "border-red-500/40" : "border-gray-800 hover:border-gray-700"}`}>
               <div className="flex items-start gap-3">
                 <div className="relative shrink-0">
                   <div className="w-12 h-12 rounded-xl bg-gray-800 flex items-center justify-center text-2xl">{a.icon}</div>
@@ -113,15 +145,29 @@ export default async function OfficePage() {
 
               <div className="bg-gray-800/50 rounded-lg px-3 py-2 text-xs">
                 <div className="flex items-center justify-between">
-                  <span className="text-gray-300 font-medium">{a.didLabel}</span>
+                  <span className="text-gray-300 font-medium">{didLabel}</span>
                   <span className="text-gray-500">{hace(a.lastAt)}</span>
                 </div>
               </div>
 
+              {/* Panel de error — descripción accionable (rojo=fallo, azul=esperado) */}
+              {a.errInfo && (
+                <div className={`rounded-lg px-3 py-2 text-xs border ${a.errInfo.fault ? "bg-red-500/10 border-red-500/30" : "bg-blue-500/10 border-blue-500/25"}`}>
+                  <div className={`flex items-center gap-1.5 font-semibold ${a.errInfo.fault ? "text-red-300" : "text-blue-300"}`}>
+                    <span>{a.errInfo.fault ? "🔴" : "ℹ️"}</span>
+                    <span>{a.errInfo.klass}</span>
+                    <code className="text-[10px] font-normal opacity-80 truncate">{a.errInfo.code}</code>
+                    {a.errInfo.count24h > 1 && <span className="ml-auto text-[10px] opacity-70 shrink-0">×{a.errInfo.count24h} en 24h</span>}
+                  </div>
+                  <p className="text-gray-400 leading-snug mt-1">{a.errInfo.hint}</p>
+                  {a.errInfo.reason && <p className="text-gray-600 text-[10px] mt-0.5 truncate">detalle: {a.errInfo.reason}</p>}
+                </div>
+              )}
+
               <div className="flex items-center gap-3 text-[11px] text-gray-500">
                 <span>24h: <b className="text-gray-300">{a.total}</b></span>
                 {a.ok > 0 && <span className="text-green-400">✓ {a.ok}</span>}
-                {a.err > 0 && <span className="text-red-400">✕ {a.err}</span>}
+                {a.errCount > 0 && <span className={a.realFaults > 0 ? "text-red-400" : "text-blue-400"}>✕ {a.errCount}</span>}
               </div>
             </div>
           )
@@ -154,7 +200,8 @@ export default async function OfficePage() {
       <div className="flex flex-wrap gap-4 text-[11px] text-gray-500 pt-2">
         <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-green-500" /> Activo (&lt;1h)</span>
         <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-amber-400" /> En espera</span>
-        <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-red-500" /> Con error</span>
+        <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-blue-400" /> OK — regla de LinkedIn (no es fallo)</span>
+        <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-red-500" /> Falla real — requiere acción</span>
         <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-gray-600" /> Sin actividad 24h</span>
       </div>
     </div>
