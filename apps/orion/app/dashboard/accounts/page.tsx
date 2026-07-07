@@ -14,8 +14,10 @@ async function updateAccount(formData: FormData) {
   const assignedUserId = formData.get("assigned_user_id") as string | null
 
   const newWarmupStatus = formData.get("warmup_status") as string
-  const { data: existingWarmup } = await admin.from("linkedin_accounts").select("warmup_status, warmup_started_at").eq("id", id).single()
-  const warmupChanged = existingWarmup?.warmup_status !== newWarmupStatus
+  // warmup_started_at es proxy de EDAD de cuenta (lo lee la rampa effectiveWarmupCap).
+  // Se estampa UNA sola vez (si está null); NUNCA se resetea al cambiar de temperatura —
+  // resetearlo reiniciaría la rampa a día-0 y tankearía una cuenta madura a cap 3.
+  const { data: existingWarmup } = await admin.from("linkedin_accounts").select("warmup_started_at").eq("id", id).single()
 
   const { error } = await admin.from("linkedin_accounts").update({
     label:                  formData.get("label") as string || null,
@@ -35,8 +37,8 @@ async function updateAccount(formData: FormData) {
     user_id:                assignedUserId || null,
     warmup_status:          newWarmupStatus || "cold",
     search_mode:            (formData.get("search_mode") as string) || "free",
-    // Reset warmup_started_at when status changes to track progression
-    ...(warmupChanged ? { warmup_started_at: new Date().toISOString() } : {}),
+    // Solo inicializa si nunca se estampó; jamás resetea (ver nota arriba).
+    ...(existingWarmup?.warmup_started_at ? {} : { warmup_started_at: new Date().toISOString() }),
   }).eq("id", id)
 
   if (error) console.error("[accounts] updateAccount error:", error.message)
