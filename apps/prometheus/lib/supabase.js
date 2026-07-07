@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
+import { setMaxListeners } from 'node:events';
 dotenv.config();
 
 const url = process.env.SUPABASE_URL;
@@ -24,7 +25,14 @@ const QUERY_TIMEOUT_MS = parseInt(process.env.SUPABASE_QUERY_TIMEOUT_MS ?? '2000
 // Sin esto, un tick timed-out dejaba queries "zombie" corriendo que se apilaban y martillaban
 // la DB (el amplificador real del outage). null = fuera de un tick (queries sin señal de tick).
 let currentTickSignal = null;
-export function setTickSignal(sig) { currentTickSignal = sig; }
+export function setTickSignal(sig) {
+  currentTickSignal = sig;
+  // (06-jul-2026) Cada query concurrente del tick encadena un listener a este signal. El cleanup
+  // de fetchWithTimeout evita la acumulación, pero la concurrencia puntual puede pasar de 10 →
+  // MaxListenersExceededWarning. El signal se reemplaza (y recolecta) por tick → sin límite es
+  // seguro; silencia el warning de raíz.
+  if (sig) { try { setMaxListeners(0, sig); } catch { /* no crítico */ } }
+}
 
 function fetchWithTimeout(input, init = {}) {
   const ctrl = new AbortController();
