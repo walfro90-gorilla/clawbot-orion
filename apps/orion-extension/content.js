@@ -1443,7 +1443,9 @@ async function executeAction(action, payload) {
     case 'send_followup':
       return await sendFollowup(payload)
     case 'search':
-      return await searchLeads(payload)
+      return await (payload?.searchMode === 'sales_navigator'
+        ? scrapeSalesNavPeople(payload)
+        : searchLeads(payload))
     case 'search_posts':
       return await searchPosts(payload)
     case 'comment_on_post':
@@ -5145,6 +5147,139 @@ async function searchLeads(payload = {}) {
     // v0.7.22 BUG-F: incluir debug del paginador cuando paró por no_next_page
     ...(stopReason === 'no_next_page' && _searchPaginatorDebug ? { debugSample: _searchPaginatorDebug } : {}),
   }
+}
+
+// ── Fase 2 (SalesNav) — scrapea /sales/search/people/ ───────────────────────
+// Se activa SOLO cuando payload.searchMode === 'sales_navigator' (cuentas Pro). El free
+// path (Wal) queda 100% intacto. Mismo patrón robusto que el free: ancla SEMÁNTICA
+// (a[href*="/sales/lead/"]) + walk-up al card, NO clases frágiles. El invite necesita el
+// /in/ público, así que SOLO conservamos leads donde resolvemos un /in/ dentro del card;
+// el resto se cuenta (droppedNoPublic) y, si TODO se cae por falta de /in/, devolvemos el
+// outerHTML del 1er card en debugSample → así afinamos selectores / resolución en 1 pasada.
+async function scrapeSalesNavPeople(payload = {}) {
+  const targetCount = Math.min(payload.targetCount ?? 25, 50)
+  const maxScrolls  = Math.min((payload.maxPages ?? 4) * 3, 18)
+  console.log(`[Orion content] scrapeSalesNavPeople target=${targetCount} url=${location.href}`)
+
+  if (!/\/sales\/search/.test(location.pathname)) {
+    return { action: 'search', status: 'error', error: 'not_on_salesnav_search_page', currentUrl: location.href }
+  }
+  const containerSel = await waitForSelector(
+    ['#search-results-container', 'ol.artdeco-list', '.artdeco-list', 'div[data-sn-view-name]', 'main'], 15000)
+  if (!containerSel) {
+    return { action: 'search', status: 'error', error: 'salesnav_results_container_not_found', currentUrl: location.href }
+  }
+  await sleep(2000)
+
+  const locationFilters = Array.isArray(payload.locations)
+    ? payload.locations.filter(Boolean).map(_normForFilter) : []
+
+  const collected = []
+  const seen = new Set()
+  let noGrowth = 0, stopReason = null, droppedNoPublic = 0
+
+  for (let s = 0; s < maxScrolls && collected.length < targetCount; s++) {
+    const before = collected.length
+    const { profiles, droppedNoPublic: dropped } = extractSalesNavProfiles()
+    droppedNoPublic += dropped
+    for (const p of profiles) {
+      if (!p.profileUrl || seen.has(p.profileUrl)) continue
+      if (locationFilters.length && p.location) {
+        const loc = _normForFilter(p.location)
+        if (!locationFilters.some(l => loc.includes(l))) continue
+      }
+      seen.add(p.profileUrl)
+      collected.push(p)
+      if (collected.length >= targetCount) break
+    }
+    console.log(`[Orion content] SalesNav scroll ${s + 1}: total ${collected.length}/${targetCount} (sin /in/: ${droppedNoPublic})`)
+
+    if (collected.length >= targetCount) { stopReason = 'target_reached'; break }
+
+    if (s === 0 && collected.length === 0) {
+      const bodyTxt = (document.body?.innerText ?? '').toLowerCase()
+      if (/captcha|verify you are human|verifica que eres humano|security check|unusual activity/.test(bodyTxt))
+        return { action: 'search', status: 'error', error: 'captcha_detected', currentUrl: location.href }
+      const salesLinks = document.querySelectorAll('a[href*="/sales/lead/"]').length
+      const inLinks    = document.querySelectorAll('a[href*="/in/"]').length
+      if (salesLinks === 0 && droppedNoPublic === 0) {
+        return { action: 'search', status: 'ok', profiles: [], totalFound: 0, stopReason: 'no_results_found',
+          scrapedAt: new Date().toISOString(), debugSample: { salesLinks, inLinks, bodySnippet: bodyTxt.slice(0, 300) } }
+      }
+      // Hay cards pero 0 conservados → drift de selector o SalesNav no expone /in/ en el card.
+      // El outerHTML del 1er card es justo lo que necesito para afinar (fase 2b).
+      return { action: 'search', status: 'error', error: 'salesnav_no_usable_profiles', currentUrl: location.href,
+        debugSample: { salesLinks, inLinks, droppedNoPublic, firstCardHtml: firstSalesNavCardHtml() } }
+    }
+
+    if (collected.length === before) { if (++noGrowth >= 2) { stopReason = 'no_growth'; break } }
+    else noGrowth = 0
+    window.scrollBy(0, randInt(700, 1100))
+    await sleep(randInt(1800, 3500))
+  }
+  if (!stopReason) stopReason = 'max_scrolls'
+
+  return {
+    action: 'search', status: 'ok', profiles: collected, totalFound: collected.length,
+    stopReason, searchMode: 'sales_navigator', droppedNoPublic,
+    scrapedAt: new Date().toISOString(),
+  }
+}
+
+// Extractor SalesNav. Ancla en a[href*="/sales/lead/"] (el nombre del lead). Del card saca
+// nombre + headline + location y RESUELVE el /in/ público (a[href*="/in/"] dentro del card),
+// imprescindible para invitar. Sin /in/ → fuera + contado. Devuelve { profiles, droppedNoPublic }.
+function extractSalesNavProfiles() {
+  const NOISE_RE = /conectar|connect|mensaje|message|guardar|save|seguir|follow|grado|degree|premium|inmail/i
+  const seen = new Set()
+  const profiles = []
+  let droppedNoPublic = 0
+
+  for (const link of Array.from(document.querySelectorAll('a[href*="/sales/lead/"]'))) {
+    const name = Array.from(link.childNodes).filter(n => n.nodeType === 3)
+      .map(n => n.textContent.trim()).filter(Boolean).join(' ').trim()
+    if (!name || name.length > 80 || NOISE_RE.test(name)) continue
+
+    const card = link.closest('li')
+      || link.parentElement?.parentElement?.parentElement?.parentElement || null
+    if (!card) continue
+
+    // /in/ público dentro del card (necesario para el invite)
+    let profileUrl = null
+    const inLink = card.querySelector('a[href*="/in/"]')
+    if (inLink) {
+      const href = inLink.getAttribute('href') || ''
+      const full = href.startsWith('http') ? href : `https://www.linkedin.com${href}`
+      const u = full.split('?')[0].replace(/\/$/, '') + '/'
+      if (u.includes('/in/')) profileUrl = u
+    }
+    if (!profileUrl) { droppedNoPublic++; continue }
+    if (seen.has(profileUrl)) continue
+    seen.add(profileUrl)
+
+    // Headline + location por heurística de texto (SalesNav no usa las clases del free).
+    const texts = Array.from(card.querySelectorAll('span, div'))
+      .map(el => (el.textContent || '').replace(/\s+/g, ' ').trim())
+      .filter(t => t && t !== name && t.length < 120 && !NOISE_RE.test(t))
+    const headline = texts.find(t => /director|gerente|ceo|cto|cfo|coo|cmo|vp|head|chief|manager|lead|founder|president|owner|due[nñ]|socio/i.test(t)) || texts[0] || null
+    const locationStr = texts.find(t => /,|m[eé]xico|colombia|chile|per[uú]|espa[nñ]a|argentina|estados unidos|united states|panam|costa rica|uruguay|paraguay|bolivia|el salvador/i.test(t)) || null
+
+    profiles.push({
+      profileUrl,
+      name,
+      headline: headline ? headline.slice(0, 300) : null,
+      location: locationStr ? locationStr.slice(0, 120) : null,
+    })
+  }
+  return { profiles, droppedNoPublic }
+}
+
+// Debug: outerHTML del 1er card SalesNav (para afinar selectores / resolución de /in/).
+function firstSalesNavCardHtml() {
+  const link = document.querySelector('a[href*="/sales/lead/"]')
+  const card = link?.closest('li') || link?.parentElement?.parentElement?.parentElement
+  return card ? String(card.outerHTML || '').slice(0, 1800)
+    : String(document.querySelector('main')?.innerHTML || '').slice(0, 900)
 }
 
 // Extrae profile cards del DOM en la página de search results.

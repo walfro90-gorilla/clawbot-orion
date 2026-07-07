@@ -548,8 +548,13 @@ async function executeCommand(commandId, action, payload) {
       console.log(`[Orion] send_followup compose-new via profile: ${payload.profileUrl}`)
       tab = await navigateTabAndWait(payload.profileUrl)
     } else if (action === 'search') {
-      const searchUrl = buildSearchUrl(payload ?? {})
-      console.log(`[Orion] search → ${searchUrl}`)
+      // Fase 2: cuentas marcadas Pro (search_mode='sales_navigator') buscan por la
+      // interfaz de Sales Navigator; el resto sigue el buscador free. El branch es total:
+      // si no es salesnav, comportamiento IDÉNTICO al de siempre (Wal intacto).
+      const searchUrl = payload?.searchMode === 'sales_navigator'
+        ? buildSalesNavSearchUrl(payload ?? {})
+        : buildSearchUrl(payload ?? {})
+      console.log(`[Orion] search (${payload?.searchMode ?? 'free'}) → ${searchUrl}`)
       tab = await navigateTabAndWait(searchUrl, 20000)
     } else if (action === 'search_posts') {
       const postSearchUrl = buildPostSearchUrl(payload ?? {})
@@ -713,6 +718,22 @@ function buildSearchUrl(payload) {
   const geoUrns = locationsToGeoUrns(payload.locations)
   if (geoUrns.length) params.set('geoUrn', JSON.stringify(geoUrns))
   return `${base}?${params.toString()}`
+}
+
+// Fase 2 — Sales Navigator people search. La query de SalesNav es una estructura RQL
+// codificada: /sales/search/people?query=(spellCorrectionEnabled:true,keywords:...).
+// encodeURIComponent deja los ( ) literales y codifica : , y espacios → justo el formato
+// que SalesNav espera. v1 = KEYWORDS-ONLY (robusto: siempre carga una búsqueda válida);
+// el filtro de ubicación lo aplica content.js por post-filter (payload.locations), igual
+// que el fallback del free. Los filtros nativos de SalesNav (REGION/seniority/etc.) se
+// pueden añadir después, una vez confirmado que la base scrapea bien.
+function buildSalesNavSearchUrl(payload) {
+  const base = 'https://www.linkedin.com/sales/search/people'
+  const kw = (payload.keywords || '').trim()
+  const query = kw
+    ? `(spellCorrectionEnabled:true,keywords:${kw})`
+    : '(spellCorrectionEnabled:true)'
+  return `${base}?query=${encodeURIComponent(query)}`
 }
 
 // Post-Prospecting (v0.9): URL de búsqueda de CONTENIDO (posts), no de personas.
