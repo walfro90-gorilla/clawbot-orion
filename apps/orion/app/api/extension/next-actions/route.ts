@@ -83,16 +83,44 @@ export async function GET(req: NextRequest) {
 
   // Contadores del popup — agregados sobre TODAS las campañas activas de la cuenta.
   const campaignIds = (campaigns ?? []).map((c: any) => c.id)
-  let pendingReplyCount = 0  // 💬 mensajes por contestar (leads 'replied')
+  let pendingReplyCount = 0  // 💬 mensajes GENUINAMENTE por contestar (ver abajo)
   let fuDueNow = 0           // 📤 seguimientos listos (connected sin FU1 aún)
   let errorsRecent = 0       // ⚠️ fallas reales (fault) últimas 3h
   if (campaignIds.length) {
-    const [rep, fu] = await Promise.all([
-      admin.from("leads").select("id", { count: "exact", head: true }).in("campaign_id", campaignIds).eq("status", "replied"),
-      admin.from("leads").select("id", { count: "exact", head: true }).in("campaign_id", campaignIds).eq("status", "connected").is("last_followup_at", null),
+    // 💬 'replied' es un bucket SEMI-PERSISTENTE: tras auto-responder, el lead SIGUE en
+    // 'replied' (el envío usa kind:'reply', que no cambia status). Contar el status crudo
+    // infla el badge — típico 19/20 ya contestados. Contamos solo los sin responder de
+    // verdad: último inbound (≈ replied_at) MÁS NUEVO que el último outbound del hilo.
+    const since30d = new Date(now - 30 * 86_400_000).toISOString()
+    const convIdOf = (r: any) => Array.isArray(r.conversations) ? r.conversations[0]?.id : r.conversations?.id
+    const [repRes, fuRes] = await Promise.all([
+      admin.from("leads")
+        .select("id, replied_at, conversations!inner(id)")
+        .in("campaign_id", campaignIds).eq("status", "replied")
+        .eq("automation_paused", false).is("quarantined_at", null)
+        .gte("replied_at", since30d),
+      admin.from("leads").select("id", { count: "exact", head: true })
+        .in("campaign_id", campaignIds).eq("status", "connected").is("last_followup_at", null),
     ])
-    pendingReplyCount = rep.count ?? 0
-    fuDueNow = fu.count ?? 0
+    fuDueNow = fuRes.count ?? 0
+    const rows = (repRes.data ?? []) as any[]
+    const convIds = rows.map(convIdOf).filter(Boolean)
+    const lastOutAt = new Map<string, number>()
+    if (convIds.length) {
+      const { data: outs } = await admin
+        .from("conversation_events")
+        .select("conversation_id, sent_at")
+        .in("conversation_id", convIds).eq("direction", "outbound")
+        .order("sent_at", { ascending: false })
+      for (const e of (outs ?? []) as any[]) {
+        if (!lastOutAt.has(e.conversation_id)) lastOutAt.set(e.conversation_id, new Date(e.sent_at).getTime())
+      }
+    }
+    pendingReplyCount = rows.filter((r) => {
+      const inAt = r.replied_at ? new Date(r.replied_at).getTime() : 0
+      const cid = convIdOf(r)
+      return inAt > (cid ? (lastOutAt.get(cid) ?? 0) : 0)
+    }).length
   }
   const since3h = new Date(now - 3 * 3600_000).toISOString()
   const { data: recentErrs } = await admin
