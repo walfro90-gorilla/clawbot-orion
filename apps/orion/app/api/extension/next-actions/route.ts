@@ -2,6 +2,7 @@ export const runtime = "nodejs"
 
 import { NextRequest, NextResponse } from "next/server"
 import { createAdminClient } from "@/lib/supabase/admin"
+import { classifyCommandError } from "@/lib/error-class"
 
 const CORS = {
   "Access-Control-Allow-Origin":  "*",
@@ -80,16 +81,25 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // ¿Hay inbound pending de respuesta auto?
-  let pendingReplyCount = 0
-  if (camp) {
-    const { count } = await admin
-      .from("leads")
-      .select("id", { count: "exact", head: true })
-      .eq("campaign_id", camp.id)
-      .eq("status", "replied")
-    pendingReplyCount = count ?? 0
+  // Contadores del popup — agregados sobre TODAS las campañas activas de la cuenta.
+  const campaignIds = (campaigns ?? []).map((c: any) => c.id)
+  let pendingReplyCount = 0  // 💬 mensajes por contestar (leads 'replied')
+  let fuDueNow = 0           // 📤 seguimientos listos (connected sin FU1 aún)
+  let errorsRecent = 0       // ⚠️ fallas reales (fault) últimas 3h
+  if (campaignIds.length) {
+    const [rep, fu] = await Promise.all([
+      admin.from("leads").select("id", { count: "exact", head: true }).in("campaign_id", campaignIds).eq("status", "replied"),
+      admin.from("leads").select("id", { count: "exact", head: true }).in("campaign_id", campaignIds).eq("status", "connected").is("last_followup_at", null),
+    ])
+    pendingReplyCount = rep.count ?? 0
+    fuDueNow = fu.count ?? 0
   }
+  const since3h = new Date(now - 3 * 3600_000).toISOString()
+  const { data: recentErrs } = await admin
+    .from("extension_commands")
+    .select("err:result->>error")
+    .eq("account_id", accountId).eq("status", "error").gte("created_at", since3h)
+  errorsRecent = (recentErrs ?? []).filter((r: any) => classifyCommandError(r.err, "error").isFault).length
 
   // Lo más cercano = "next_any"
   const candidates = [
@@ -111,6 +121,8 @@ export async function GET(req: NextRequest) {
     next_fu_lead: nextFuLead,
     next_any,
     pending_replies: pendingReplyCount,
+    fu_due_now: fuDueNow,
+    errors_recent: errorsRecent,
     sorted_upcoming: future.slice(0, 4),
   }, { headers: CORS })
 }

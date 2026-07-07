@@ -259,6 +259,14 @@ const $naPrimaryCountdown = document.getElementById('na-primary-countdown')
 const $naList = document.getElementById('na-list')
 const $forceTickBtn = document.getElementById('force-tick-btn')
 
+// v0.9.16 — contadores de estado. Pinta un badge: número + clase de color según haya trabajo.
+function setNaBadge(id, n, activeClass, okClass = '') {
+  const nEl = document.getElementById(id + '-n')
+  const el = document.getElementById(id)
+  if (nEl) nEl.textContent = n
+  if (el) el.className = 'na-badge ' + (n > 0 ? activeClass : okClass)
+}
+
 function fmtCountdown(ms) {
   if (ms <= 0) return 'ahora'
   const s = Math.floor(ms / 1000)
@@ -291,6 +299,11 @@ async function refreshNextActions() {
     const d = await r.json()
     $nextActions.style.display = 'block'
 
+    // Contadores: 💬 por contestar · 📤 FU listos · ⚠️ fallas (verde si 0)
+    setNaBadge('nb-reply', d.pending_replies ?? 0, 'active-reply')
+    setNaBadge('nb-fu', d.fu_due_now ?? 0, 'active-fu')
+    setNaBadge('nb-fail', d.errors_recent ?? 0, 'active-fail', 'ok-fail')
+
     if (d.next_any) {
       const icon = d.next_any.label?.split(' ')[0] ?? '⏳'
       const labelText = d.next_any.label?.split(' ').slice(1).join(' ') ?? d.next_any.type
@@ -302,16 +315,18 @@ async function refreshNextActions() {
       $naPrimaryLabel.textContent = 'Sin acciones programadas'
       $naPrimaryCountdown.textContent = '—'
     }
-    // Lista secundaria
+    // Cola FIFO de agentes (lo que viene después del próximo, ya resaltado arriba)
     $naList.innerHTML = ''
-    for (const upcoming of (d.sorted_upcoming ?? []).slice(1, 4)) {
+    const queue = (d.sorted_upcoming ?? []).slice(1, 4)
+    for (const upcoming of queue) {
       const li = document.createElement('li')
-      li.innerHTML = `<span>${upcoming.label}</span><span class="when">${fmtCountdown(upcoming.at - d.now)}</span>`
+      li.innerHTML = `<span class="na-li-label">${upcoming.label}</span><span class="when">${fmtCountdown(upcoming.at - d.now)}</span>`
       $naList.appendChild(li)
     }
-    if (d.pending_replies > 0) {
+    if (!queue.length) {
       const li = document.createElement('li')
-      li.innerHTML = `<span style="color:#fbbf24">💬 ${d.pending_replies} replies aguardando delay</span><span class="when">~</span>`
+      li.className = 'na-empty'
+      li.textContent = 'sin más acciones en cola'
       $naList.appendChild(li)
     }
   } catch (err) {
