@@ -7,7 +7,7 @@
     "start": "node worker.js",
     "search": "node search.js",
     "batch": "node batch.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test --test-force-exit test/*.test.mjs"
   },
   "keywords": [],
   "author": "",

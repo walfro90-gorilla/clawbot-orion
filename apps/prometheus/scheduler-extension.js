@@ -1991,10 +1991,23 @@ async function runDailyPublishAgents() {
   }
 }
 
+// (2026-07-06) A2: resolver alertas scheduler_dead stale una vez por arranque (proof-of-life
+// tras recuperación). heartbeat-check.js (su creador/resolvedor) fue reemplazado por watchdog.js
+// (webhook, no toca account_alerts) → sin esto el banner rojo queda para siempre.
+let _staleSchedulerAlertsResolved = false
+
 async function tick() {
   const { mxDate, mxHour } = mxTime()
   console.log(`\n[SCH-EXT] ════════════════════════════`)
   console.log(`[SCH-EXT] Tick @ ${mxDate} CDMX`)
+
+  if (!_staleSchedulerAlertsResolved) {
+    _staleSchedulerAlertsResolved = true
+    supabase.from('account_alerts').update({ resolved_at: new Date().toISOString() })
+      .eq('alert_type', 'scheduler_dead').is('resolved_at', null)
+      .then(({ error }) => { if (!error) console.log('[SCH-EXT] ✅ alertas scheduler_dead stale resueltas (proof-of-life)') })
+      .catch(() => {})
+  }
 
   // Pre-fetch connected accounts (cached 5s)
   const connectedIds = await getConnectedAccountIds()

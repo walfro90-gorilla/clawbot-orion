@@ -5,8 +5,29 @@
 // el comando en la queue. El bridge polea y despacha a la extension del
 // usuario. Las gates duplicadas con scheduler.js se reusan acá.
 
-import { supabase } from './supabase.js'
+import { supabase, createAlert } from './supabase.js'
 import { stampLastAttempt } from './lead-failure.js'
+
+// (2026-07-06) A1: guard de versión de extensión. Cada acción "nueva" requiere una versión
+// mínima de la extensión; si la conectada es más vieja, dispatchCommand NO la despacha (evita
+// 'Unknown action' silencioso + ejecuciones mal hechas). Extensible: agrega acción→versión aquí.
+// Solo se listan las acciones nuevas — las demás no se gatean (min undefined = sin gate).
+const ACTION_MIN_VERSION = {
+  check_connections: '0.9.15',
+}
+
+// Compara semver simple (a.b.c). Versión desconocida (null) = demasiado vieja → fail-closed.
+export function meetsVersion(have, min) {
+  if (!have) return false
+  const pa = String(have).split('.').map(n => parseInt(n, 10) || 0)
+  const pb = String(min).split('.').map(n => parseInt(n, 10) || 0)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const a = pa[i] ?? 0, b = pb[i] ?? 0
+    if (a > b) return true
+    if (a < b) return false
+  }
+  return true
+}
 
 // ── Time helpers (timezone-aware per account) ────────────────────────────────
 
@@ -575,6 +596,20 @@ export function passesTitleFilters(headline, whitelist = [], blacklist = []) {
  */
 export async function dispatchCommand(accountId, action, payload, opts = {}) {
   const { relatedLeadId, expiresInMinutes = 30 } = opts
+  // A1: guard de versión (fail-closed). Solo lee ext_version para acciones gateadas (las nuevas).
+  const minV = ACTION_MIN_VERSION[action]
+  if (minV) {
+    const { data: acct } = await supabase.from('linkedin_accounts').select('ext_version, label').eq('id', accountId).maybeSingle()
+    if (!meetsVersion(acct?.ext_version, minV)) {
+      console.warn(`[ext-dispatch] ⏭️ ${action} BLOQUEADO: ext ${acct?.ext_version ?? '?'} < ${minV} (${acct?.label ?? accountId.slice(0,8)}) — recargar extensión`)
+      try {
+        await createAlert(accountId, null, 'extension_outdated', 'warning',
+          `Extensión desactualizada (v${acct?.ext_version ?? '?'}) — recárgala en chrome://extensions. Se bloqueó "${action}" (requiere ≥${minV}).`,
+          { action, ext_version: acct?.ext_version ?? null, required: minV }, false)
+      } catch { /* best-effort */ }
+      return null
+    }
+  }
   const expiresAt = new Date(Date.now() + expiresInMinutes * 60_000).toISOString()
   const row = {
     account_id: accountId,

@@ -163,7 +163,7 @@ const NO_INVENT_COMPANY_RULE = '🏢 EMPRESA: NUNCA inventes ni asumas el nombre
 // prompt de TODA generación por IA (invite full-gen, FM/auto-reply, FU-LLM) cuando la campaña
 // los tiene. Antes se cargaban pero NUNCA llegaban al prompt → el FM salía genérico. Guards
 // if(campo): campañas sin estos campos quedan idénticas. NO afecta el FU verbatim (no llama LLM).
-function campaignPersonaBlock(campaign) {
+export function campaignPersonaBlock(campaign) {
   if (!campaign) return null
   // Dispara SOLO si hay identidad/contexto sustantivo (persona o empresa). ai_tone por sí solo
   // NO cuenta → campañas que solo tienen tono (Wal Tech/Transporte/[Post], que ya funcionan)
