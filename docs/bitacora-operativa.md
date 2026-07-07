@@ -2,7 +2,8 @@
 
 > Log vivo del monitoreo. Cada entrada: hallazgo → acción/estado. Lo mantiene Orion (Claude) en modo monitor.
 
-## Estado actual (2026-07-04)
+## Estado actual (2026-07-06)
+- **Prod en `63f5bb5`** — laptop = GitHub = prod, deploy verificado (health-check de `deploy-orion`). Sesión 06-jul: loop NFD cerrado, invite-agent (reaper + limit 100), IA usa persona/contexto/tono, **Oficina IA** (`/dashboard/office`), guard de versión de extensión, seatbelt `node --test`, mitigación de egress. Detalle en "Resuelto" abajo; **pendientes en "Backlog"**.
 - **Extensión**: `0.9.15` en las 3 cuentas (Wal/Josh/Café) — check_connections (accept-detection positiva) + disconnect Super DEAD.
 - **Backend en `74e7c2a`+** (prod `/root/clawbot`): P1 `OLD_ACCEPT_DAYS` desactivado (`extension-bridge`), reaper de `replied` rancios (`prometheus-scheduler`), alert offline per-cuenta.
 - **✅ Barrido de salud 04-jul**: 4 agentes (search/invite/auto-reply/follow-up) × 3 cuentas CERTIFICADO SANO, 0 bloqueantes.
@@ -13,7 +14,16 @@
 
 ## ✅ Resuelto
 
-### ⏰ Horario de Wal 8-22/7d + alert offline per-cuenta + fix tokens company-lists  [04-jul]
+### 🚀 Sesión 06-jul-2026 — anti-loop NFD · invite-agent · IA con persona · Oficina IA · resiliencia + egress
+- **Loop falso-accept por HOMÓNIMO cerrado** (`7e3873f`): `check_connections` (ext 0.9.15) scrapea ~400-940 conexiones → match por nombre exacto colisionaba homónimos → 2do-grado marcado `connected` → FU → modal InMail → re-flag → **loop** (pico 05-jul 41 hits/día). Fix en 5 puntos (isConnection sin override por nombre, check_inbox guarded, not_messageable unifica al flag canónico, dispatch guard en lane FU + auto-reply). Verificado adversarialmente (2 workflows). Limpieza: 46 leads NFD rancios >21d → dead.
+- **Invite-agent destapado** (`0a19092`): el junk company-scoped que falla el whitelist se acumulaba en `scraped` y tapaba la ventana `limit(10)` → `no_leads_pass_whitelist` con ejecutivos válidos varados. Fix: reaper `sweepJunkScraped` (barre junk no-whitelist >2d → disqualified) + `limit(10)→100`. Limpieza Josh: 20 junk → disqualified. Cap Josh 20→25 (hot; techo warmup = 25). Targeting +69 empresas LATAM/España (196→265).
+- **IA usa la config de Orion web** (`716e928`): FM/FU-LLM/invite salían genéricos — solo leían `gemini_system_prompt` (vacío) + `fmN_example_reply`; `ai_sender_persona`/`ai_company_context`/`ai_tone` se cargaban pero NUNCA llegaban al prompt. Fix `campaignPersonaBlock` (inyecta si hay persona/contexto, caps 2000/3000; tono-solo no dispara) + `gemini_system_prompt` editable en el Centro de Control. Ground truth: `CLAUDE.md §7.1` + `docs/agentes.md`.
+- **Oficina IA** (`/dashboard/office`): visualiza cada agente — estado (activo/espera/OK-regla/falla-real/inactivo), última acción + timestamp, **descripción de error accionable** (distingue fallo real de regla LinkedIn vía `classifyCommandError`), **mini-feed en vivo**. Doc completa de todos los agentes: `docs/agentes.md`.
+- **Resiliencia P0/P1** (`3123f58`): guard de versión de extensión **bloqueante** (`meetsVersion` + `ACTION_MIN_VERSION` en `dispatchCommand` → cierra `Unknown action` silencioso + alerta `extension_outdated`); auto-resolución de alertas `scheduler_dead` stale al primer tick (proof-of-life); **seatbelt `node --test`** (`apps/prometheus/test/pure.test.mjs`, `npm test`, 4/4); `deploy-orion` con health-check post-deploy.
+- **`deploy-orion` arreglado**: era alias que solo reiniciaba `orion` → los cambios de prometheus se pulleaban pero NUNCA se cargaban (se "confirmaron" fixes con código viejo). Ahora reinicia los 3 procesos de app + verifica HEAD==origin + smoke. Ver `CLAUDE.md §4`.
+- **Egress** (`63f5bb5`): Supabase Free excedía 5GB/mes (driver: dashboards con auto-refresh **olvidados abiertos**). AutoRefresh pausa en background (0 fetches); Oficina 3000→150 filas/60s (~90×); monitor 15→30s. NO sustituye backups (Pro-only).
+
+
 - **Wal activo 8am-10pm diario**: campañas Transporte (`91f116e3`) + Tech (`c39fab66`) → `schedule_start_hour=8`, `schedule_end_hour=22`, 7 días. El gate `checkCampaignActiveGates` (`extension-dispatch.js:743`) usa estos campos → controla cuándo opera el bot.
 - **Alert offline per-cuenta** (`scheduler-extension.js` `runConnectivityHealthCheck`): antes `isBusinessHours(6,21,7d)` HARDCODEADO para todas → con Wal en 8-22 daba falsos-offline 6-8am y ceguera 21-22h. Ahora deriva la ventana por cuenta = unión (min start, max end, unión de días) de sus campañas activas; fallback 6-21/7d. Josh/Café sin cambio (6-21/7d), Wal → 8-22/7d.
 - **Fix tokens rotos company-lists** (Josh `6e2964ad` + Café `5f3b43b7`, aprobado por Walfre): `Forvia ationMexico`→`Forvia Mexico`, `Draexlmaie`→`Draexlmaier Mexico`, `Martinrea Internal`→`Martinrea International`, `(Tupy)/(TAMSA)/(Sabritas)`→sin paréntesis, splits (`Pentair Mexico Rexnord Mexico`, `Viakable Panduit Mexico`, `Alpek Cydsa`, `Grupo Bimbo Grupo Herdez`, `Arca Continental Grupo Modelo / AB`), remove `International`+`GE` sueltos. Re-dedup: Café 174→177, Josh 196→196.
@@ -93,3 +103,11 @@
 4. **Flags anti-throttle de Chrome** en las máquinas de los operadores (`--disable-background-timer-throttling` + 2 más) — defensa de raíz contra el throttle.
 5. **publish_post (Fase C)** — test end-to-end pendiente (auto-publicar el texto del post diario vía extensión).
 6. **2do-grado automatizado** — revertir a invite_sent / marcar dead los leads que LinkedIn restringe (el L6 ya lo diagnostica con conf 0.85; falta actuar).
+
+### Pendientes sesión 06-jul-2026 (FODA resiliencia + anti-ban)
+7. **[👤 Walfre] Renovar `GEMINI_API_KEY`** en `apps/prometheus/.env` de prod — el fallback LLM está **muerto** (key inválida). Si Groq cae: el FM se **salta** (leads que responden quedan sin respuesta); el FU sí cae a template. *(Config, sin código.)*
+8. **[👤 Walfre] Upgrade Supabase a Pro ($25/mo)** — **riesgo #1 de resiliencia**. Free NO incluye backups (pérdida total sin recuperación) + ya excede egress (badge "exceeding limits" en Gorilla-Labs). Pro = backups diarios (restore 7d) + 250 GB egress + mejor compute. Alternativa parcial: verificar snapshots Upcloud (server → tab Backups). La mitigación de egress (`63f5bb5`) da **aire pero NO sustituye backups**.
+9. **Verificar egress** (Supabase → Settings → Usage, 1-2 días) — confirmar que bajó del límite tras la mitigación. Si aún roza: trimear el SELECT de campañas del scheduler (~40 columnas, `scheduler-extension.js:2014`) y/o subir `EXTENSION_POLL_INTERVAL_MS`.
+10. **Precisión de accept-detection** — 93 `not_first_degree`/7d = navegaciones FU desperdiciadas = exposición anti-ban. **Observar con la Oficina primero**; endurecer el matching por nombre solo si el rate no baja (NO re-tocar los guards que ya funcionan sin evidencia).
+11. **Pase de seguridad Supabase** (advisors, `get_advisors security`): 20 vistas `SECURITY DEFINER` (nivel ERROR — fuga de datos si el rol anon las consulta), funcs `SECURITY DEFINER` ejecutables por anon (`is_admin_or_above`, `rls_auto_enable`), leaked-password-protection **OFF**, `search_path` mutable ×11, extensiones en `public`. No es resiliencia/anti-ban pero son vulnerabilidades reales — pase aparte.
+12. **`MaxListenersExceededWarning`** (opcional) — en `lib/supabase.js` `fetchWithTimeout`, quitar el abort-listener al terminar cada query (no solo con `{once:true}`). Benigno (no crece cross-tick, `currentTickSignal` se reemplaza por tick) pero ruidoso en el error.log.
