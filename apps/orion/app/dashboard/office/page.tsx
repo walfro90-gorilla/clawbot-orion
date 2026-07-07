@@ -25,6 +25,19 @@ const AGENTS: AgentDef[] = [
   { key: "posts",   icon: "📝", name: "Prospector de Posts",       role: "Busca posts y comenta value-first",               actions: ["search_posts", "comment_on_post", "publish_post"], did: "Trabajó posts" },
 ]
 
+// Etiqueta amigable + icono por acción, para el mini-feed.
+const ACTION_META: Record<string, { icon: string; label: string }> = {
+  search:             { icon: "🔍", label: "Buscó leads" },
+  send_invite:        { icon: "🤝", label: "Envió invitación" },
+  send_followup:      { icon: "💬", label: "Envió mensaje / FU" },
+  check_inbox:        { icon: "📥", label: "Revisó el inbox" },
+  check_sent_invites: { icon: "✅", label: "Verificó invites enviados" },
+  check_connections:  { icon: "✅", label: "Verificó conexiones" },
+  comment_on_post:    { icon: "📝", label: "Comentó un post" },
+  search_posts:       { icon: "📝", label: "Buscó posts" },
+  publish_post:       { icon: "📝", label: "Publicó un post" },
+}
+
 type AgentState = "activo" | "idle" | "falla" | "esperado" | "inactivo"
 
 const STATE_STYLE: Record<AgentState, { dot: string; pill: string; label: string }> = {
@@ -99,6 +112,7 @@ export default async function OfficePage() {
   })
 
   const totalFaults = agents.filter(a => a.state === "falla").length
+  const feed = rows.slice(0, 24)
 
   return (
     <div className="p-4 sm:p-8 space-y-6 max-w-6xl mx-auto">
@@ -193,6 +207,36 @@ export default async function OfficePage() {
             </div>
           </div>
           <div className="text-[11px] text-gray-500">Total barrido: <b className="text-gray-300">{junkTotal}</b> leads</div>
+        </div>
+      </div>
+
+      {/* Mini-feed de actividad reciente */}
+      <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+        <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+          <h2 className="text-gray-50 font-semibold text-sm flex items-center gap-2">📡 Actividad reciente</h2>
+          <span className="text-gray-500 text-xs">últimas {feed.length} acciones</span>
+        </div>
+        <div className="divide-y divide-gray-800/70 max-h-96 overflow-y-auto">
+          {feed.length === 0 && <div className="px-4 py-6 text-center text-gray-500 text-sm">Sin actividad en las últimas 24h</div>}
+          {feed.map((r, i) => {
+            const meta = ACTION_META[r.action ?? ""] ?? { icon: "•", label: r.action ?? "?" }
+            const err = r.status === "error" ? classifyCommandError(r.error, "error") : null
+            return (
+              <div key={i} className="px-4 py-2 flex items-center gap-3 text-xs hover:bg-gray-800/40">
+                <span className="text-base shrink-0 w-5 text-center">{meta.icon}</span>
+                <span className="text-gray-300 truncate flex-1">{meta.label}</span>
+                {r.status === "completed" && <span className="text-green-400 shrink-0">✓</span>}
+                {r.status === "pending" && <span className="text-amber-400 shrink-0">⏳</span>}
+                {err && (
+                  <span className={`shrink-0 flex items-center gap-1 ${err.isFault ? "text-red-400" : "text-blue-400"}`}>
+                    <span>{err.isFault ? "🔴" : "ℹ️"}</span>
+                    <code className="text-[10px] opacity-80 max-w-40 truncate">{r.error}</code>
+                  </span>
+                )}
+                <span className="text-gray-500 shrink-0 w-16 text-right">{hace(r.created_at)}</span>
+              </div>
+            )
+          })}
         </div>
       </div>
 
