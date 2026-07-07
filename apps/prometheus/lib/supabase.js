@@ -34,12 +34,21 @@ function fetchWithTimeout(input, init = {}) {
   );
   // Encadena AbortSignals externos: (1) el de init (p.ej. .abortSignal() de supabase) y
   // (2) la señal del TICK → cancela las queries en vuelo cuando el tick hace soft-timeout.
+  // (06-jul-2026) Guardamos cada listener y lo REMOVEMOS al terminar la query — con `{once}`
+  // solo se quitaba si el abort disparaba, no al completar normal, así que se acumulaban sobre
+  // currentTickSignal (>10/tick → MaxListenersExceededWarning). Ahora 0 acumulación.
+  const cleanups = [];
   for (const external of [init.signal, currentTickSignal]) {
     if (!external) continue;
-    if (external.aborted) ctrl.abort(external.reason);
-    else external.addEventListener('abort', () => ctrl.abort(external.reason), { once: true });
+    if (external.aborted) { ctrl.abort(external.reason); continue; }
+    const onAbort = () => ctrl.abort(external.reason);
+    external.addEventListener('abort', onAbort, { once: true });
+    cleanups.push(() => external.removeEventListener('abort', onAbort));
   }
-  return fetch(input, { ...init, signal: ctrl.signal }).finally(() => clearTimeout(timer));
+  return fetch(input, { ...init, signal: ctrl.signal }).finally(() => {
+    clearTimeout(timer);
+    for (const c of cleanups) c();
+  });
 }
 
 export const supabase = createClient(url, key, {
