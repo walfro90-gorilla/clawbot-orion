@@ -19,6 +19,7 @@ const NAV = [
   { href: "/dashboard/accounts",          label: "Cuentas LI", icon: "🔗", adminOnly: true  },
   { href: "/dashboard/control",           label: "Centro de Control", icon: "⚙️", adminOnly: true  },
   { href: "/dashboard/activity",          label: "Actividad",  icon: "📋", adminOnly: false },
+  { href: "/dashboard/office",            label: "Oficina IA", icon: "🏢", adminOnly: true  },
   { href: "/dashboard/cerebro",           label: "Cerebro IA", icon: "🧠", adminOnly: true  },
   { href: "/dashboard/auto-learning",     label: "Auto-Learning", icon: "🧬", adminOnly: true  },
   { href: "/dashboard/visual-tickets",    label: "Visual Tickets", icon: "🎯", adminOnly: true  },
