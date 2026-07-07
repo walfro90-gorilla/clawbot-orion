@@ -258,7 +258,7 @@ export default async function MonitorPage() {
           <p className="text-gray-400 text-sm mt-0.5">Estado en tiempo real de todos los jobs y alertas críticas</p>
         </div>
         <div className="flex items-center gap-3">
-        <AutoRefresh intervalMs={15000} />
+        <AutoRefresh intervalMs={30000} />
         <div className={`flex items-center gap-2 px-4 py-2 rounded-xl border text-sm font-medium ${
           health === "ok"       ? "bg-green-500/10 border-green-500/30 text-green-400" :
           health === "warning"  ? "bg-yellow-500/10 border-yellow-500/30 text-yellow-400" :

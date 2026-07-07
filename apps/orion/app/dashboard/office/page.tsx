@@ -45,7 +45,7 @@ const STATE_STYLE: Record<AgentState, { dot: string; pill: string; label: string
   idle:      { dot: "bg-amber-400", pill: "bg-amber-500/15 text-amber-300 border-amber-500/40", label: "En espera" },
   falla:     { dot: "bg-red-500 animate-pulse", pill: "bg-red-500/15 text-red-300 border-red-500/40", label: "Falla — revisar" },
   esperado:  { dot: "bg-blue-400", pill: "bg-blue-500/15 text-blue-300 border-blue-500/40", label: "OK (regla LinkedIn)" },
-  inactivo:  { dot: "bg-gray-600", pill: "bg-gray-500/15 text-gray-400 border-gray-600/40", label: "Sin actividad 24h" },
+  inactivo:  { dot: "bg-gray-600", pill: "bg-gray-500/15 text-gray-400 border-gray-600/40", label: "Sin actividad" },
 }
 
 function hace(iso: string | null): string {
@@ -69,7 +69,7 @@ export default async function OfficePage() {
   const [cmdsRes, junkRes] = await Promise.all([
     db.from("extension_commands")
       .select("action, status, created_at, error:result->>error, reason:result->>reason")
-      .gte("created_at", since).order("created_at", { ascending: false }).limit(3000),
+      .gte("created_at", since).order("created_at", { ascending: false }).limit(150),
     db.from("leads").select("id", { count: "exact", head: true }).eq("dead_reason", "not_whitelist_junk"),
   ])
   const rows = (cmdsRes.data ?? []) as Row[]
@@ -120,7 +120,7 @@ export default async function OfficePage() {
       <div className="flex items-start justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-2xl font-bold text-gray-50 flex items-center gap-2">🏢 Oficina IA</h1>
-          <p className="text-gray-400 text-sm mt-0.5">Cada agente, su estado y su última acción — en vivo desde <code className="text-gray-500">extension_commands</code> (24h).</p>
+          <p className="text-gray-400 text-sm mt-0.5">Cada agente, su estado y su última acción — en vivo desde <code className="text-gray-500">extension_commands</code> (últimas 150 acciones).</p>
         </div>
         <div className="flex items-center gap-3">
           {totalFaults > 0 && (
@@ -132,7 +132,7 @@ export default async function OfficePage() {
             <span className={`w-2 h-2 rounded-full ${schedulerLive ? "bg-green-500" : "bg-red-500 animate-pulse"}`} />
             Scheduler {schedulerLive ? "activo" : "inactivo"}
           </span>
-          <AutoRefresh intervalMs={20000} />
+          <AutoRefresh intervalMs={60000} />
         </div>
       </div>
 
@@ -171,7 +171,7 @@ export default async function OfficePage() {
                     <span>{a.errInfo.fault ? "🔴" : "ℹ️"}</span>
                     <span>{a.errInfo.klass}</span>
                     <code className="text-[10px] font-normal opacity-80 truncate">{a.errInfo.code}</code>
-                    {a.errInfo.count24h > 1 && <span className="ml-auto text-[10px] opacity-70 shrink-0">×{a.errInfo.count24h} en 24h</span>}
+                    {a.errInfo.count24h > 1 && <span className="ml-auto text-[10px] opacity-70 shrink-0">×{a.errInfo.count24h}</span>}
                   </div>
                   <p className="text-gray-400 leading-snug mt-1">{a.errInfo.hint}</p>
                   {a.errInfo.reason && <p className="text-gray-600 text-[10px] mt-0.5 truncate">detalle: {a.errInfo.reason}</p>}
@@ -179,7 +179,7 @@ export default async function OfficePage() {
               )}
 
               <div className="flex items-center gap-3 text-[11px] text-gray-500">
-                <span>24h: <b className="text-gray-300">{a.total}</b></span>
+                <span>reciente: <b className="text-gray-300">{a.total}</b></span>
                 {a.ok > 0 && <span className="text-green-400">✓ {a.ok}</span>}
                 {a.errCount > 0 && <span className={a.realFaults > 0 ? "text-red-400" : "text-blue-400"}>✕ {a.errCount}</span>}
               </div>
@@ -217,7 +217,7 @@ export default async function OfficePage() {
           <span className="text-gray-500 text-xs">últimas {feed.length} acciones</span>
         </div>
         <div className="divide-y divide-gray-800/70 max-h-96 overflow-y-auto">
-          {feed.length === 0 && <div className="px-4 py-6 text-center text-gray-500 text-sm">Sin actividad en las últimas 24h</div>}
+          {feed.length === 0 && <div className="px-4 py-6 text-center text-gray-500 text-sm">Sin actividad reciente</div>}
           {feed.map((r, i) => {
             const meta = ACTION_META[r.action ?? ""] ?? { icon: "•", label: r.action ?? "?" }
             const err = r.status === "error" ? classifyCommandError(r.error, "error") : null
@@ -246,7 +246,7 @@ export default async function OfficePage() {
         <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-amber-400" /> En espera</span>
         <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-blue-400" /> OK — regla de LinkedIn (no es fallo)</span>
         <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-red-500" /> Falla real — requiere acción</span>
-        <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-gray-600" /> Sin actividad 24h</span>
+        <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-gray-600" /> Sin actividad</span>
       </div>
     </div>
   )

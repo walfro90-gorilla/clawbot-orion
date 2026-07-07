@@ -20,6 +20,9 @@ export function AutoRefresh({ intervalMs = 15000, label = "En vivo" }: { interva
     tick.current = Math.round(intervalMs / 1000)
     setSecs(tick.current)
     const id = setInterval(() => {
+      // (06-jul-2026) Egress: si la pestaña está en BACKGROUND, no cuentes ni refresques →
+      // cero fetches en pestañas olvidadas abiertas (el mayor drenaje de egress del Free tier).
+      if (typeof document !== "undefined" && document.hidden) return
       tick.current -= 1
       if (tick.current <= 0) {
         startTransition(() => router.refresh())
@@ -27,7 +30,19 @@ export function AutoRefresh({ intervalMs = 15000, label = "En vivo" }: { interva
       }
       setSecs(tick.current)
     }, 1000)
-    return () => clearInterval(id)
+    // Al volver a foco: un refresh inmediato + reinicia la cuenta (datos frescos al regresar).
+    const onVis = () => {
+      if (typeof document !== "undefined" && !document.hidden) {
+        startTransition(() => router.refresh())
+        tick.current = Math.round(intervalMs / 1000)
+        setSecs(tick.current)
+      }
+    }
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVis)
+    return () => {
+      clearInterval(id)
+      if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVis)
+    }
   }, [on, intervalMs, router])
 
   return (
