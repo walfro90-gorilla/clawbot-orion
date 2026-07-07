@@ -1827,7 +1827,7 @@ async function loadActivePostCampaigns() {
       linkedin_accounts (
         id, label, status, warmup_status, warmup_started_at,
         extension_paused, extension_paused_reason, extension_paused_until, timezone, cal_com_url,
-        extension_last_seen_at
+        extension_last_seen_at, search_mode
       )
     `)
     .eq('is_active', true)
@@ -2054,7 +2054,7 @@ async function tick() {
         sent_invites_gap_min, last_sent_invites_check_at, last_connections_check_at,
         reply_delay_min, reply_delay_max,
         extension_paused, extension_paused_reason, extension_paused_until, timezone, cal_com_url,
-        extension_last_seen_at
+        extension_last_seen_at, search_mode
       )
     `)
     .eq('is_active', true)

@@ -1282,6 +1282,7 @@ export type Database = {
           timezone: string
           user_id: string | null
           warmup_started_at: string | null
+          search_mode: string
           warmup_status: string
         }
         Insert: {
@@ -1320,6 +1321,7 @@ export type Database = {
           timezone?: string
           user_id?: string | null
           warmup_started_at?: string | null
+          search_mode?: string
           warmup_status?: string
         }
         Update: {
@@ -1358,6 +1360,7 @@ export type Database = {
           timezone?: string
           user_id?: string | null
           warmup_started_at?: string | null
+          search_mode?: string
           warmup_status?: string
         }
         Relationships: [

@@ -34,6 +34,7 @@ async function updateAccount(formData: FormData) {
     inbound_qualification_rules:  (formData.get("inbound_qualification_rules") as string) || null,
     user_id:                assignedUserId || null,
     warmup_status:          newWarmupStatus || "cold",
+    search_mode:            (formData.get("search_mode") as string) || "free",
     // Reset warmup_started_at when status changes to track progression
     ...(warmupChanged ? { warmup_started_at: new Date().toISOString() } : {}),
   }).eq("id", id)
@@ -368,6 +369,19 @@ export default async function AccountsPage() {
                       <option value="hot">🔥 Caliente — veterana 3+ meses (default: 25/día)</option>
                     </select>
                     <p className="text-gray-600 text-xs">El scheduler respeta este cap independiente del límite de campaña.</p>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="block text-xs text-gray-400">Modo de búsqueda / prospección</label>
+                    <select name="search_mode" defaultValue={(raw as any)?.search_mode ?? "free"}
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                      <option value="free">🔎 Free — buscador estándar (pool limitado por LinkedIn)</option>
+                      <option value="sales_navigator">🧭 Sales Navigator — pool ampliado (solo cuentas Pro)</option>
+                    </select>
+                    <p className="text-gray-600 text-xs">
+                      Marca <b>Sales Navigator</b> solo en cuentas que <b>realmente</b> tengan la suscripción.
+                      No cambia el cap de invitaciones (anti-ban) — amplía la prospección.
+                      ⚙️ El buscador SalesNav se activa en una fase posterior; por ahora esto solo designa la cuenta.
+                    </p>
                   </div>
                   <button type="submit" className="w-full py-2 bg-blue-600 hover:bg-blue-500 text-white  text-sm font-medium rounded-lg transition-colors">
                     Guardar cambios

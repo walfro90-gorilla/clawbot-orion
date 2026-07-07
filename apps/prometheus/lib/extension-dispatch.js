@@ -686,6 +686,9 @@ export async function dispatchSearch(account, campaign, keywords) {
 
   return dispatchCommand(account.id, 'search', {
     campaignId:       campaign.id,
+    // Fase 1 (SalesNav): el modo viaja en el payload. La extensión aún lo IGNORA (busca free);
+    // en fase 2, buildSearchUrl ramifica a /sales/search/people/ cuando es 'sales_navigator'.
+    searchMode:       account.search_mode ?? 'free',
     keywords:         finalKeywords,
     locations:        rotatedLocations.length ? rotatedLocations : null,  // 1 país rotado (geoUrn + post-filter)
     location:         locationStr || null,                       // legacy single-string (ignorado en URL builder)
