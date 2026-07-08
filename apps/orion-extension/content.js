@@ -2018,11 +2018,11 @@ async function sendInviteSalesNav(payload = {}) {
 
   const norm = el => (((el.textContent || '') + ' ' + (el.getAttribute('aria-label') || '')).replace(/\s+/g, ' ').trim())
 
-  // Pre-check: ya conectado / invitación pendiente → regla de negocio (no reintentar como fallo).
-  const bodyLc = (document.body?.innerText || '').toLowerCase()
-  if (/pendiente|invitaci[óo]n enviada|invitation pending|1.?(er|st).?grado|1st degree|es tu conexi/.test(bodyLc)) {
-    return { ok: true, action: 'send_invite', status: 'error', error: 'invite_still_pending', currentUrl: location.href }
-  }
+  // (v6: quitado el pre-check por texto de body — "pendiente" aparece SIEMPRE en el chrome de
+  // SalesNav (nav de invitaciones) → falso-positivo `invite_still_pending` en TODO lead. La
+  // señal correcta es la disponibilidad de "Conectar" en el menú "…": si el lead ya está
+  // pendiente/conectado, no habrá "Conectar" → cae en connect_item_not_found con dump del menú,
+  // donde sí veremos "Pendiente"/"Retirar invitación" para clasificarlo con precisión luego.)
 
   // Dismiss popups/spotlights que tapan las acciones.
   for (const b of Array.from(document.querySelectorAll('button'))) {
