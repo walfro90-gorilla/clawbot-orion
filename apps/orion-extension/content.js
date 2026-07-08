@@ -5302,10 +5302,10 @@ async function scrapeSalesNavPeople(payload = {}) {
     droppedNoPublic += dropped
     for (const p of profiles) {
       if (!p.profileUrl || seen.has(p.profileUrl)) continue
-      if (locationFilters.length && p.location) {
-        const loc = _normForFilter(p.location)
-        if (!locationFilters.some(l => loc.includes(l))) continue
-      }
+      // v5: SalesNav NO aplica post-filtro de ubicación — la extracción heurística de
+      // location es poco confiable y descartaba leads válidos (scrapes daban 0 con
+      // stop=no_growth). La keyword + el whitelist de título del scheduler ya targetean.
+      // (Geo server-side en la URL de SalesNav = TODO futuro para precisión de país.)
       seen.add(p.profileUrl)
       collected.push(p)
       if (collected.length >= targetCount) break
@@ -5350,7 +5350,7 @@ async function scrapeSalesNavPeople(payload = {}) {
 // nombre + headline + location y RESUELVE el /in/ público (a[href*="/in/"] dentro del card),
 // imprescindible para invitar. Sin /in/ → fuera + contado. Devuelve { profiles, droppedNoPublic }.
 function extractSalesNavProfiles() {
-  const NOISE_RE = /conectar|connect|mensaje|message|guardar|save|seguir|follow|grado|degree|premium|inmail|a[ñn]adir|selecci[óo]n|disponible|a11y/i
+  const NOISE_RE = /conectar|connect|mensaje|message|guardar|save|seguir|follow|grado|degree|premium|inmail|a[ñn]adir|selecci[óo]n|disponible|available|en l[íi]nea|online|est[áa] en l|a11y/i
   const seen = new Set()
   const profiles = []
   let droppedNoPublic = 0  // ahora = filas sin nombre extraíble (el /in/ ya no se exige)
