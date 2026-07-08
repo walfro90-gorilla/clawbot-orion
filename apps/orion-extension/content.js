@@ -1978,9 +1978,45 @@ function parseConversationItem(el) {
 // El background.js ya navegó la tab al profileUrl antes de llamarnos.
 // Aquí solo: detect Connect → click → modal → fill note → click Send.
 
+// Fase 2b (SalesNav): vuelca el DOM de acciones de la página de lead SalesNav (botones,
+// aria-labels, data-control-name, menús) SIN clickear nada — para localizar "Conectar" y
+// construir el flujo real en v4. Cuenta real → probe read-only, cero riesgo.
+function salesNavInvitePageProbe() {
+  const vis = el => el.offsetParent !== null
+  const clickables = Array.from(document.querySelectorAll('button, a[role="button"], [role="button"], [role="menuitem"], li[role="menuitem"]'))
+    .filter(vis)
+    .map(el => ({
+      tag:  el.tagName.toLowerCase(),
+      txt:  (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 45),
+      aria: (el.getAttribute('aria-label') || '').slice(0, 55),
+      dcn:  el.getAttribute('data-control-name') || '',
+    }))
+    .filter(b => b.txt || b.aria)
+    .slice(0, 45)
+  const connectish = clickables.filter(b => /conectar|connect|invitar|invite|m[áa]s|more|acciones|actions/i.test(b.txt + ' ' + b.aria))
+  return {
+    url:         location.href.slice(0, 140),
+    onSalesLead: /\/sales\/lead\//.test(location.pathname),
+    buttonCount: document.querySelectorAll('button').length,
+    connectish,
+    clickables,
+    bodySnippet: (document.body?.innerText ?? '').replace(/\s+/g, ' ').slice(0, 250),
+  }
+}
+
 async function sendInvite(payload = {}) {
   const { profileUrl, message, leadName, dryRun } = payload
   console.log(`[Orion content] sendInvite: profile=${profileUrl}, dryRun=${dryRun}, currentUrl=${location.href}`)
+
+  // ── Fase 2b (SalesNav): lead Pro con URL /sales/lead/<token> (SalesNav no da /in/). ──
+  // background ya navegó a la página del lead. Por ahora SOLO probamos el DOM (read-only, sin
+  // clickear) para localizar el "Conectar" y construir el flujo real en v4. Devuelve error →
+  // el lead sigue 'scraped' (no se falsea el avance). El path free (/in/) queda intacto.
+  if (profileUrl?.includes('/sales/lead/') || /\/sales\/lead\//.test(location.pathname)) {
+    await sleep(3000)
+    return { ok: false, action: 'send_invite', status: 'error', error: 'salesnav_invite_probe',
+      currentUrl: location.href, debugSample: salesNavInvitePageProbe() }
+  }
 
   // ── PATH A: SPA route /preload/custom-invite/ — modal abre AUTO al cargar ──
   // Background.js nos trae aquí directamente para evitar el click problemático
@@ -5234,34 +5270,34 @@ async function scrapeSalesNavPeople(payload = {}) {
 // nombre + headline + location y RESUELVE el /in/ público (a[href*="/in/"] dentro del card),
 // imprescindible para invitar. Sin /in/ → fuera + contado. Devuelve { profiles, droppedNoPublic }.
 function extractSalesNavProfiles() {
-  const NOISE_RE = /conectar|connect|mensaje|message|guardar|save|seguir|follow|grado|degree|premium|inmail/i
+  const NOISE_RE = /conectar|connect|mensaje|message|guardar|save|seguir|follow|grado|degree|premium|inmail|a[ñn]adir|selecci[óo]n|disponible|a11y/i
   const seen = new Set()
   const profiles = []
-  let droppedNoPublic = 0
+  let droppedNoPublic = 0  // ahora = filas sin nombre extraíble (el /in/ ya no se exige)
 
   for (const link of Array.from(document.querySelectorAll('a[href*="/sales/lead/"]'))) {
-    const name = Array.from(link.childNodes).filter(n => n.nodeType === 3)
-      .map(n => n.textContent.trim()).filter(Boolean).join(' ').trim()
-    if (!name || name.length > 80 || NOISE_RE.test(name)) continue
+    const href = link.getAttribute('href') || ''
+    // URL estable del lead SalesNav (path token,NAME_SEARCH,hash) sin query params (?_ntb=…).
+    const path = href.split('?')[0].replace(/^https?:\/\/[^/]+/, '')
+    if (!path.includes('/sales/lead/')) continue
+    const profileUrl = `https://www.linkedin.com${path}`
+    if (seen.has(profileUrl)) continue
 
-    const card = link.closest('li')
+    const card = link.closest('li') || link.closest('[data-x-search-result]')
       || link.parentElement?.parentElement?.parentElement?.parentElement || null
     if (!card) continue
 
-    // /in/ público dentro del card (necesario para el invite)
-    let profileUrl = null
-    const inLink = card.querySelector('a[href*="/in/"]')
-    if (inLink) {
-      const href = inLink.getAttribute('href') || ''
-      const full = href.startsWith('http') ? href : `https://www.linkedin.com${href}`
-      const u = full.split('?')[0].replace(/\/$/, '') + '/'
-      if (u.includes('/in/')) profileUrl = u
+    // Nombre: SalesNav lo pone en <span data-anonymize="person-name">; fallback al alt del
+    // avatar ("Ir al perfil de <Nombre>"). NO es text-node directo del <a> (por eso v2 sacó 0).
+    let name = card.querySelector('[data-anonymize="person-name"]')?.textContent?.replace(/\s+/g, ' ').trim() || null
+    if (!name) {
+      const alt = card.querySelector('img[alt*="perfil de"]')?.getAttribute('alt') || ''
+      name = alt.replace(/^.*perfil de\s*/i, '').trim() || null
     }
-    if (!profileUrl) { droppedNoPublic++; continue }
-    if (seen.has(profileUrl)) continue
+    if (!name || name.length > 80) { droppedNoPublic++; continue }
     seen.add(profileUrl)
 
-    // Headline + location por heurística de texto (SalesNav no usa las clases del free).
+    // Headline + location: heurística de texto del card (excluye ruido a11y).
     const texts = Array.from(card.querySelectorAll('span, div'))
       .map(el => (el.textContent || '').replace(/\s+/g, ' ').trim())
       .filter(t => t && t !== name && t.length < 120 && !NOISE_RE.test(t))
