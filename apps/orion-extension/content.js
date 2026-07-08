@@ -5151,11 +5151,11 @@ async function searchLeads(payload = {}) {
 
 // ── Fase 2 (SalesNav) — scrapea /sales/search/people/ ───────────────────────
 // Se activa SOLO cuando payload.searchMode === 'sales_navigator' (cuentas Pro). El free
-// path (Wal) queda 100% intacto. Mismo patrón robusto que el free: ancla SEMÁNTICA
-// (a[href*="/sales/lead/"]) + walk-up al card, NO clases frágiles. El invite necesita el
-// /in/ público, así que SOLO conservamos leads donde resolvemos un /in/ dentro del card;
-// el resto se cuenta (droppedNoPublic) y, si TODO se cae por falta de /in/, devolvemos el
-// outerHTML del 1er card en debugSample → así afinamos selectores / resolución en 1 pasada.
+// path (Wal) queda 100% intacto. Iteración 2: SalesNav renderiza los resultados LENTO y en
+// un contenedor con scroll PROPIO, así que (1) esperamos a que aparezcan filas reales
+// (link /sales/lead/) hasta ~18s, (2) scrolleamos el contenedor interno (no la ventana),
+// (3) en fallo devolvemos un probe DOM rico (conteos de selectores + outerHTML de la 1ª
+// fila) para clavar selectores / resolución de /in/ en la siguiente pasada.
 async function scrapeSalesNavPeople(payload = {}) {
   const targetCount = Math.min(payload.targetCount ?? 25, 50)
   const maxScrolls  = Math.min((payload.maxPages ?? 4) * 3, 18)
@@ -5164,12 +5164,14 @@ async function scrapeSalesNavPeople(payload = {}) {
   if (!/\/sales\/search/.test(location.pathname)) {
     return { action: 'search', status: 'error', error: 'not_on_salesnav_search_page', currentUrl: location.href }
   }
-  const containerSel = await waitForSelector(
-    ['#search-results-container', 'ol.artdeco-list', '.artdeco-list', 'div[data-sn-view-name]', 'main'], 15000)
-  if (!containerSel) {
-    return { action: 'search', status: 'error', error: 'salesnav_results_container_not_found', currentUrl: location.href }
+  await waitForSelector(['#search-results-container', 'main'], 15000)
+
+  // Espera activa: SalesNav puede tardar varios segundos en pintar las filas.
+  for (let i = 0; i < 18; i++) {
+    if (document.querySelectorAll('a[href*="/sales/lead/"]').length > 0) break
+    await sleep(1000)
   }
-  await sleep(2000)
+  await sleep(1500)
 
   const locationFilters = Array.isArray(payload.locations)
     ? payload.locations.filter(Boolean).map(_normForFilter) : []
@@ -5196,34 +5198,36 @@ async function scrapeSalesNavPeople(payload = {}) {
 
     if (collected.length >= targetCount) { stopReason = 'target_reached'; break }
 
-    if (s === 0 && collected.length === 0) {
+    // Ninguna fila detectada en la 1ª pasada → captcha / 0-resultados / drift de selector.
+    if (s === 0 && profiles.length === 0 && droppedNoPublic === 0) {
       const bodyTxt = (document.body?.innerText ?? '').toLowerCase()
       if (/captcha|verify you are human|verifica que eres humano|security check|unusual activity/.test(bodyTxt))
         return { action: 'search', status: 'error', error: 'captcha_detected', currentUrl: location.href }
-      const salesLinks = document.querySelectorAll('a[href*="/sales/lead/"]').length
-      const inLinks    = document.querySelectorAll('a[href*="/in/"]').length
-      if (salesLinks === 0 && droppedNoPublic === 0) {
+      const dbg = salesNavDebugProbe()
+      if (dbg.salesLeadLinks === 0 && /no se han encontrado resultados|no results found|sin resultados|0 resultados/.test(bodyTxt)) {
         return { action: 'search', status: 'ok', profiles: [], totalFound: 0, stopReason: 'no_results_found',
-          scrapedAt: new Date().toISOString(), debugSample: { salesLinks, inLinks, bodySnippet: bodyTxt.slice(0, 300) } }
+          scrapedAt: new Date().toISOString(), debugSample: dbg }
       }
-      // Hay cards pero 0 conservados → drift de selector o SalesNav no expone /in/ en el card.
-      // El outerHTML del 1er card es justo lo que necesito para afinar (fase 2b).
-      return { action: 'search', status: 'error', error: 'salesnav_no_usable_profiles', currentUrl: location.href,
-        debugSample: { salesLinks, inLinks, droppedNoPublic, firstCardHtml: firstSalesNavCardHtml() } }
+      return { action: 'search', status: 'error', error: 'salesnav_no_rows_found',
+        currentUrl: location.href, debugSample: dbg }
     }
 
     if (collected.length === before) { if (++noGrowth >= 2) { stopReason = 'no_growth'; break } }
     else noGrowth = 0
-    window.scrollBy(0, randInt(700, 1100))
-    await sleep(randInt(1800, 3500))
+    scrollSalesNavResults()
+    await sleep(randInt(2000, 3500))
   }
   if (!stopReason) stopReason = 'max_scrolls'
 
-  return {
+  const result = {
     action: 'search', status: 'ok', profiles: collected, totalFound: collected.length,
     stopReason, searchMode: 'sales_navigator', droppedNoPublic,
     scrapedAt: new Date().toISOString(),
   }
+  // Filas SalesNav encontradas pero NINGUNA con /in/ público → necesito el DOM del card
+  // para resolver el /in/ (fase 2b: vía data-attr, lead-page, o adaptar el invite).
+  if (collected.length === 0 && droppedNoPublic > 0) result.debugSample = salesNavDebugProbe()
+  return result
 }
 
 // Extractor SalesNav. Ancla en a[href*="/sales/lead/"] (el nombre del lead). Del card saca
@@ -5274,12 +5278,42 @@ function extractSalesNavProfiles() {
   return { profiles, droppedNoPublic }
 }
 
-// Debug: outerHTML del 1er card SalesNav (para afinar selectores / resolución de /in/).
-function firstSalesNavCardHtml() {
-  const link = document.querySelector('a[href*="/sales/lead/"]')
-  const card = link?.closest('li') || link?.parentElement?.parentElement?.parentElement
-  return card ? String(card.outerHTML || '').slice(0, 1800)
-    : String(document.querySelector('main')?.innerHTML || '').slice(0, 900)
+// Scroll del contenedor INTERNO de resultados de SalesNav (no window — la lista tiene su
+// propio overflow y window.scrollBy no lazy-loadea más filas).
+function scrollSalesNavResults() {
+  const container = document.querySelector('#search-results-container')
+    || document.querySelector('ol.artdeco-list')?.parentElement
+    || Array.from(document.querySelectorAll('div,section')).find(el =>
+        el.scrollHeight > el.clientHeight + 200 && el.querySelector('a[href*="/sales/lead/"]'))
+  if (container) container.scrollTop = container.scrollHeight
+  else window.scrollBy(0, 900)
+}
+
+// Probe DOM rico: cuenta cada selector candidato + outerHTML de la 1ª fila candidata.
+// Es lo que necesito para clavar selectores / resolución de /in/ sin ver el DOM en vivo.
+function salesNavDebugProbe() {
+  const q = sel => { try { return document.querySelectorAll(sel).length } catch { return -1 } }
+  const firstRow =
+    document.querySelector('a[href*="/sales/lead/"]')?.closest('li')
+    || document.querySelector('[data-anonymize="person-name"]')?.closest('li')
+    || document.querySelector('ol.artdeco-list > li, li[class*="result"], div[class*="entity-lockup"]')
+    || document.querySelector('#search-results-container')
+    || document.querySelector('main')
+  return {
+    url:               location.href.slice(0, 120),
+    salesLeadLinks:    q('a[href*="/sales/lead/"]'),
+    salesAnyLinks:     q('a[href*="/sales/"]'),
+    inLinks:           q('a[href*="/in/"]'),
+    anchorsTotal:      q('a'),
+    listItems:         q('li'),
+    dataAnonPerson:    q('[data-anonymize="person-name"]'),
+    dataAnonHeadline:  q('[data-anonymize="headline"]'),
+    entityLockups:     q('.artdeco-entity-lockup, [class*="entity-lockup"]'),
+    resultsContainer:  q('#search-results-container'),
+    iframes:           q('iframe'),
+    firstRowHtml:      firstRow ? String(firstRow.outerHTML || firstRow.innerHTML || '').slice(0, 2200) : null,
+    bodySnippet:       (document.body?.innerText ?? '').replace(/\s+/g, ' ').slice(0, 400),
+  }
 }
 
 // Extrae profile cards del DOM en la página de search results.
