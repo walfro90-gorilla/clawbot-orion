@@ -619,6 +619,7 @@ async function executeCommand(commandId, action, payload) {
     // navegar al URL devuelto + re-dispatch (1 sola vez para evitar loops)
     if (result?.status === 'needs_redirect' && result?.redirectUrl) {
       const redirectUrl = result.redirectUrl
+      const resolvedIn = result.resolvedInUrl  // v7-C: /in/ resuelto de un lead SalesNav (persistir)
       console.log(`[Orion] needs_redirect detected. Original btnHref: ${result.btnHref}`)
       console.log(`[Orion] Navegando a redirect: ${redirectUrl}`)
       try {
@@ -635,7 +636,7 @@ async function executeCommand(commandId, action, payload) {
         console.log(`[Orion] Tab response post-redirect:`, result)
         // Pasar el btnHref + post-nav URL al result para debug
         if (result && typeof result === 'object') {
-          result._debugRedirect = { btnHref: redirectUrl, postNavUrl: postNavTab.url }
+          result._debugRedirect = { btnHref: redirectUrl, postNavUrl: postNavTab.url, resolvedInUrl: resolvedIn }
         }
       } catch (err) {
         console.error(`[Orion] Redirect retry failed: ${err.message}`)

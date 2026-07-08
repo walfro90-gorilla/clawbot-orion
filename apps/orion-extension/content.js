@@ -2045,8 +2045,16 @@ async function sendInviteSalesNav(payload = {}) {
   }
 
   if (inUrl) {
-    return { ok: true, action: 'send_invite', status: 'resolve_public_profile',
-      resolvedProfileUrl: inUrl, currentUrl: location.href }
+    // v7-C: resolve + invite EN UN SOLO COMANDO. Redirigimos al SPA route de invite del perfil
+    // PÚBLICO (/preload/custom-invite/, el path free confiable) → background re-navega + re-
+    // despacha → corre el sendInvite free en /in/ (invite REAL, sin el muro de email de SalesNav).
+    // `resolvedInUrl` viaja para que el bridge persista linkedin_url=/in/ (así el FU funciona).
+    // Antes (v7-A) esto gastaba 2 slots de gap (resolve, luego invite); ahora 1 solo.
+    const vanity = (inUrl.match(/\/in\/([^/?]+)/) || [])[1]
+    const redirectUrl = vanity
+      ? `https://www.linkedin.com/preload/custom-invite/?vanityName=${vanity}`
+      : inUrl
+    return { ok: true, action: 'send_invite', status: 'needs_redirect', redirectUrl, resolvedInUrl: inUrl, currentUrl: location.href }
   }
 
   // Sin /in/ → NO mentir "sent"; dump para afinar de dónde sacar el perfil público.
@@ -2069,9 +2077,11 @@ async function sendInvite(payload = {}) {
   const { profileUrl, message, leadName, dryRun } = payload
   console.log(`[Orion content] sendInvite: profile=${profileUrl}, dryRun=${dryRun}, currentUrl=${location.href}`)
 
-  // ── Fase 2b v4 (SalesNav): lead Pro con URL /sales/lead/<token>. Invita desde la página de
-  // lead (el "Conectar" vive en el menú "…"). El path free (/in/) queda 100% intacto. ──
-  if (profileUrl?.includes('/sales/lead/') || /\/sales\/lead\//.test(location.pathname)) {
+  // ── Fase 2b/v7 (SalesNav): lead Pro con URL /sales/lead/<token>. Resolvemos su /in/ público y
+  // redirigimos al SPA route de invite (v7-C). CHEQUEA location.pathname (NO el payload): tras el
+  // redirect la location ya es /preload/custom-invite/ o /in/ → NO re-entra aquí → corre el path
+  // free normal. El path free queda 100% intacto. ──
+  if (/\/sales\/lead\//.test(location.pathname)) {
     return await sendInviteSalesNav(payload)
   }
 

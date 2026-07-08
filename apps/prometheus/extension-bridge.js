@@ -1482,10 +1482,13 @@ async function ingestSendInvite(commandId, result) {
   }
 
   // Actualizar lead: status='invite_sent', sent_at=now()
-  await supabase.from('leads').update({
-    status:  'invite_sent',
-    sent_at: new Date().toISOString(),
-  }).eq('id', leadId)
+  // v7-C: si el invite salió redirigiendo un lead SalesNav a su /in/ público (background lo pasa
+  // en _debugRedirect.resolvedInUrl), persistimos linkedin_url=/in/ → el FU/auto-reply luego
+  // funcionan (antes quedaba /sales/lead/ y el FU entraba en loop).
+  const updatePayload = { status: 'invite_sent', sent_at: new Date().toISOString() }
+  const resolvedIn = result?._debugRedirect?.resolvedInUrl
+  if (resolvedIn && /linkedin\.com\/in\//.test(resolvedIn)) updatePayload.linkedin_url = resolvedIn
+  await supabase.from('leads').update(updatePayload).eq('id', leadId)
 
   // Incrementar daily_activity (CDMX date-aligned vía RPC)
   // RPC error capture (2026-05-29 fix): visibilidad si counter silenciosamente falla.
