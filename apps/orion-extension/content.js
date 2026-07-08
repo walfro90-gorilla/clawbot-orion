@@ -2004,18 +2004,98 @@ function salesNavInvitePageProbe() {
   }
 }
 
+// Fase 2b v4 — invita desde la página de lead SalesNav. El "Conectar" vive en el menú "…"
+// (aria "Abrir el menú de exceso de acciones"). Flujo: dismiss popups → abrir "…" → click
+// "Conectar" → modal → "Enviar" (sin nota). SELECTORES ESTRICTOS + dump-y-aborta en cada
+// fallo: NUNCA clickea algo que no sea Conectar/Enviar → cero mis-clicks en cuenta real.
+async function sendInviteSalesNav(payload = {}) {
+  const leadName = payload.leadName || ''
+  console.log(`[Orion content] sendInviteSalesNav: ${leadName} url=${location.href}`)
+  if (payload.dryRun) return { ok: true, action: 'send_invite', status: 'dry_run', path: 'salesnav' }
+
+  await waitForSelector(['button[aria-label*="exceso de acciones"]', 'button[aria-label*="overflow"]', 'main'], 12000)
+  await sleep(randInt(1800, 2800))
+
+  const norm = el => (((el.textContent || '') + ' ' + (el.getAttribute('aria-label') || '')).replace(/\s+/g, ' ').trim())
+
+  // Pre-check: ya conectado / invitación pendiente → regla de negocio (no reintentar como fallo).
+  const bodyLc = (document.body?.innerText || '').toLowerCase()
+  if (/pendiente|invitaci[óo]n enviada|invitation pending|1.?(er|st).?grado|1st degree|es tu conexi/.test(bodyLc)) {
+    return { ok: true, action: 'send_invite', status: 'error', error: 'invite_still_pending', currentUrl: location.href }
+  }
+
+  // Dismiss popups/spotlights que tapan las acciones.
+  for (const b of Array.from(document.querySelectorAll('button'))) {
+    if (b.offsetParent === null) continue
+    if (/descartar.*(spotlight|emergente)|dismiss.*(spotlight|popup)/i.test(norm(b))) {
+      try { b.click() } catch {}
+      await sleep(250)
+    }
+  }
+
+  const CONNECT_RE = /^conectar$|^connect$|\bconectar\b|\bconnect\b/i
+  const findConnect = () => Array.from(document.querySelectorAll('button, [role="menuitem"], [role="button"], .artdeco-dropdown__item, li[role="menuitem"]'))
+    .find(el => el.offsetParent !== null && CONNECT_RE.test(norm(el)) && !/desconectar|disconnect/i.test(norm(el)))
+
+  let connectEl = findConnect()
+  if (!connectEl) {
+    const overflow = Array.from(document.querySelectorAll('button'))
+      .find(b => b.offsetParent !== null && /exceso de acciones|overflow|more actions|más acciones/i.test(b.getAttribute('aria-label') || ''))
+    if (!overflow) {
+      return { ok: false, action: 'send_invite', status: 'error', error: 'salesnav_overflow_not_found',
+        currentUrl: location.href, debugSample: salesNavInvitePageProbe() }
+    }
+    await humanClick(overflow)
+    await sleep(randInt(900, 1500))
+    connectEl = findConnect()
+  }
+  if (!connectEl) {
+    return { ok: false, action: 'send_invite', status: 'error', error: 'salesnav_connect_item_not_found',
+      currentUrl: location.href, debugSample: salesNavMenuProbe() }
+  }
+
+  await humanClick(connectEl)
+  await sleep(randInt(1300, 2200))
+
+  // Modal de invitación → Enviar SIN nota (o envío directo si no hay modal).
+  const SEND_RE = /^enviar$|^send$|^enviar (ahora|invitaci[óo]n)$|^send (now|invitation)$|send without a note/i
+  const sendBtn = Array.from(document.querySelectorAll('button, [role="button"]'))
+    .find(el => el.offsetParent !== null && SEND_RE.test(norm(el)) && !/mensaje|inmail|message|nota|note/i.test(norm(el)))
+  if (sendBtn) {
+    await humanClick(sendBtn)
+    await sleep(randInt(1000, 1800))
+    return { ok: true, action: 'send_invite', status: 'sent', path: 'salesnav_overflow_connect', withNote: false }
+  }
+
+  // Sin botón enviar visible → ¿se envió directo? verificar señal de éxito.
+  await sleep(1200)
+  const after = (document.body?.innerText || '').toLowerCase()
+  if (/invitaci[óo]n enviada|pendiente|invitation sent|pending/.test(after)) {
+    return { ok: true, action: 'send_invite', status: 'sent', path: 'salesnav_connect_direct', withNote: false }
+  }
+  return { ok: false, action: 'send_invite', status: 'error', error: 'salesnav_send_button_not_found',
+    currentUrl: location.href, debugSample: salesNavInvitePageProbe() }
+}
+
+// Dump del dropdown "…" abierto (para afinar el item "Conectar" si el selector falla).
+function salesNavMenuProbe() {
+  const items = Array.from(document.querySelectorAll('[role="menuitem"], .artdeco-dropdown__item, [role="menu"] button, [role="menu"] li, ul li'))
+    .filter(el => el.offsetParent !== null)
+    .map(el => ({ txt: (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 45), aria: (el.getAttribute('aria-label') || '').slice(0, 50), dcn: el.getAttribute('data-control-name') || '' }))
+    .filter(i => i.txt || i.aria).slice(0, 30)
+  return { url: location.href.slice(0, 120),
+    dropdownsOpen: document.querySelectorAll('.artdeco-dropdown__content--is-open, [role="menu"]').length,
+    menuItems: items, bodySnippet: (document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 250) }
+}
+
 async function sendInvite(payload = {}) {
   const { profileUrl, message, leadName, dryRun } = payload
   console.log(`[Orion content] sendInvite: profile=${profileUrl}, dryRun=${dryRun}, currentUrl=${location.href}`)
 
-  // ── Fase 2b (SalesNav): lead Pro con URL /sales/lead/<token> (SalesNav no da /in/). ──
-  // background ya navegó a la página del lead. Por ahora SOLO probamos el DOM (read-only, sin
-  // clickear) para localizar el "Conectar" y construir el flujo real en v4. Devuelve error →
-  // el lead sigue 'scraped' (no se falsea el avance). El path free (/in/) queda intacto.
+  // ── Fase 2b v4 (SalesNav): lead Pro con URL /sales/lead/<token>. Invita desde la página de
+  // lead (el "Conectar" vive en el menú "…"). El path free (/in/) queda 100% intacto. ──
   if (profileUrl?.includes('/sales/lead/') || /\/sales\/lead\//.test(location.pathname)) {
-    await sleep(3000)
-    return { ok: false, action: 'send_invite', status: 'error', error: 'salesnav_invite_probe',
-      currentUrl: location.href, debugSample: salesNavInvitePageProbe() }
+    return await sendInviteSalesNav(payload)
   }
 
   // ── PATH A: SPA route /preload/custom-invite/ — modal abre AUTO al cargar ──
