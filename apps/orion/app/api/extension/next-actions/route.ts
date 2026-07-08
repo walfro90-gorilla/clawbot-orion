@@ -139,6 +139,18 @@ export async function GET(req: NextRequest) {
   const future = candidates.filter(c => c.at > now).sort((a, b) => a.at - b.at)
   const next_any = future[0] ?? null
 
+  // Roster COMPLETO de agentes (NO filtrado a futuro) — el popup lo pinta SIEMPRE como fila de
+  // agentes. Cada uno: at (próxima corrida, ts o null) + note/count. El popup deriva el estado
+  // (ahora / en Xmin / N pendientes / idle). Esto arregla la "fila FIFO" que salía vacía porque
+  // sorted_upcoming solo traía las acciones futuras (0-1 casi siempre).
+  const roster = [
+    { key: "inbox_check",   icon: "📥", label: "Inbox",        at: nextInbox },
+    { key: "search",        icon: "🔍", label: "Búsqueda",     at: nextSearch },
+    { key: "invites_batch", icon: "📨", label: "Invitaciones", at: nextBatch },
+    { key: "fu_due",        icon: "📤", label: "Follow-ups",   at: nextFuDue, note: nextFuLead ?? null, count: fuDueNow },
+    { key: "auto_reply",    icon: "💬", label: "Auto-reply",   at: null, count: pendingReplyCount },
+  ]
+
   return NextResponse.json({
     account: { label: account.label },
     now: now,
@@ -152,5 +164,6 @@ export async function GET(req: NextRequest) {
     fu_due_now: fuDueNow,
     errors_recent: errorsRecent,
     sorted_upcoming: future.slice(0, 4),
+    roster,
   }, { headers: CORS })
 }

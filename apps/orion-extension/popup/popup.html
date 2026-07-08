@@ -217,24 +217,25 @@
     .na-badge.active-fu    { background: rgba(6,182,212,0.12);  border-color: rgba(6,182,212,0.45);  color: #22d3ee; }
     .na-badge.active-fail  { background: rgba(239,68,68,0.15);  border-color: rgba(239,68,68,0.5);   color: #f87171; }
     .na-badge.ok-fail      { background: rgba(34,197,94,0.1);   border-color: rgba(34,197,94,0.35);  color: #4ade80; }
-    .na-primary {
-      display: flex; align-items: center; gap: 8px; padding: 8px;
+    /* v0.9.24 — roster de agentes IA (SIEMPRE poblado: Inbox/Búsqueda/Invitaciones/FU/Auto-reply) */
+    .na-roster { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 3px; }
+    .na-agent {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 8px; border-radius: 6px;
+      background: #0b1220; border: 1px solid #1e293b;
+    }
+    .na-agent .ag-icon { font-size: 14px; width: 18px; text-align: center; flex-shrink: 0; }
+    .na-agent .ag-label { flex: 1; font-size: 12px; color: #cbd5e1; }
+    .na-agent .ag-status { font-size: 11px; font-family: monospace; color: #64748b; flex-shrink: 0; max-width: 155px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .na-agent .ag-status.st-now  { color: #22d3ee; font-weight: 600; }
+    .na-agent .ag-status.st-warn { color: #fbbf24; font-weight: 600; }
+    .na-agent .ag-status.st-idle { color: #4b5563; }
+    .na-agent.next-up {
       background: linear-gradient(135deg, #1e293b, #0f172a);
-      border: 1px solid #334155; border-radius: 6px; margin-bottom: 6px;
+      border-color: #4f46e5; box-shadow: 0 0 0 1px rgba(79,70,229,0.25);
     }
-    .na-primary .na-icon { font-size: 18px; }
-    .na-primary .na-text { flex: 1; }
-    .na-primary .na-label { font-size: 12px; color: #e5e7eb; font-weight: 600; }
-    .na-primary .na-countdown { font-size: 11px; color: #06b6d4; font-family: monospace; }
-    .na-list { list-style: none; padding: 0; margin: 6px 0 0 0; display: flex; flex-direction: column; gap: 4px; }
-    .na-list li {
-      display: flex; justify-content: space-between; align-items: center; gap: 8px;
-      font-size: 11px; padding: 5px 8px; color: #cbd5e1;
-      background: #0b1220; border: 1px solid #1e293b; border-radius: 5px;
-    }
-    .na-list li .na-li-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .na-list li .when { color: #64748b; font-family: monospace; font-size: 10px; flex-shrink: 0; }
-    .na-list li.na-empty { justify-content: center; background: transparent; border: none; color: #6b7280; font-size: 10px; }
+    .na-agent.next-up .ag-label { color: #e5e7eb; font-weight: 600; }
+    .na-agent.next-up .ag-status { color: #a5b4fc; }
     .force-tick-btn {
       width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #4f46e5;
       background: #4f46e520; color: #a5b4fc; font-size: 11px; font-weight: 600;
@@ -248,7 +249,7 @@
   <!-- Header con logo + status + versión -->
   <div class="header">
     <span class="logo">Orion Sync</span>
-    <span class="version" id="version">v0.5.5</span>
+    <span class="version" id="version">—</span>
   </div>
 
   <div class="status-row">
@@ -294,21 +295,14 @@
 
   <!-- v0.7.7 — Next Actions panel -->
   <div class="next-actions" id="next-actions" style="display: none;">
-    <h4>🎯 Próximas acciones</h4>
+    <h4>🤖 Agentes IA</h4>
     <div class="na-counters" id="na-counters">
       <span class="na-badge" id="nb-reply" title="Mensajes entrantes por contestar">💬 <b id="nb-reply-n">0</b></span>
       <span class="na-badge" id="nb-fu" title="Seguimientos listos para enviar">📤 <b id="nb-fu-n">0</b></span>
       <span class="na-badge" id="nb-fail" title="Fallas reales en las últimas 3 h">⚠️ <b id="nb-fail-n">0</b></span>
     </div>
-    <div class="na-primary" id="na-primary">
-      <span class="na-icon" id="na-primary-icon">⏳</span>
-      <div class="na-text">
-        <div class="na-label" id="na-primary-label">—</div>
-        <div class="na-countdown" id="na-primary-countdown">—</div>
-      </div>
-    </div>
-    <ul class="na-list" id="na-list"></ul>
-    <button class="force-tick-btn" id="force-tick-btn" type="button">⚡ Forzar inbox check ahora</button>
+    <ul class="na-roster" id="na-roster"></ul>
+    <button class="force-tick-btn" id="force-tick-btn" type="button">⚡ Forzar inbox check</button>
   </div>
 
   <!-- v0.6.46 — Active process glowing badge (visible mientras hay cmd en flight) -->
@@ -400,11 +394,6 @@
     <button id="connect-btn">Conectar</button>
     <button id="disconnect-btn" class="secondary" style="margin-top: 6px; display: none;">Desconectar</button>
   </details>
-
-  <p class="info" style="margin-top: 12px;">
-    Mantén Chrome abierto en horario laboral. Con <code>chrome://settings/system</code> →
-    "Continuar en segundo plano", funciona aunque cierres la ventana.
-  </p>
 
   <script src="popup.js"></script>
 </body>

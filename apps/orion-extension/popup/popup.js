@@ -253,10 +253,7 @@ function renderActiveProcess(activeCommand) {
 
 // ── v0.7.7 — Next Actions panel ────────────────────────────────────────────
 const $nextActions = document.getElementById('next-actions')
-const $naPrimaryIcon = document.getElementById('na-primary-icon')
-const $naPrimaryLabel = document.getElementById('na-primary-label')
-const $naPrimaryCountdown = document.getElementById('na-primary-countdown')
-const $naList = document.getElementById('na-list')
+const $naRoster = document.getElementById('na-roster')
 const $forceTickBtn = document.getElementById('force-tick-btn')
 
 // v0.9.16 — contadores de estado. Pinta un badge: número + clase de color según haya trabajo.
@@ -304,30 +301,35 @@ async function refreshNextActions() {
     setNaBadge('nb-fu', d.fu_due_now ?? 0, 'active-fu')
     setNaBadge('nb-fail', d.errors_recent ?? 0, 'active-fail', 'ok-fail')
 
-    if (d.next_any) {
-      const icon = d.next_any.label?.split(' ')[0] ?? '⏳'
-      const labelText = d.next_any.label?.split(' ').slice(1).join(' ') ?? d.next_any.type
-      $naPrimaryIcon.textContent = icon
-      $naPrimaryLabel.textContent = labelText
-      $naPrimaryCountdown.textContent = `${fmtCountdown(d.next_any.at - d.now)} (${fmtTime(d.next_any.at)})`
-    } else {
-      $naPrimaryIcon.textContent = '✅'
-      $naPrimaryLabel.textContent = 'Sin acciones programadas'
-      $naPrimaryCountdown.textContent = '—'
-    }
-    // Cola FIFO de agentes (lo que viene después del próximo, ya resaltado arriba)
-    $naList.innerHTML = ''
-    const queue = (d.sorted_upcoming ?? []).slice(1, 4)
-    for (const upcoming of queue) {
-      const li = document.createElement('li')
-      li.innerHTML = `<span class="na-li-label">${upcoming.label}</span><span class="when">${fmtCountdown(upcoming.at - d.now)}</span>`
-      $naList.appendChild(li)
-    }
-    if (!queue.length) {
-      const li = document.createElement('li')
-      li.className = 'na-empty'
-      li.textContent = 'sin más acciones en cola'
-      $naList.appendChild(li)
+    // Roster de agentes IA — SIEMPRE poblado (5 agentes). Resalta el próximo a correr.
+    // Reemplaza el viejo na-primary + na-list (que salía "sin más acciones en cola" porque
+    // sorted_upcoming solo traía las acciones futuras, 0-1 casi siempre).
+    if ($naRoster) {
+      $naRoster.innerHTML = ''
+      const roster = d.roster ?? []
+      let soonestKey = null, soonestAt = Infinity
+      for (const a of roster) {
+        if (a.at && a.at > d.now && a.at < soonestAt) { soonestAt = a.at; soonestKey = a.key }
+      }
+      for (const a of roster) {
+        let status = '—', cls = 'st-idle'
+        if (a.key === 'auto_reply') {
+          if ((a.count ?? 0) > 0) { status = `${a.count} por contestar`; cls = 'st-warn' }
+          else { status = 'al día'; cls = 'st-idle' }
+        } else if (a.at) {
+          const ms = a.at - d.now
+          if (ms <= 0) { status = 'ahora'; cls = 'st-now' }
+          else { status = fmtCountdown(ms); cls = '' }
+          if (a.key === 'fu_due' && a.note) status = `${status} → ${a.note}`
+        }
+        const li = document.createElement('li')
+        li.className = 'na-agent' + (a.key === soonestKey ? ' next-up' : '')
+        const ic = document.createElement('span'); ic.className = 'ag-icon'; ic.textContent = a.icon ?? '•'
+        const lb = document.createElement('span'); lb.className = 'ag-label'; lb.textContent = a.label ?? a.key
+        const st = document.createElement('span'); st.className = 'ag-status ' + cls; st.textContent = status
+        li.append(ic, lb, st)
+        $naRoster.appendChild(li)
+      }
     }
   } catch (err) {
     // silently hide on error
