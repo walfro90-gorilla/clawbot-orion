@@ -2009,71 +2009,48 @@ function salesNavInvitePageProbe() {
 // "Conectar" → modal → "Enviar" (sin nota). SELECTORES ESTRICTOS + dump-y-aborta en cada
 // fallo: NUNCA clickea algo que no sea Conectar/Enviar → cero mis-clicks en cuenta real.
 async function sendInviteSalesNav(payload = {}) {
-  const leadName = payload.leadName || ''
-  console.log(`[Orion content] sendInviteSalesNav: ${leadName} url=${location.href}`)
-  if (payload.dryRun) return { ok: true, action: 'send_invite', status: 'dry_run', path: 'salesnav' }
+  // v7: SalesNav "Conectar" pide EMAIL para leads 2do-grado fríos (gate anti-spam de SalesNav,
+  // empuja a InMail) → NO se puede conectar desde aquí sin el correo. En su lugar RESOLVEMOS el
+  // /in/ público del lead y lo devolvemos; el bridge actualiza leads.linkedin_url y el próximo
+  // tick invita desde el perfil PÚBLICO (flujo free, que SÍ funciona, sin muro de email) — y el
+  // FU/auto-reply también funcionan al tener /in/. SalesNav queda como fuente de BÚSQUEDA.
+  console.log(`[Orion content] sendInviteSalesNav(v7 resolve /in/): url=${location.href}`)
+  if (payload.dryRun) return { ok: true, action: 'send_invite', status: 'dry_run', path: 'salesnav_resolve' }
 
-  await waitForSelector(['button[aria-label*="exceso de acciones"]', 'button[aria-label*="overflow"]', 'main'], 12000)
-  await sleep(randInt(1800, 2800))
+  await waitForSelector(['a[href*="/in/"]', 'button[aria-label*="exceso de acciones"]', 'main'], 12000)
+  await sleep(randInt(1500, 2500))
 
-  const norm = el => (((el.textContent || '') + ' ' + (el.getAttribute('aria-label') || '')).replace(/\s+/g, ' ').trim())
-
-  // (v6: quitado el pre-check por texto de body — "pendiente" aparece SIEMPRE en el chrome de
-  // SalesNav (nav de invitaciones) → falso-positivo `invite_still_pending` en TODO lead. La
-  // señal correcta es la disponibilidad de "Conectar" en el menú "…": si el lead ya está
-  // pendiente/conectado, no habrá "Conectar" → cae en connect_item_not_found con dump del menú,
-  // donde sí veremos "Pendiente"/"Retirar invitación" para clasificarlo con precisión luego.)
-
-  // Dismiss popups/spotlights que tapan las acciones.
-  for (const b of Array.from(document.querySelectorAll('button'))) {
-    if (b.offsetParent === null) continue
-    if (/descartar.*(spotlight|emergente)|dismiss.*(spotlight|popup)/i.test(norm(b))) {
-      try { b.click() } catch {}
-      await sleep(250)
+  const grabIn = () => {
+    for (const a of Array.from(document.querySelectorAll('a[href*="/in/"]'))) {
+      const href = a.getAttribute('href') || ''
+      const full = href.startsWith('http') ? href : `https://www.linkedin.com${href}`
+      const u = full.split('?')[0].replace(/\/$/, '') + '/'
+      if (/linkedin\.com\/in\//.test(u)) return u
     }
+    return null
   }
 
-  const CONNECT_RE = /^conectar$|^connect$|\bconectar\b|\bconnect\b/i
-  const findConnect = () => Array.from(document.querySelectorAll('button, [role="menuitem"], [role="button"], .artdeco-dropdown__item, li[role="menuitem"]'))
-    .find(el => el.offsetParent !== null && CONNECT_RE.test(norm(el)) && !/desconectar|disconnect/i.test(norm(el)))
+  // 1) /in/ directo en la página del lead ("Ver perfil de LinkedIn").
+  let inUrl = grabIn()
 
-  let connectEl = findConnect()
-  if (!connectEl) {
+  // 2) si no está visible, abrir el menú "…" (ahí suele estar "Ver perfil de LinkedIn").
+  if (!inUrl) {
     const overflow = Array.from(document.querySelectorAll('button'))
       .find(b => b.offsetParent !== null && /exceso de acciones|overflow|more actions|más acciones/i.test(b.getAttribute('aria-label') || ''))
-    if (!overflow) {
-      return { ok: false, action: 'send_invite', status: 'error', error: 'salesnav_overflow_not_found',
-        currentUrl: location.href, debugSample: salesNavInvitePageProbe() }
+    if (overflow) {
+      await humanClick(overflow)
+      await sleep(randInt(900, 1500))
+      inUrl = grabIn()
     }
-    await humanClick(overflow)
-    await sleep(randInt(900, 1500))
-    connectEl = findConnect()
-  }
-  if (!connectEl) {
-    return { ok: false, action: 'send_invite', status: 'error', error: 'salesnav_connect_item_not_found',
-      currentUrl: location.href, debugSample: salesNavMenuProbe() }
   }
 
-  await humanClick(connectEl)
-  await sleep(randInt(1300, 2200))
-
-  // Modal de invitación → Enviar SIN nota (o envío directo si no hay modal).
-  const SEND_RE = /^enviar$|^send$|^enviar (ahora|invitaci[óo]n)$|^send (now|invitation)$|send without a note/i
-  const sendBtn = Array.from(document.querySelectorAll('button, [role="button"]'))
-    .find(el => el.offsetParent !== null && SEND_RE.test(norm(el)) && !/mensaje|inmail|message|nota|note/i.test(norm(el)))
-  if (sendBtn) {
-    await humanClick(sendBtn)
-    await sleep(randInt(1000, 1800))
-    return { ok: true, action: 'send_invite', status: 'sent', path: 'salesnav_overflow_connect', withNote: false }
+  if (inUrl) {
+    return { ok: true, action: 'send_invite', status: 'resolve_public_profile',
+      resolvedProfileUrl: inUrl, currentUrl: location.href }
   }
 
-  // Sin botón enviar visible → ¿se envió directo? verificar señal de éxito.
-  await sleep(1200)
-  const after = (document.body?.innerText || '').toLowerCase()
-  if (/invitaci[óo]n enviada|pendiente|invitation sent|pending/.test(after)) {
-    return { ok: true, action: 'send_invite', status: 'sent', path: 'salesnav_connect_direct', withNote: false }
-  }
-  return { ok: false, action: 'send_invite', status: 'error', error: 'salesnav_send_button_not_found',
+  // Sin /in/ → NO mentir "sent"; dump para afinar de dónde sacar el perfil público.
+  return { ok: false, action: 'send_invite', status: 'error', error: 'salesnav_public_profile_not_found',
     currentUrl: location.href, debugSample: salesNavInvitePageProbe() }
 }
 

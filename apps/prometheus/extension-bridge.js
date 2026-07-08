@@ -513,6 +513,25 @@ async function handleCommandResult(msg) {
       console.error(`[bridge] ingest send_invite failed:`, err.message)
     }
   }
+  // v7 SalesNav: la extensión resolvió el /in/ público del lead (SalesNav pide email a 2do-grado
+  // frío → no se conecta desde ahí). Persistimos linkedin_url=/in/ y dejamos el lead 'scraped':
+  // el próximo tick lo invita desde el perfil PÚBLICO (flujo free, sin muro de email) y el FU
+  // luego funciona. Des-pausamos por si estaba pausado por la mitigación del loop de FU.
+  if (!isError && action === 'send_invite' && result?.status === 'resolve_public_profile' && result?.resolvedProfileUrl) {
+    try {
+      const { data: c } = await supabase.from('extension_commands')
+        .select('related_lead_id, payload').eq('id', commandId).single()
+      const lid = c?.related_lead_id ?? c?.payload?.leadId
+      if (lid && /linkedin\.com\/in\//.test(result.resolvedProfileUrl)) {
+        await supabase.from('leads')
+          .update({ linkedin_url: result.resolvedProfileUrl, automation_paused: false })
+          .eq('id', lid)
+        console.log(`[bridge] ✅ SalesNav lead ${lid.slice(0,8)} → /in/ resuelto (${result.resolvedProfileUrl}); re-invita free next tick`)
+      }
+    } catch (err) {
+      console.error(`[bridge] resolve_public_profile persist failed:`, err.message)
+    }
+  }
   // send_followup ingest — actualiza lead.last_followup_at + daily_activity
   // v0.6.45: 'already_responded' = pre-send guard detectó que ya respondimos
   // v0.7.0: 'sent_confirmed' = FSM confirmó por DOM fingerprint que el msg está visible
