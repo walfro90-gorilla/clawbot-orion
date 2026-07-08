@@ -2,9 +2,12 @@
 
 > Log vivo del monitoreo. Cada entrada: hallazgo → acción/estado. Lo mantiene Orion (Claude) en modo monitor.
 
-## Estado actual (2026-07-06)
-- **Prod en `63f5bb5`** — laptop = GitHub = prod, deploy verificado (health-check de `deploy-orion`). Sesión 06-jul: loop NFD cerrado, invite-agent (reaper + limit 100), IA usa persona/contexto/tono, **Oficina IA** (`/dashboard/office`), guard de versión de extensión, seatbelt `node --test`, mitigación de egress. Detalle en "Resuelto" abajo; **pendientes en "Backlog"**.
-- **Extensión**: `0.9.15` en las 3 cuentas (Wal/Josh/Café) — check_connections (accept-detection positiva) + disconnect Super DEAD.
+## Estado actual (2026-07-08)
+- **Prod en `0851453`** — laptop = GitHub = prod. Sesión 07/08-jul: popup FIFO+badges, contador replies preciso, **warmup cliff arreglado** (Wal 5→12), **búsqueda dual Free/SalesNav** (Fase 1+2 desplegadas; invite SalesNav v4 en test). Detalle en "Resuelto"; **pendientes en "Backlog"**.
+- **Extensión**: `0.9.20` — popup FIFO/badges + búsqueda SalesNav (scraper + invite v4). Las 3 cuentas deben recargar a 0.9.20.
+- **Warmup**: Wal + Café = `warming` (cap 12/8); Josh = `hot` (25). El admin ya NO resetea `warmup_started_at` al promover (footgun cerrado).
+- **search_mode**: los 3 en `free` (SalesNav se activa por cuenta cuando el invite v4 quede verificado). Josh + Café tienen SalesNav; Wal free.
+- (histórico 06-jul) prod `63f5bb5`, ext 0.9.15: loop NFD cerrado, invite-agent (reaper+limit100), IA con persona, Oficina IA, guard de versión ext, seatbelt tests, egress.
 - **Backend en `74e7c2a`+** (prod `/root/clawbot`): P1 `OLD_ACCEPT_DAYS` desactivado (`extension-bridge`), reaper de `replied` rancios (`prometheus-scheduler`), alert offline per-cuenta.
 - **✅ Barrido de salud 04-jul**: 4 agentes (search/invite/auto-reply/follow-up) × 3 cuentas CERTIFICADO SANO, 0 bloqueantes.
 - **Horarios**: Wal 8-22h/7d (Transporte+Tech); Josh/Café 6-21h/7d. El alert `ext_offline_business_hours` ahora respeta el schedule real por cuenta.
@@ -13,6 +16,13 @@
 - **✅ Josh "pausa manual" recurrente = era el CIRCUIT BREAKER** (no un humano — el operador lo confirmó). El spike de `typing_complete_timeout` (bug shadow DOM) tripeaba el account circuit breaker (Capa 2, `extension-dispatch.js`) → auto-pausa 8× (alertas `error_spike` 29-jun→01-jul). El label `extension_paused_by_user` del gate es genérico y engañó. **Fix**: (1) raíz = shadow DOM 0.9.8; (2) defensa = excluir `micro_phase_*_timeout` de account-fault en el breaker. Ver [`followups-flujo.md §7`](followups-flujo.md).
 
 ## ✅ Resuelto
+
+### 🚀 Sesión 07/08-jul-2026 — popup FIFO · contador replies · warmup cliff · búsqueda dual SalesNav
+- **Popup tarjeta mejorada** (ext `0.9.16`): cola FIFO de agentes IA + 3 badges de estado (💬 replies por contestar · 📤 FU listos · ⚠️ fallas 3h). API `next-actions` agrega `fu_due_now`/`errors_recent` (clasificados con `classifyCommandError`).
+- **Contador `pending_replies` preciso** (`a0d8216`): contaba `status='replied'` crudo (mostraba 20; 19 ya contestados) — 'replied' es bucket semi-persistente (el auto-reply usa `kind:'reply'` que no cambia status). Ahora compara último inbound (≈`replied_at`) vs último outbound → cuenta solo lo genuinamente sin responder (Josh: 0). Investigación confirmó: auto-reply SANO, no había backlog.
+- **Warmup cliff cerrado**: `effectiveWarmupCap` (rampa por edad) → `null` al día 30; una cuenta madura en `cold` colapsa a cap 5. **Wal** (47d) estrangulada a 5/día pese a 19 leads válidos → promovida a `warming` (cap **5→12**, verificado: reanudó invites). Café defusado (evita caer 8→5 el ~11-jul). Josh (hot 25) no era cap sino **sequía de búsqueda**. Footgun del admin cerrado (`7061b35`): promover `warmup_status` reseteaba `warmup_started_at` → tankeaba cuentas maduras a cap 3; ya solo se estampa una vez.
+- **Búsqueda dual Free/SalesNav** (`linkedin_accounts.search_mode`, toggle por cuenta): Josh/Café pagan SalesNav pero el bot buscaba free → suscripción desperdiciada + límite comercial. **Fase 1** flag+andamiaje (`6eeadca`). **Fase 2** scraper SalesNav (v0.9.19, verificado live: scrapea ejecutivos reales) + **invite v4** desde la página de lead (menú "…"→Conectar, v0.9.20 `0851453`, en test). SalesNav esconde `/in/` → guarda `/sales/lead/<token>` e invita desde ahí. Anti-ban: cap de invites IGUAL para todas (SalesNav solo alimenta supply). Protocolo de test + cleanup en memoria `salesnav-search-jul2026`.
+- **Footgun `npm run types`** (`b915e56`): `supabase gen types > file` clobbeaba el archivo con el JSON de error al fallar (sin `supabase login`). Ahora escribe a tmp y solo hace `mv` si tuvo éxito.
 
 ### 🚀 Sesión 06-jul-2026 — anti-loop NFD · invite-agent · IA con persona · Oficina IA · resiliencia + egress
 - **Loop falso-accept por HOMÓNIMO cerrado** (`7e3873f`): `check_connections` (ext 0.9.15) scrapea ~400-940 conexiones → match por nombre exacto colisionaba homónimos → 2do-grado marcado `connected` → FU → modal InMail → re-flag → **loop** (pico 05-jul 41 hits/día). Fix en 5 puntos (isConnection sin override por nombre, check_inbox guarded, not_messageable unifica al flag canónico, dispatch guard en lane FU + auto-reply). Verificado adversarialmente (2 workflows). Limpieza: 46 leads NFD rancios >21d → dead.

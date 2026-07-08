@@ -69,12 +69,14 @@ Tres caídas de producción en un día (DB Supabase wedged por inanición de com
 | 2026-07-04 | **Watchdog out-of-band** (`watchdog.js`, reemplaza `heartbeat-check.js`): cada 2 min 24/7, alerta por webhook (nunca vía la DB), dead-man's-switch (Healthchecks.io) para box-down, `pm2 jlist` para crash-loop. Base: `lib/notify-ops.js`. |
 | 2026-07-04 | **Resiliencia del run-loop del scheduler**: cancelación real de ticks (AbortSignal de tick en `lib/supabase.js` → mata los "zombie ticks" que martillaban la DB), jitter de boot, backoff exponencial ante fallos, `unhandledRejection` ya no hace crash-loop. |
 | 2026-07-04 | **Detección de desconexión → Super DEAD** (`leads.disconnected_at`): cuando un contacto que estuvo conectado nos elimina, el lead pasa a DEAD irreversible en vez de revertir a `invite_sent` (evita re-invitar a quien nos eliminó = riesgo anti-ban/denuncia). Gate fail-closed en todas las rutas de envío. |
+| 2026-07-07 | **Warmup cliff + footgun del admin**: `effectiveWarmupCap` (rampa por edad) devuelve `null` al día 30 → una cuenta madura aún en `cold` colapsa a cap 5 (Wal 47d estrangulada 5/día). Fix operativo (promover `warmup_status`→`warming`, cap 5→12) + quitar el reset de `warmup_started_at` en `accounts/page.tsx` (promover desde el admin ya NO reinicia la rampa a día-0 = cap 3). |
+| 2026-07-07/08 | **Búsqueda dual Free / Sales Navigator** (`linkedin_accounts.search_mode`, toggle por cuenta): las cuentas Pro prospectan por `/sales/search/people` (pool sin el límite comercial de búsqueda del free) en vez de `/search/results/people/`. **Fase 1** flag + andamiaje scheduler (`6eeadca`). **Fase 2** scraper SalesNav en `content.js` (nombre en `[data-anonymize=person-name]`, sin `/in/` → guarda `/sales/lead/<token>`, v0.9.19) + invite desde la página de lead vía menú "…"→Conectar (v0.9.20). Anti-ban: SalesNav **no** sube el cap de invites — solo alimenta el supply (mata la sequía de cuentas hot). |
 
 ---
 
 ## Estado de versiones (referencia rápida)
 
-- **Extensión Orion Sync**: `v0.9.1` (manifest declara `0.9.0`; el commit más reciente la marca `v0.9.1`).
+- **Extensión Orion Sync**: `v0.9.20` (manifest) — popup FIFO/badges + búsqueda dual Free/SalesNav (scraper + invite v4).
 - **Motor de follow-ups**: v0.8 (dinámico, `campaign_followups`).
 - **Orion**: Next 16.2.3 · React 19.
 - **Arquitectura**: Smart Hybrid (extensión + bridge WS). Playwright/Voyager = muerta.
