@@ -486,7 +486,11 @@ function substituteTemplate(template, lead, account) {
   if (!template) return null
   const first = (lead.full_name ?? '').split(/\s+/)[0]
   const fullName = lead.full_name ?? ''
-  const company = lead.profile_data?.currentCompany ?? lead.profile_data?.company ?? ''
+  // La ruta viva NO extrae la empresa (currentCompany ~siempre null: 0/298 en Josh) y el headline
+  // no la da de forma fiable (extraerla arriesga usar el CARGO como empresa, §7/§10). Sin dato →
+  // "tu empresa" (encaja en "aplica para tu empresa?", "crecimiento de tu empresa?", etc.) en vez
+  // de dejar {empresa}→"" que producía "para ?". || (no ??) para atrapar también string vacío.
+  const company = (lead.profile_data?.currentCompany || lead.profile_data?.company || '').trim() || 'tu empresa'
   const headline = lead.profile_data?.headline ?? ''
   const calUrl = account?.cal_com_url ?? ''
 
