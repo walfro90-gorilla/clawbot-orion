@@ -183,6 +183,14 @@ export function CampaignEditForm({ action, accountLabels, children }: Props) {
   return (
     <form
       ref={formRef}
+      // noValidate: el form vive dentro de tabs con display:none (CampaignTabs). Si un campo
+      // con min/max/required queda fuera de rango en una tab INACTIVA (p.ej. min_batch_gap_min=0
+      // vs min=30 en la tab General), la validación nativa del submit intenta enfocar ese input
+      // oculto, no puede ("An invalid form control is not focusable") y ABORTA el submit en
+      // silencio → el botón "no hace nada" al editar desde otra tab. La validación real la hace
+      // el server action (devuelve {error}) + el modal de confirmación; los min/max quedan como
+      // hint visual. ponytail: sin esto, cualquier valor legado fuera de rango rompe el guardado.
+      noValidate
       onSubmit={(e) => { e.preventDefault(); openConfirm() }}
       onInput={scheduleDirtyCheck}
       onChange={scheduleDirtyCheck}
