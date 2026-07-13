@@ -27,7 +27,7 @@ import {
   dispatchPostSearch, dispatchCommentOnPost, checkPostCampaignActiveGates,
   getDailyCommentsToday, getEffectiveCommentCap,
 } from './lib/extension-dispatch.js'
-import { generateLinkedInMessage, generateLinkedInReply, personalizeFollowupMessage, hasLeftoverPlaceholder, qualifyPost, generatePostComment } from './lib/ai-message.js'
+import { generateLinkedInMessage, generateLinkedInReply, personalizeFollowupMessage, hasLeftoverPlaceholder, qualifyPost, generatePostComment, extractCompaniesFromHeadlines } from './lib/ai-message.js'
 import { generatePostCopy, generateDailyPost } from './lib/daily-publish.js'
 import { uploadGeneratedImage } from './lib/gemini-image.js'
 import { isSystemLinkedInAccount } from './lib/system-accounts.js'
@@ -1646,6 +1646,9 @@ async function runConnectivityHealthCheck(connectedIds) {
 // llamadas Gemini (qualify + comment) con timeout propio de 30s — capamos bajo
 // para no acercarnos al soft-timeout del tick (120s).
 const POST_QUALIFY_BATCH = parseInt(process.env.POST_QUALIFY_BATCH ?? '2')
+// Enriquecimiento de empresa (currentCompany) desde headline vía LLM, por tick. Lote pequeño:
+// max_tokens=300 en la ruta JSON → ~16 items caben; 10 es seguro contra truncación.
+const COMPANY_ENRICH_BATCH = parseInt(process.env.COMPANY_ENRICH_BATCH ?? '10')
 
 async function tryPostSearchForCampaign(postCampaign, account) {
   if (postCampaign.post_search_paused) {
@@ -1751,6 +1754,39 @@ async function tryQualifyPostOpportunities(postCampaign) {
     }).eq('id', opp.id)
   }
   return { qualified, disqualified, errored }
+}
+
+// (2026) Enriquece profile_data.currentCompany extrayendo la empresa del headline con el LLM.
+// Global (no requiere extensión conectada; solo headline + LLM). El centinela '' = "revisado, sin
+// empresa": sale del set de candidatos (query pide currentCompany IS NULL) Y ya renderiza como
+// "tu empresa" en substituteTemplate. Self-draining, idempotente. Corre en el scheduler (no en la
+// ingesta) para no bloquear el WS handler y poder reintentar en el próximo tick si el LLM falla.
+async function tryEnrichCompanies() {
+  const { data: leads } = await supabase
+    .from('leads')
+    .select('id, profile_data')
+    .filter('profile_data->>headline', 'not.is', null)         // headline presente
+    .filter('profile_data->>currentCompany', 'is', null)       // '' (centinela) NO es null → excluido
+    .limit(COMPANY_ENRICH_BATCH)
+  // Defensa: solo los que REALMENTE faltan empresa (por si el filtro JSON deja pasar algo)
+  const todo = (leads ?? []).filter(l => l.profile_data?.headline && l.profile_data?.currentCompany == null)
+  if (todo.length === 0) return { enriched: 0 }
+
+  const out = await extractCompaniesFromHeadlines(todo.map(l => ({ key: l.id, headline: l.profile_data.headline })))
+  if (out.error) return { error: out.error }   // reintenta próximo tick, sin escribir centinela
+
+  let withCompany = 0
+  for (const { key, company } of out) {
+    const lead = todo.find(l => l.id === key)
+    if (!lead) continue
+    // ponytail: read-modify-write del blob profile_data; leads recién scrapeados sin escritores
+    // concurrentes de este campo + ticks en serie (watchdog anti-solape) → sin lock.
+    const { error } = await supabase.from('leads')
+      .update({ profile_data: { ...lead.profile_data, currentCompany: company ?? '' } })
+      .eq('id', key)
+    if (!error && company) withCompany++
+  }
+  return { enriched: todo.length, withCompany }
 }
 
 // Despacha el comentario de UNA oportunidad aprobada por el humano (1 por tick).
@@ -2019,6 +2055,16 @@ async function tick() {
 
   // Health check (runs every tick, debounced 60min per account)
   await runConnectivityHealthCheck(connectedIds)
+
+  // Enriquecimiento de empresa (currentCompany desde headline) — global, ANTES del early-return
+  // para drenar el backlog aunque no haya extensión conectada. Barato: si no hay candidatos, 0 LLM.
+  try {
+    const compRes = await tryEnrichCompanies()
+    if (compRes.enriched) console.log(`[SCH-EXT] 🏢 companies: ${compRes.withCompany}/${compRes.enriched} enriquecidos`)
+    else if (compRes.error) console.warn(`[SCH-EXT] 🏢 company enrich: ${compRes.error} (reintenta)`)
+  } catch (err) {
+    console.error(`[SCH-EXT] tryEnrichCompanies threw:`, err.message)
+  }
 
   if (connectedIds.size === 0) {
     console.log(`[SCH-EXT] Nadie conectado — skip tick`)

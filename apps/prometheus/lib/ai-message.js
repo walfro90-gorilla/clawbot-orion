@@ -656,6 +656,59 @@ export async function qualifyPost(postText, serviceDescription, opts = {}) {
 }
 
 /**
+ * Extrae el nombre de la EMPRESA de una lista de headlines de LinkedIn, en UN solo call LLM (por lote).
+ * items = [{ key, headline }] → array [{ key, company: string|null }] en éxito, o { error } si el LLM falla.
+ * Gate anti-alucinación (reformulación de NO_INVENT_COMPANY_RULE a modo extracción): devuelve null si el
+ * headline no trae una empresa EXPLÍCITA y clara, y NUNCA usa el cargo/título como empresa. El caller
+ * escribe '' (centinela "revisado, sin empresa") cuando company=null; en { error } NO escribe → reintenta.
+ */
+export async function extractCompaniesFromHeadlines(items, opts = {}) {
+  const clean = (items ?? [])
+    .map((it, i) => ({ n: i + 1, key: it.key, h: String(it.headline ?? '').trim().slice(0, 200) }))
+    .filter(x => x.h)
+  if (clean.length === 0) return (items ?? []).map(it => ({ key: it.key, company: null }))
+
+  const systemPrompt = [
+    'Extraes el nombre de la EMPRESA a partir de headlines de LinkedIn. Devuelves SOLO JSON.',
+    '',
+    'REGLA CRÍTICA (anti-invención):',
+    '- Extrae la empresa SOLO si aparece EXPLÍCITA y CLARA en el headline.',
+    '- NUNCA inventes, adivines ni completes un nombre. Ante la duda → null.',
+    '- NUNCA uses el cargo/título/rol (ej. "Director de Ventas", "CEO", "Founder", "Gerente")',
+    '  como si fuera la empresa. Es un error grave.',
+    '- No incluyas el cargo en el nombre: de "Founder & CEO INCOMEDIA SRL" la empresa es',
+    '  "INCOMEDIA SRL", NO "Founder & CEO INCOMEDIA SRL".',
+    '- Si el headline es solo un cargo, una descripción, fechas o texto sin un nombre de',
+    '  empresa reconocible → null.',
+    '- Copia el nombre tal cual aparece; corrige una errata SOLO si es obvia.',
+    '',
+    'FORMATO: objeto JSON con la llave "r" = array. Un elemento por CADA headline recibido,',
+    'con su mismo número "k": {"k": <número>, "c": <string empresa | null>}.',
+    'Ejemplo: {"r":[{"k":1,"c":"INCOMEDIA SRL"},{"k":2,"c":null}]}',
+  ].join('\n')
+
+  const userPrompt = 'HEADLINES:\n' + clean.map(x => `${x.n}: ${x.h}`).join('\n')
+
+  const res = await callLLMJson(systemPrompt, userPrompt, { temperature: 0.2, ...opts })
+  if (res.error) return { error: res.error }
+
+  const rows = Array.isArray(res.data?.r) ? res.data.r : []
+  const byN = new Map()
+  for (const row of rows) {
+    const n = Number(row?.k)
+    if (!Number.isInteger(n)) continue
+    let c = row?.c == null ? null : String(row.c).trim()
+    // ponytail: gate de basura simple (largo + "debe tener letra") — descarta cargos-sueltos raros,
+    // fechas y vacíos; sube el techo de 60 si aparecen empresas legítimas más largas.
+    if (c && (c.length < 2 || c.length > 60 || !/[a-zA-ZÀ-ÿ]/.test(c))) c = null
+    byN.set(n, c || null)
+  }
+  // n presente en items pero ausente del output del LLM → null (se marcará como revisado con '')
+  const found = new Map(clean.map(x => [x.key, byN.get(x.n) ?? null]))
+  return (items ?? []).map(it => ({ key: it.key, company: found.has(it.key) ? found.get(it.key) : null }))
+}
+
+/**
  * Redacta un comentario PÚBLICO value-first para un post.
  * Devuelve { message } o { error }. NUNCA recibe ni usa el pitch_note (eso es privado).
  * Reusa callGemini → guard anti-placeholder + truncación + cierre garantizado.
