@@ -18,6 +18,11 @@
 
 ## ✅ Resuelto
 
+### 🏢 Empresa real en `{empresa}`: extracción del headline vía LLM (gate anti-alucinación)  [jul-2026]
+- **Problema**: `{empresa}` salía "tu empresa" siempre porque `currentCompany` es null en TODOS los leads (la extensión no scrapea empresa; el headline la trae sin estructura → regex inútil, por eso §7/§10 la había matado).
+- **Fix (commit `c1a7678`)**: `extractCompaniesFromHeadlines` (`lib/ai-message.js`, reusa `callLLMJson` por lote, gate estricto reformulado de `NO_INVENT_COMPANY_RULE`: devuelve null si el headline no trae empresa explícita, NUNCA usa el cargo como empresa). Pass `tryEnrichCompanies` (`scheduler-extension.js`, 1×/tick, global, antes del early-return) puebla `profile_data.currentCompany`. **Centinela `''`** = "revisado, sin empresa" (sale del set de candidatos Y ya renderiza como "tu empresa"). Self-draining, idempotente, sin migración. Script QA `scripts/backfill-company-from-headline.js --dry-run`.
+- **Resultado (drenado 812 leads)**: **416 con empresa real (51%)**, 396 → "tu empresa", **0 backlog**, y el check crítico **0 cargos escritos como empresa** (el riesgo catastrófico, prevenido). Dry-run validó el gate antes de escribir. El pass sigue enriqueciendo leads nuevos. Groq primario (Gemini 403 billing sigue pendiente, no afecta).
+
 ### 🚀 Sesión 07/08-jul-2026 — popup FIFO · contador replies · warmup cliff · búsqueda dual SalesNav
 - **Popup tarjeta mejorada** (ext `0.9.16`): cola FIFO de agentes IA + 3 badges de estado (💬 replies por contestar · 📤 FU listos · ⚠️ fallas 3h). API `next-actions` agrega `fu_due_now`/`errors_recent` (clasificados con `classifyCommandError`).
 - **Contador `pending_replies` preciso** (`a0d8216`): contaba `status='replied'` crudo (mostraba 20; 19 ya contestados) — 'replied' es bucket semi-persistente (el auto-reply usa `kind:'reply'` que no cambia status). Ahora compara último inbound (≈`replied_at`) vs último outbound → cuenta solo lo genuinamente sin responder (Josh: 0). Investigación confirmó: auto-reply SANO, no había backlog.
