@@ -17,6 +17,8 @@ interface FormState {
   tags: string
   applies_to_turns: number[]
   example_message: string
+  kind: string
+  campaign_id: string
 }
 
 const INITIAL: FormState = {
@@ -26,9 +28,11 @@ const INITIAL: FormState = {
   tags: "",
   applies_to_turns: [0, 1, 2, 3],
   example_message: "",
+  kind: "example",
+  campaign_id: "",
 }
 
-export function CerebroPlaybookForm() {
+export function CerebroPlaybookForm({ campaigns = [] }: { campaigns?: { id: string; name: string }[] }) {
   const router = useRouter()
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState<FormState>(INITIAL)
@@ -50,7 +54,7 @@ export function CerebroPlaybookForm() {
     const next: typeof errors = {}
     if (!form.title.trim()) next.title = "El título es obligatorio"
     if (!form.example_message.trim()) next.example_message = "El mensaje de ejemplo es obligatorio"
-    if (form.applies_to_turns.length === 0) next.applies_to_turns = "Selecciona al menos un turno"
+    if (form.kind !== "principle" && form.applies_to_turns.length === 0) next.applies_to_turns = "Selecciona al menos un turno"
     setErrors(next)
     return Object.keys(next).length === 0
   }
@@ -77,6 +81,8 @@ export function CerebroPlaybookForm() {
           tags,
           applies_to_turns: form.applies_to_turns,
           example_message: form.example_message.trim(),
+          kind: form.kind,
+          campaign_id: form.campaign_id || undefined,
         }),
       })
 
@@ -121,6 +127,35 @@ export function CerebroPlaybookForm() {
       </div>
 
       <form onSubmit={handleSubmit} className="space-y-4">
+        {/* Kind + scope */}
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs font-medium text-gray-400 mb-1">Tipo</label>
+            <select
+              value={form.kind}
+              onChange={e => setForm(f => ({ ...f, kind: e.target.value }))}
+              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="example">Ejemplo (que funcionó)</option>
+              <option value="objection">Manejo de objeción</option>
+              <option value="principle">Principio / metodología (siempre aplica)</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-400 mb-1">Ámbito</label>
+            <select
+              value={form.campaign_id}
+              onChange={e => setForm(f => ({ ...f, campaign_id: e.target.value }))}
+              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="">🌐 Global (todas las campañas)</option>
+              {campaigns.map(c => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
         {/* Title */}
         <div>
           <label className="block text-xs font-medium text-gray-400 mb-1">
@@ -179,7 +214,8 @@ export function CerebroPlaybookForm() {
           />
         </div>
 
-        {/* Applies to turns */}
+        {/* Applies to turns — no aplica a principios (siempre se inyectan) */}
+        {form.kind !== "principle" && (
         <div>
           <label className="block text-xs font-medium text-gray-400 mb-2">
             Aplica a turnos <span className="text-red-400">*</span>
@@ -205,6 +241,7 @@ export function CerebroPlaybookForm() {
           </div>
           {errors.applies_to_turns && <p className="text-red-400 text-xs mt-1">{errors.applies_to_turns}</p>}
         </div>
+        )}
 
         {/* Example message */}
         <div>

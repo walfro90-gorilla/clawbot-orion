@@ -44,6 +44,8 @@ export async function PATCH(
     applies_to_turns,
     is_active,
     outcome,
+    campaign_id,
+    kind,
   } = body as {
     title?: string
     description?: string
@@ -53,6 +55,12 @@ export async function PATCH(
     applies_to_turns?: number[]
     is_active?: boolean
     outcome?: string
+    campaign_id?: string | null
+    kind?: string
+  }
+
+  if (kind !== undefined && !["principle", "example", "objection"].includes(kind)) {
+    return NextResponse.json({ error: "kind must be principle|example|objection" }, { status: 400 })
   }
 
   type PlaybookUpdate = {
@@ -64,6 +72,8 @@ export async function PATCH(
     applies_to_turns?: number[]
     is_active?: boolean
     outcome?: string
+    campaign_id?: string | null
+    kind?: string
   }
   const patch: PlaybookUpdate = {}
   if (title !== undefined)            patch.title = title.trim()
@@ -74,6 +84,8 @@ export async function PATCH(
   if (applies_to_turns !== undefined) patch.applies_to_turns = applies_to_turns
   if (is_active !== undefined)        patch.is_active = is_active
   if (outcome !== undefined)          patch.outcome = outcome
+  if (campaign_id !== undefined)      patch.campaign_id = campaign_id?.trim() ? campaign_id : null
+  if (kind !== undefined)             patch.kind = kind
 
   if (Object.keys(patch).length === 0) {
     return NextResponse.json({ error: "No fields to update" }, { status: 400 })

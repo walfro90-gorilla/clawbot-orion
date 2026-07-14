@@ -10,6 +10,7 @@
 // Retorna { message } o { error }. NO toma decisiones de envío — solo gen.
 
 import { GoogleGenAI } from '@google/genai'
+import { supabase } from './supabase.js'
 
 const GEMINI_MODEL = 'gemini-2.5-flash'
 const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile'
@@ -180,12 +181,15 @@ export function campaignPersonaBlock(campaign) {
   return parts.length ? parts.join('\n\n') : null
 }
 
-function buildSystemPrompt({ campaignPrompt, personaBlock, type, exampleReply, calUrl, lastFuTemplate, lastFuStepNum }) {
+function buildSystemPrompt({ campaignPrompt, personaBlock, brainBlock, type, exampleReply, calUrl, lastFuTemplate, lastFuStepNum }) {
   const typeConf = TYPE_RULES[type] ?? TYPE_RULES.invite
   const sections = [
     campaignPrompt || 'Eres un SDR experto que envía mensajes en LinkedIn en español.',
     // (2026-07-06) identidad/contexto de campaña (Orion web IA) — solo si está configurado.
     ...(personaBlock ? ['', personaBlock] : []),
+    // (2026) Cerebro de metodología de ventas (ai_playbook, jerárquico): principios + ejemplos/objeciones.
+    // Guarded: sin entradas → brainBlock='' → prompt idéntico a antes.
+    ...(brainBlock ? ['', brainBlock] : []),
     '',
     `TIPO DE MENSAJE: ${typeConf.description}`,
     `LÍMITE: máximo ${typeConf.maxChars} caracteres (cuenta uno por uno).`,
@@ -218,6 +222,67 @@ function buildSystemPrompt({ campaignPrompt, personaBlock, type, exampleReply, c
   sections.push('', '🚫 PROHIBIDO: corchetes [ ], llaves { } o cualquier placeholder/instrucción de relleno (ej. "[menciona algo de su perfil]", "[Nombre]", "[empresa]"). Si te falta un dato del lead, OMÍTELO de forma natural — escribe la frase completa sin ese dato. El mensaje debe quedar 100% listo para enviarse tal cual, sin nada por rellenar.')
   sections.push('', NO_INVENT_COMPANY_RULE)
   return sections.join('\n')
+}
+
+// (2026) Cerebro de metodología de ventas: bloque a inyectar en el system prompt desde ai_playbook.
+// JERÁRQUICO: entradas globales (campaign_id NULL) + las de la campaña. Portado de la lógica muerta
+// ai.js:fetchPlaybookExamples + soporte de `kind` (principle|example|objection) + saneo anti-placeholder.
+//   - principle → SIEMPRE se inyecta (metodología base), cap ~2000 chars.
+//   - example / objection → se RECUPERAN por turno (applies_to_turns) + overlap de tags con el perfil, top-3.
+// Guarded: sin entradas activas → devuelve '' → el prompt queda idéntico a hoy (cero regresión).
+export async function fetchBrainBlock(campaign, lead, { turn = 0 } = {}) {
+  try {
+    const campaignId = campaign?.id
+    let q = supabase
+      .from('ai_playbook')
+      .select('kind, title, situation, example_message, tags, applies_to_turns, outcome_count')
+      .eq('is_active', true)
+    q = campaignId
+      ? q.or(`campaign_id.is.null,campaign_id.eq.${campaignId}`)   // global + los de esta campaña
+      : q.is('campaign_id', null)
+    const { data, error } = await q.limit(60)
+    if (error || !data?.length) return ''
+
+    // Principios: todos (son cortos), cap total defensivo estilo campaignPersonaBlock.
+    const principles = data.filter(e => e.kind === 'principle')
+    let principlesText = ''
+    if (principles.length) {
+      const body = principles
+        .map(p => `- ${p.title}${p.example_message ? `: ${p.example_message}` : ''}`)
+        .join('\n').slice(0, 2000)
+      principlesText = `METODOLOGÍA DE VENTAS (principios que SIEMPRE debes seguir en este mensaje):\n${body}`
+    }
+
+    // Ejemplos/objeciones: filtra por turno + puntúa por overlap de tags con el perfil, top-3.
+    const cases = data.filter(e => e.kind !== 'principle'
+      && (!e.applies_to_turns?.length || e.applies_to_turns.includes(turn)))
+    let casesText = ''
+    if (cases.length) {
+      const profileText = [
+        lead?.profile_data?.headline, lead?.profile_data?.currentCompany,
+        lead?.profile_data?.currentPosition, lead?.profile_data?.about,
+      ].filter(Boolean).join(' ').toLowerCase()
+      const scored = cases
+        .map(e => {
+          const overlap = (e.tags ?? []).filter(t => profileText.includes(String(t).toLowerCase())).length
+          return { e, score: overlap + (e.outcome_count ?? 0) * 0.1 }
+        })
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 3)
+        .map(({ e }) => {
+          const sit = e.situation ? `  Situación: ${e.situation}\n` : ''
+          return `— ${e.title}\n${sit}  Mensaje: "${e.example_message}"`
+        })
+      casesText = `EJEMPLOS / MANEJO DE OBJECIONES QUE FUNCIONAN (referencia de enfoque y tono, NO copies literal):\n${scored.join('\n\n')}`
+    }
+
+    const block = [principlesText, casesText].filter(Boolean).join('\n\n')
+    // Sanea corchetes/llaves para no disparar el guard anti-placeholder (hasLeftoverPlaceholder) en el output.
+    return block ? block.replace(/[\[\]{}]/g, '') : ''
+  } catch (err) {
+    console.warn('[ai] fetchBrainBlock error:', err.message)
+    return ''
+  }
 }
 
 function buildUserPrompt(lead) {
@@ -414,9 +479,12 @@ export async function generateLinkedInMessage(campaign, lead, type = 'invite', o
     follow_up_3:  'fm3_example_reply',
   }[type]
   const exampleReply = exampleField ? campaign[exampleField] : null
+  const turn = type === 'invite' ? 0 : (parseInt(String(type).replace('follow_up_', ''), 10) || 0)
+  const brainBlock = await fetchBrainBlock(campaign, lead, { turn })
   const systemPrompt = buildSystemPrompt({
     campaignPrompt: campaign.gemini_system_prompt,
     personaBlock: campaignPersonaBlock(campaign),
+    brainBlock,
     type, exampleReply,
   })
   const userPrompt = buildUserPrompt(lead)
@@ -449,9 +517,11 @@ export async function personalizeFollowupMessage(campaign, lead, template, fuSte
   const toneDirective = opts.toneDirective
     || `Los follow-ups de LinkedIn buscan CONSTRUIR RELACIÓN y mantener el contacto, NO vender. Sé cálido, humano y genuino — en plan de conocer a la persona, no de cerrar una venta.`
   const personaBlock = campaignPersonaBlock(campaign)
+  const brainBlock = await fetchBrainBlock(campaign, lead, { turn: fuStep })
   const systemSections = [
     campaign.gemini_system_prompt || 'Eres una persona que escribe mensajes de LinkedIn naturales, cálidos y humanos en español.',
     ...(personaBlock ? ['', personaBlock] : []),
+    ...(brainBlock ? ['', brainBlock] : []),
     '',
     toneDirective,
     '',
@@ -519,9 +589,11 @@ export async function generateLinkedInReply(campaign, lead, ctx = {}, opts = {})
   const exampleField = `fm${fmStep}_example_reply`
   const exampleReply = campaign[exampleField] ?? null
   const calUrl = calUrlWithLeadId(ctx.calUrl ?? null, lead?.id)  // v0.7.45: link rastreable por lead
+  const brainBlock = await fetchBrainBlock(campaign, lead, { turn: fmStep })
   const systemPrompt = buildSystemPrompt({
     campaignPrompt: campaign.gemini_system_prompt,
     personaBlock: campaignPersonaBlock(campaign),
+    brainBlock,
     type, exampleReply, calUrl,
     lastFuTemplate: ctx.lastFuTemplate ?? null,
     lastFuStepNum:  ctx.lastFuStepNum ?? null,

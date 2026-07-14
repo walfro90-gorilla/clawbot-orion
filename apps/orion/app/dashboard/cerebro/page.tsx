@@ -40,6 +40,12 @@ export default async function CerebroPage() {
     campaignIds = (camps ?? []).map((c: { id: string }) => c.id)
   }
 
+  // Campañas para el selector de ámbito del form del Cerebro (global vs por campaña).
+  const { data: campaignList } = await admin
+    .from("campaigns")
+    .select("id, name")
+    .order("name")
+
   // ── KPI queries (run in parallel) ─────────────────────────────────────────
 
   // 1. Conversaciones con IA activa — conversations WHERE conversation_turn > 0
@@ -188,7 +194,7 @@ export default async function CerebroPage() {
             Playbook de ejemplos
             <span className="text-xs font-normal normal-case text-gray-600 ml-2">({playbook.length})</span>
           </h2>
-          {isAdmin && <CerebroPlaybookForm />}
+          {isAdmin && <CerebroPlaybookForm campaigns={(campaignList ?? []) as { id: string; name: string }[]} />}
         </div>
 
         {/* Table */}

@@ -47,6 +47,8 @@ export async function POST(req: NextRequest) {
     situation,
     example_message,
     applies_to_turns,
+    campaign_id,
+    kind,
   } = body as {
     title: string
     description?: string
@@ -54,15 +56,22 @@ export async function POST(req: NextRequest) {
     situation?: string
     example_message: string
     applies_to_turns: number[]
+    campaign_id?: string | null
+    kind?: string
   }
 
+  const entryKind = kind ?? "example"
+  if (!["principle", "example", "objection"].includes(entryKind)) {
+    return NextResponse.json({ error: "kind must be principle|example|objection" }, { status: 400 })
+  }
   if (!title?.trim()) {
     return NextResponse.json({ error: "title is required" }, { status: 400 })
   }
   if (!example_message?.trim()) {
     return NextResponse.json({ error: "example_message is required" }, { status: 400 })
   }
-  if (!Array.isArray(applies_to_turns) || applies_to_turns.length === 0) {
+  // Los principios se inyectan siempre (no se recuperan por turno) → applies_to_turns no aplica.
+  if (entryKind !== "principle" && (!Array.isArray(applies_to_turns) || applies_to_turns.length === 0)) {
     return NextResponse.json({ error: "applies_to_turns must be a non-empty array" }, { status: 400 })
   }
 
@@ -74,9 +83,11 @@ export async function POST(req: NextRequest) {
       tags: Array.isArray(tags) ? tags : [],
       situation: situation?.trim() ?? null,
       example_message: example_message.trim(),
-      applies_to_turns,
+      applies_to_turns: entryKind === "principle" ? [] : applies_to_turns,
+      campaign_id: campaign_id?.trim() ? campaign_id : null,   // vacío = global
+      kind: entryKind,
       created_by: user!.id,
-    })
+    } as any)   // campaign_id/kind nuevos; db-types se regeneran con `npm run types`
     .select()
     .single()
 
