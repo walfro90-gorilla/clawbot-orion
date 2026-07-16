@@ -27,7 +27,7 @@ import {
   dispatchPostSearch, dispatchCommentOnPost, checkPostCampaignActiveGates,
   getDailyCommentsToday, getEffectiveCommentCap,
 } from './lib/extension-dispatch.js'
-import { generateLinkedInMessage, generateLinkedInReply, personalizeFollowupMessage, hasLeftoverPlaceholder, qualifyPost, generatePostComment, extractCompaniesFromHeadlines } from './lib/ai-message.js'
+import { generateLinkedInMessage, generateLinkedInReply, personalizeFollowupMessage, hasLeftoverPlaceholder, qualifyPost, generatePostComment, extractCompaniesFromHeadlines, detectExitIntent } from './lib/ai-message.js'
 import { generatePostCopy, generateDailyPost } from './lib/daily-publish.js'
 import { uploadGeneratedImage } from './lib/gemini-image.js'
 import { isSystemLinkedInAccount } from './lib/system-accounts.js'
@@ -1009,6 +1009,11 @@ export async function tryFollowupsForCampaign(campaign, account) {
 // del último inbound + rompe-loops por conteo de outbound. Ver incident memory.
 const AUTO_REPLY_LOOP_CAP = 8  // outbound máx a un hilo antes de declararlo loop y matar el lead
 
+// 🚪 Cierre cortés cuando el sensor de salida detecta rechazo definitivo. FIJO a propósito:
+// pedirle el cierre al LLM arriesga que re-pitchee a alguien que ya dijo que no.
+// ponytail: constante global. Si una campaña lo necesita en otro idioma/tono → campaigns.exit_message.
+const EXIT_MESSAGE = 'Te entiendo, y muchas gracias. Quedamos atentos a cualquier duda. ¡Saludos!'
+
 function isDeletedInboundMessage(text) {
   const t = (text || '').toLowerCase()
   return t.includes('se ha eliminado este mensaje')
@@ -1116,7 +1121,7 @@ async function tryAutoReplyForCampaign(campaign, account) {
     // Queremos comparar LAST_INBOUND real vs LAST_OUTBOUND real desde events.
     const { data: lastOutbound } = await supabase
       .from('conversation_events')
-      .select('sent_at')
+      .select('sent_at, content')   // content: contexto para el sensor de salida (¿el "no" es a qué?)
       .eq('conversation_id', conv.id)
       .eq('direction', 'outbound')
       .order('sent_at', { ascending: false })
@@ -1179,6 +1184,66 @@ async function tryAutoReplyForCampaign(campaign, account) {
     if (minutesSinceReply < randInt(delayMin, delayMax)) {
       console.log(`[SCH-EXT]   ⏸️  AI reply para ${lead.full_name}: aguardando humanization delay (${delayMin}-${delayMax}min)`)
       continue
+    }
+
+    // Si hay thread_id → thread directo. Si NO (lead respondió a invite sin nota
+    // y nunca capturamos thread) → pasar profileUrl: content.js navega al perfil,
+    // abre compose y responde igual que el flujo FU compose-new.
+    // (Resuelto ANTES del sensor de salida: el cierre cortés viaja por la misma ruta.)
+    const threadUrl  = conv.linkedin_thread_id
+      ? `https://www.linkedin.com/messaging/thread/${conv.linkedin_thread_id}/`
+      : null
+    const profileUrl = lead.linkedin_url ?? null
+    if (!threadUrl && !profileUrl) {
+      console.warn(`[SCH-EXT]   AI reply skip ${lead.full_name}: sin thread_id ni profileUrl`)
+      continue
+    }
+
+    // 🚪 SENSOR DE SALIDA: si el lead cerró la puerta, NO le contestamos con un pitch.
+    // Cierre cortés + fuera del pipeline. Corre aquí (tras el delay de humanización y el
+    // dedup de cmd en vuelo) para gastar 1 sola clasificación cuando de verdad vamos a
+    // escribir, y para cortocircuitar el fetch de historial + la generación del FM.
+    const exitRes = await detectExitIntent(lastInText, lastOutbound?.content ?? '')
+    if (exitRes.error) {
+      // FAIL-OPEN: el LLM falló → seguimos al FM normal. Matar un lead vivo es peor.
+      console.warn(`[SCH-EXT]   ⚠️  exit sensor falló (${lead.full_name}): ${exitRes.error} — sigo flujo normal`)
+    } else if (exitRes.exit) {
+      if (DRY_RUN) {
+        console.log(`[SCH-EXT] DRY_RUN 🚪 EXIT → ${lead.full_name}: "${exitRes.reason}"`)
+        return { dispatched: false, dryRun: true, exit: true, leadName: lead.full_name }
+      }
+      const exitCmdId = await dispatchCommand(account.id, 'send_followup', {
+        threadUrl,
+        profileUrl,
+        leadId:   lead.id,
+        leadName: lead.full_name,
+        message:  EXIT_MESSAGE,
+        step:       0,        // no es FU
+        kind:       'reply',  // ingestSendFollowup NO toca leads.status → nuestro 'dead' sobrevive
+        // …pero el upsert de conversations SÍ escribe status: sin esto, el ingest de ESTE mismo
+        // mensaje pisaría el closed_lost con 'active' → el contacto que dijo "no" saldría verde
+        // en el CRM. Que el ingest RE-AFIRME el cierre en vez de deshacerlo.
+        convStatus: 'closed_lost',
+        // TTL 10 min (no 3 como el FM): el FM reintenta el próximo tick porque el lead sigue
+        // 'replied', pero el lead cerrado ya es 'dead' → nadie lo re-selecciona. Sin retry, el
+        // comando debe ser el MÁS paciente, no el menos. El texto es constante: no caduca.
+      }, { relatedLeadId: lead.id, expiresInMinutes: 10 })
+      // Sin comando no marcamos nada: el próximo tick reintenta (el lead sigue 'replied').
+      if (!exitCmdId) continue
+
+      // Marcamos AL DESPACHAR (no al confirmar): si esperáramos al ingest, el próximo tick
+      // re-clasificaría y re-despacharía → doble cierre. hasInFlightCommand cubre la ventana.
+      await supabase.from('leads').update({
+        status:      'dead',
+        dead_reason: 'not_interested',
+      }).eq('id', lead.id)
+      await supabase.from('conversations').update({ status: 'closed_lost' }).eq('id', conv.id)
+
+      console.log(`[SCH-EXT]   🚪 EXIT ${lead.full_name} → dead/not_interested + closed_lost — "${exitRes.reason}"`)
+      return {
+        dispatched: 1, exit: true, leadName: lead.full_name,
+        commandId: exitCmdId, reason: exitRes.reason,
+      }
     }
 
     // Determinar qué FM step usar: cuenta replies AI previos (event_type='reply_sent')
@@ -1288,17 +1353,6 @@ async function tryAutoReplyForCampaign(campaign, account) {
       continue
     }
 
-    // Si hay thread_id → thread directo. Si NO (lead respondió a invite sin nota
-    // y nunca capturamos thread) → pasar profileUrl: content.js navega al perfil,
-    // abre compose y responde igual que el flujo FU compose-new.
-    const threadUrl  = conv.linkedin_thread_id
-      ? `https://www.linkedin.com/messaging/thread/${conv.linkedin_thread_id}/`
-      : null
-    const profileUrl = lead.linkedin_url ?? null
-    if (!threadUrl && !profileUrl) {
-      console.warn(`[SCH-EXT]   AI reply skip ${lead.full_name}: sin thread_id ni profileUrl`)
-      continue
-    }
     const cmdId = await dispatchCommand(account.id, 'send_followup', {
       threadUrl,
       profileUrl,

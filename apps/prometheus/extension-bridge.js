@@ -1420,7 +1420,10 @@ async function ingestSendFollowup(commandId, result) {
       .upsert({
         lead_id:             leadId,
         linkedin_account_id: cmd.account_id,
-        status:              'active',
+        // 'active' por defecto (un FU/FM normal promueve initiated/connected → active).
+        // El sensor de salida manda convStatus:'closed_lost' para que su mensaje de cierre
+        // RE-AFIRME el estado terminal en vez de revivir la conversación al ingestarse.
+        status:              cmd.payload?.convStatus ?? 'active',
         last_message_at:     new Date().toISOString(),
         last_message_text:   `[Tú]: ${messageText.slice(0, 200)}`,
       }, { onConflict: 'lead_id' })

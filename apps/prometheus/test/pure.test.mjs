@@ -9,7 +9,7 @@ process.env.SUPABASE_URL ||= 'https://dummy.supabase.co'
 process.env.SUPABASE_SERVICE_ROLE_KEY ||= 'dummy_key_for_test'
 
 const { passesTitleFilters, meetsVersion } = await import('../lib/extension-dispatch.js')
-const { campaignPersonaBlock, hasLeftoverPlaceholder } = await import('../lib/ai-message.js')
+const { campaignPersonaBlock, hasLeftoverPlaceholder, detectExitIntent } = await import('../lib/ai-message.js')
 
 test('passesTitleFilters — substring whitelist, junk, vacío, acentos, blacklist', () => {
   const wl = ['Director de Ventas', 'CEO', 'Director de Logística', 'Gerente General']
@@ -44,4 +44,14 @@ test('hasLeftoverPlaceholder — detecta corchetes y llaves sin resolver', () =>
   assert.equal(hasLeftoverPlaceholder('hola [Nombre], un gusto'), true)
   assert.equal(hasLeftoverPlaceholder('hola {empresa}'), true)
   assert.equal(hasLeftoverPlaceholder('hola Juan, un gusto conectar'), false)
+})
+
+// Sensor de salida: la parte OFFLINE (el guard que decide si se llama al LLM).
+// Invariante: un inbound vacío/nulo NUNCA puede matar un lead — y no debe gastar un call.
+// La calidad del clasificador es LLM y se mide aparte: `node scripts/test-exit-sensor.mjs`.
+test('detectExitIntent — inbound vacío corta antes del LLM y no dispara exit', async () => {
+  for (const empty of ['', '   ', null, undefined]) {
+    const r = await detectExitIntent(empty, 'nuestro último mensaje')
+    assert.deepEqual(r, { exit: false, reason: 'empty_inbound' }, `vacío (${JSON.stringify(empty)}) → sin exit`)
+  }
 })

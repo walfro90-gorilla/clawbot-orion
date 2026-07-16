@@ -712,6 +712,58 @@ async function callLLMJson(systemPrompt, userPrompt, opts = {}) {
 }
 
 /**
+ * 🚪 SENSOR DE SALIDA: ¿el contacto cerró la puerta ("no gracias", "no me interesa")?
+ * Devuelve { exit: boolean, reason: string } o { error }.
+ *
+ * El caller hace FAIL-OPEN (ante { error } sigue el flujo normal): un falso positivo
+ * mata un lead real y es irreversible; un falso negativo solo cuesta un mensaje de más.
+ * Por eso el prompt es asimétrico — ante la duda, exit=false.
+ *
+ * @param {string} lastInbound  - último mensaje del contacto (lo que se clasifica)
+ * @param {string} lastOutbound - nuestro último mensaje; contexto para desambiguar un "no"
+ *                                a una propuesta de horario vs un "no" a la conversación.
+ */
+export async function detectExitIntent(lastInbound, lastOutbound = '', opts = {}) {
+  const text = String(lastInbound ?? '').trim()
+  if (!text) return { exit: false, reason: 'empty_inbound' }
+
+  const systemPrompt = [
+    'Eres un clasificador de intención en conversaciones de prospección B2B por LinkedIn.',
+    'Decide si el ÚLTIMO MENSAJE DEL CONTACTO cierra la puerta de forma DEFINITIVA.',
+    '',
+    'exit=true SOLO si el contacto rechaza la conversación o la oferta de forma clara:',
+    '- "no gracias", "no me interesa", "no estoy interesado", "no es para mí"',
+    '- ya tiene proveedor / lo resuelve internamente y NO quiere alternativas',
+    '- pide que no lo contacten más, que lo saquen de la lista, o se molesta por el contacto',
+    '',
+    'exit=false en TODO lo demás. En particular exit=false si:',
+    '- muestra interés, hace una pregunta, o pide info/precio',
+    '- pospone sin cerrar: "ahora no", "más adelante", "escríbeme en 3 meses", "ando saturado"',
+    '- rechaza SOLO el horario/canal propuesto, no la conversación ("el martes no puedo", "mejor por correo")',
+    '- deriva con otra persona del equipo',
+    '- responde algo ambiguo, corto o de cortesía ("ok", "gracias", "jaja")',
+    '',
+    'REGLA CRÍTICA: ante la duda, exit=false. Marca exit=true solo si el rechazo es explícito',
+    'e inequívoco en el mensaje del contacto. NO infieras rechazo por tono seco o silencio.',
+    '',
+    'Responde SOLO un objeto JSON con exactamente estas llaves:',
+    '{"exit": boolean, "reason": "frase corta en español citando qué lo indica"}',
+  ].join('\n')
+
+  const userPrompt = [
+    lastOutbound ? `NUESTRO ÚLTIMO MENSAJE (solo contexto, NO lo clasifiques):\n"""${String(lastOutbound).slice(0, 600)}"""` : null,
+    `ÚLTIMO MENSAJE DEL CONTACTO (esto es lo que clasificas):\n"""${text.slice(0, 1000)}"""`,
+  ].filter(Boolean).join('\n\n')
+
+  const res = await callLLMJson(systemPrompt, userPrompt, { temperature: 0, ...opts })
+  if (res.error) return { error: res.error }
+  const d = res.data ?? {}
+  // Tolerante a proveedores que devuelven el bool como string; cualquier otra cosa → false (fail-open).
+  const exit = d.exit === true || String(d.exit).toLowerCase() === 'true'
+  return { exit, reason: String(d.reason ?? '').slice(0, 300) }
+}
+
+/**
  * Califica si un post de LinkedIn es una oportunidad real para nuestro servicio.
  * Devuelve { relevant: boolean, score: int(0-10), reason: string } o { error }.
  * El umbral (score >= qualify_min_score) lo compara el caller (bridge/scheduler).

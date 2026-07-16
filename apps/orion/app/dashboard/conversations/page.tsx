@@ -129,6 +129,7 @@ export default async function ConversationsPage({
     connected:      "bg-purple-500/15 text-purple-400 border-purple-500/30",
     meeting_booked: "bg-yellow-500/15 text-yellow-400 border-yellow-500/30",
     closed_won:     "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
+    closed_lost:    "bg-zinc-500/15 text-zinc-400 border-zinc-500/30",
     dead:           "bg-red-500/15 text-red-400 border-red-500/30",
   }
   const statusLabels: Record<string, string> = {
