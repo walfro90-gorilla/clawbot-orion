@@ -41,6 +41,12 @@ const CORPUS = [
   ['Ahora no, escríbeme en 3 meses.', false],
   ['Por el momento estoy saturado, más adelante lo vemos.', false],
   ['Por ahora no, pero búscame en enero.', false],
+  // Falsos positivos REALES cazados en el dry-run del 16-jul-2026 sobre el inbox de prod.
+  // El contacto se compromete a re-contactar → puerta abierta, aunque suene a cortesía.
+  ['Te comento en algunos meses si funcionó. Saludos', false],
+  ['Hola, gracias. Tomo nota y en caso de requerir te busco. Gracias', false],
+  // El contacto OFRECE algo y se retira de SU oferta: no nos rechaza a nosotros.
+  ["Hey Walfre, if you'd rather I don't refer you over any investors let me know and I won't bother you again.", false],
   ['No soy yo quien lo ve, habla con Ana de sistemas.', false],
   ['No entiendo bien qué ofrecen, ¿me explicas?', false],
   ['¿Cuánto cuesta?', false],
