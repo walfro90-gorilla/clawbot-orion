@@ -192,8 +192,19 @@ async function handleConnection(ws, accountId) {
         const ageMs = Date.now() - existing.lastSeen
         if (ageMs < 2000) {
           // Conexión muy reciente — probablemente race. Rechazamos esta NUEVA.
-          console.log(`[bridge] Rechazando nueva conexión de ${accountLabel} — existente solo tiene ${ageMs}ms`)
-          try { ws.send(JSON.stringify({ type: 'auth_error', error: 'duplicate_connection_race' })) } catch {}
+          //
+          // ⚠️ NO mandes auth_error aquí (incidente Josh, 16-jul-2026). El cliente mete
+          // CUALQUIER auth_error en el mismo lockout de 5 MINUTOS que 'invalid_api_key'
+          // (background.js:379, único escritor de auth_lockout_until) → un race transitorio
+          // de ~600ms dejaba la cuenta 5 min offline con un banner rojo "Error de
+          // autenticación" que ni siquiera está en ERROR_MESSAGES del popup. Son problemas
+          // opuestos: invalid_api_key no se arregla reintentando; esto se arregla en 2s.
+          //
+          // Cerrando a secas, el listener 'close' de la extensión hace scheduleReconnect()
+          // y reconecta limpio (~2s), cuando este `existing` ya pasó los 2000ms. Sirve para
+          // la v0.9.25 YA desplegada, sin recargar la extensión en cada laptop.
+          // El motivo queda en el close code 4005 + este log para diagnóstico.
+          console.log(`[bridge] Rechazando nueva conexión de ${accountLabel} — existente solo tiene ${ageMs}ms (cierre silencioso: reintenta solo en ~2s)`)
           try { ws.close(4005, 'duplicate_race') } catch {}
           return
         }
