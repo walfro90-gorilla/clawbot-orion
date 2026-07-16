@@ -28,12 +28,19 @@ const CORPUS = [
   ['Please stop messaging me.', true],
   ['Deja de escribirme, esto es spam.', true],
   ['Te agradezco el mensaje pero paso.', true],
+  // Rechazo cortés SIN puerta abierta. Decisión de negocio (Walfre, 16-jul-2026): en español
+  // de negocios el "no" viene envuelto en cortesía y este es el shape modal real del inbox.
+  // El discriminador NO es la amabilidad, es si invita a volver — estos no invitan a nada.
+  ['Gracias, no por el momento. Saludos.', true],
+  ['Por ahora no, gracias.', true],
 
   // ── exit=false: casos-trampa (un "no" que NO cierra la puerta) ──
   ['No puedo el martes, ¿el jueves?', false],
   ['No, mejor por correo: juan@acme.com', false],
+  // …los mismos "no por ahora" PERO con puerta abierta explícita → aplazamiento, no rechazo.
   ['Ahora no, escríbeme en 3 meses.', false],
   ['Por el momento estoy saturado, más adelante lo vemos.', false],
+  ['Por ahora no, pero búscame en enero.', false],
   ['No soy yo quien lo ve, habla con Ana de sistemas.', false],
   ['No entiendo bien qué ofrecen, ¿me explicas?', false],
   ['¿Cuánto cuesta?', false],
