@@ -159,6 +159,18 @@ export function calUrlWithLeadId(calUrl, leadId) {
 // como si fuera el nombre de la empresa. La regex que lo evitaba vive en worker.js (MUERTO).
 const NO_INVENT_COMPANY_RULE = '🏢 EMPRESA: NUNCA inventes ni asumas el nombre de una empresa. Si el perfil NO incluye una línea "Empresa:" explícita, NO menciones ninguna empresa. NUNCA uses el cargo, título o rol de la persona (ej. "Director de Operaciones", "Gerente de Logística") como si fuera el nombre de su empresa — es un error grave.'
 
+// Modo relación ("vender sin vender") para el FM/auto-reply. Sustituye las reglas
+// hardcodeadas fm_reply_* que empujan a cita. Se activa cuando la campaña define
+// followup_tone_directive (mismo gate que el FU path). El lead pide la reunión; nunca al revés.
+const FM_RELATIONSHIP_RULES = [
+  'El lead te ESCRIBIÓ. Lee su mensaje y respóndele DIRECTAMENTE a lo que dijo — reconoce su punto, valida su contexto, agradece si compartió algo.',
+  'Conversa como una persona genuina que quiere CONOCER al lead y construir relación. Vender sin vender: deja que tu trabajo y tu perfil hablen por sí solos.',
+  'PROHIBIDO proponer, sugerir o insinuar una llamada, cita, reunión, demo o "hablar más a profundidad". NO empujes hacia una reunión de ninguna forma.',
+  'Aporta valor con una pregunta inteligente o una perspectiva, pero SIN CTA de venta y SIN pitch.',
+  'Solo si el lead PIDE EXPLÍCITAMENTE una llamada, reunión o más información, entonces SÍ compártele con gusto el link de calendario (ver abajo).',
+  'Tono natural, conversacional, humano. CERO lenguaje corporativo.',
+]
+
 // (2026-07-06) Bloque de identidad/contexto de campaña configurado en Orion web (Centro de
 // Control → tab IA: Persona del remitente / Contexto de empresa / Tono). Se inyecta al system
 // prompt de TODA generación por IA (invite full-gen, FM/auto-reply, FU-LLM) cuando la campaña
@@ -181,8 +193,12 @@ export function campaignPersonaBlock(campaign) {
   return parts.length ? parts.join('\n\n') : null
 }
 
-function buildSystemPrompt({ campaignPrompt, personaBlock, brainBlock, type, exampleReply, calUrl, lastFuTemplate, lastFuStepNum }) {
+export function buildSystemPrompt({ campaignPrompt, personaBlock, brainBlock, type, exampleReply, calUrl, toneDirective, lastFuTemplate, lastFuStepNum }) {
   const typeConf = TYPE_RULES[type] ?? TYPE_RULES.invite
+  // Modo relación (vender sin vender): si la campaña define followup_tone_directive y esto es
+  // un reply al lead (FM), el auto-reply NO empuja a cita — solo conversa. Sin directive el
+  // comportamiento es idéntico (empuje a cita hardcodeado en fm_reply_*).
+  const relationshipMode = Boolean(toneDirective && String(toneDirective).trim()) && String(type).startsWith('fm_reply')
   const sections = [
     campaignPrompt || 'Eres un SDR experto que envía mensajes en LinkedIn en español.',
     // (2026-07-06) identidad/contexto de campaña (Orion web IA) — solo si está configurado.
@@ -190,15 +206,22 @@ function buildSystemPrompt({ campaignPrompt, personaBlock, brainBlock, type, exa
     // (2026) Cerebro de metodología de ventas (ai_playbook, jerárquico): principios + ejemplos/objeciones.
     // Guarded: sin entradas → brainBlock='' → prompt idéntico a antes.
     ...(brainBlock ? ['', brainBlock] : []),
+    ...(relationshipMode ? ['', `DIRECTRIZ DE TONO (obligatoria): ${toneDirective}`] : []),
     '',
-    `TIPO DE MENSAJE: ${typeConf.description}`,
+    // En modo relación NO usamos typeConf.description: las de fm_reply_2/3 dicen "Mueve hacia la
+    // cita" / "Pregunta directa por fecha" y contradecirían la directriz de no empujar cita.
+    `TIPO DE MENSAJE: ${relationshipMode ? 'respuesta al lead — la conversación está activa; conversa y construye relación, sin empujar a cita' : typeConf.description}`,
     `LÍMITE: máximo ${typeConf.maxChars} caracteres (cuenta uno por uno).`,
     `CIERRE OBLIGATORIO: termina SIEMPRE con punto final, signo de interrogación o exclamación cerrados. NUNCA dejes una oración a la mitad — si vas a quedarte sin espacio, acorta el mensaje y deja la oración COMPLETA.`,
     '',
     'REGLAS:',
-    ...typeConf.rules.map(r => `- ${r}`),
+    ...(relationshipMode ? FM_RELATIONSHIP_RULES : typeConf.rules).map(r => `- ${r}`),
   ]
-  if (calUrl && (type === 'fm_reply_2' || type === 'fm_reply_3')) {
+  if (relationshipMode) {
+    if (calUrl) sections.push('',
+      `LINK DE CALENDARIO — úsalo ÚNICAMENTE si el lead PIDIÓ explícitamente una llamada, reunión o más información: ${calUrl}`,
+      'Si el lead NO lo pidió, NO incluyas ningún link ni propongas agendar. Si SÍ lo pidió, inclúyelo COMPLETO y EXACTO con todos sus parámetros (?notes=...), sin acortarlo.')
+  } else if (calUrl && (type === 'fm_reply_2' || type === 'fm_reply_3')) {
     sections.push('', `LINK DE CALENDARIO PARA AGENDAR: ${calUrl}`)
     sections.push('Incluye el link COMPLETO y EXACTO, con TODOS sus parámetros (?notes=...). NO lo acortes, NO lo modifiques, NO quites nada después del "?". Es un link de seguimiento — alterarlo lo rompe.')
   }
@@ -595,6 +618,7 @@ export async function generateLinkedInReply(campaign, lead, ctx = {}, opts = {})
     personaBlock: campaignPersonaBlock(campaign),
     brainBlock,
     type, exampleReply, calUrl,
+    toneDirective: campaign.followup_tone_directive ?? null,  // modo relación: no empujar cita en el reply
     lastFuTemplate: ctx.lastFuTemplate ?? null,
     lastFuStepNum:  ctx.lastFuStepNum ?? null,
   })
