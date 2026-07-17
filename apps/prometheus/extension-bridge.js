@@ -2006,6 +2006,19 @@ async function pollAndDispatch() {
     const conn = connections.get(cmd.account_id)
     if (!conn || conn.ws.readyState !== 1 /* OPEN */) continue
 
+    // Freshness gate (ventana zombie): tras un corte de red silencioso (sleep, WiFi/NAT drop
+    // sin FIN) el socket queda readyState=1 hasta que el sweeper lo cierra a los 90s. Despachar
+    // ahí = comando al vacío → timeout (incidente Josh 16-jul: send_invite perdido). Si el socket
+    // está "quieto" (sin inbound reciente, o con bytes sin flushear), RETENEMOS el cmd — sigue
+    // 'pending', se despacha limpio al reconectar. Solo puede RETRASAR, nunca perder ni duplicar:
+    // el cmd aún no se marcó 'dispatched'. lastSeen se refresca con cualquier inbound + pingAll/20s,
+    // así que un socket sano nunca pasa de ~20s; 40s = ~2 pings perdidos.
+    const staleMs = Date.now() - conn.lastSeen
+    if (conn.ws.bufferedAmount > 0 || staleMs > 40_000) {
+      console.log(`[bridge] ⏸️  dispatch retenido ${conn.label ?? cmd.account_id.slice(0,8)} — socket quieto (lastSeen ${Math.round(staleMs/1000)}s, buffered ${conn.ws.bufferedAmount}) → reintenta al reconectar`)
+      continue
+    }
+
     // Marcar como dispatched (atómico — RLS para evitar double-dispatch)
     const { data: claimed } = await supabase
       .from('extension_commands')

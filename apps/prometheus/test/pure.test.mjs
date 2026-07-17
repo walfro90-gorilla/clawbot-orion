@@ -38,6 +38,11 @@ test('campaignPersonaBlock — dispara solo con persona/contexto + caps anti-blo
   assert.equal(campaignPersonaBlock(null), null, 'null → null')
   const big = campaignPersonaBlock({ ai_sender_persona: 'X'.repeat(3000) })
   assert.ok(big.includes('X'.repeat(2000)) && !big.includes('X'.repeat(2001)), 'persona capada a 2000')
+  // target_audience: dispara solo (fix §7.1 — antes se seleccionaba sin interpolar) y va capeado a 800
+  const ta = campaignPersonaBlock({ target_audience: 'Directores de logística en MX' })
+  assert.ok(ta && ta.includes('A QUIÉN LE ESCRIBES') && ta.includes('Directores de logística'), 'target_audience solo SÍ dispara')
+  const bigTa = campaignPersonaBlock({ target_audience: 'Y'.repeat(1200) })
+  assert.ok(bigTa.includes('Y'.repeat(800)) && !bigTa.includes('Y'.repeat(801)), 'target_audience capado a 800')
 })
 
 test('hasLeftoverPlaceholder — detecta corchetes y llaves sin resolver', () => {

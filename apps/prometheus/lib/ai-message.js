@@ -182,12 +182,20 @@ export function campaignPersonaBlock(campaign) {
   // NO cuenta → campañas que solo tienen tono (Wal Tech/Transporte/[Post], que ya funcionan)
   // quedan idénticas. Caps defensivos: un persona/context enorme (Café: 25k chars) no aporta a
   // un DM y encarece cada llamada — acotamos sin perder el núcleo.
-  if (!campaign.ai_sender_persona && !campaign.ai_company_context) return null
+  // target_audience TAMBIÉN dispara el bloque (antes se seleccionaba pero nunca se
+  // interpolaba — trampa §7.1). ai_tone por sí solo SIGUE sin disparar (campañas tono-only
+  // quedan idénticas).
+  if (!campaign.ai_sender_persona && !campaign.ai_company_context && !campaign.target_audience) return null
   const parts = []
   if (campaign.ai_sender_persona)
     parts.push(`QUIÉN ERES (tu identidad y voz — escribe SIEMPRE en primera persona como esta persona, nunca como un bot):\n${campaign.ai_sender_persona.slice(0, 2000)}`)
   if (campaign.ai_company_context)
     parts.push(`CONTEXTO DE TU EMPRESA / OFERTA (para dar color y credibilidad — NO lo recites literal ni lo pegues entero):\n${campaign.ai_company_context.slice(0, 3000)}`)
+  if (campaign.target_audience)
+    // Framing defensivo: el campo se usa inconsistente en prod — a veces prosa ("tomadores de
+    // decisión en logística…"), a veces una LISTA de empresas/cargos pegada del targeting. El
+    // cap + la orden de NO recitar neutralizan el caso-lista y aprovechan el caso-prosa.
+    parts.push(`A QUIÉN LE ESCRIBES (perfil del público objetivo — úsalo SOLO para calibrar relevancia y tono; NUNCA enlistes ni menciones empresas/cargos literalmente ni lo pegues en el mensaje):\n${campaign.target_audience.slice(0, 800)}`)
   if (campaign.ai_tone)
     parts.push(`TONO OBJETIVO: ${campaign.ai_tone}`)
   return parts.length ? parts.join('\n\n') : null

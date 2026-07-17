@@ -181,7 +181,11 @@ function withTimeout(promise, ms, label) {
 // ── Job logging ──────────────────────────────────────────────────────────────
 
 async function logJob({ campaignId, accountId, jobType, status, skipReason, leadsFound, leadsSent, details }) {
-  await supabase.from('scheduler_log').insert({
+  // NO fire-and-forget: durante meses los CHECK cerrados de scheduler_log rechazaban
+  // todo job_type/status fuera del set (fm_reply_*, followup_N, check_*, 'dispatched'…)
+  // y este insert se tragaba el error → telemetría muerta sin que nadie se enterara.
+  // Constraints ya dropeados (17-jul); este log es el guard que lo habría cazado.
+  const { error } = await supabase.from('scheduler_log').insert({
     campaign_id: campaignId ?? null,
     account_id:  accountId ?? null,
     job_type:    jobType,
@@ -191,6 +195,7 @@ async function logJob({ campaignId, accountId, jobType, status, skipReason, lead
     leads_sent:  leadsSent ?? null,
     details:     details ?? {},
   })
+  if (error) console.warn(`[logJob] drop ${jobType}/${status}: ${error.message}`)
 }
 
 // IO: motivo de skip por campaña, para loguear a scheduler_log SOLO en transiciones
@@ -692,8 +697,9 @@ export async function tryFollowupsForCampaign(campaign, account) {
 
     // Safety gate: skip leads cuya prev step timestamp es muy antigua
     // (típicamente leads históricos de batches viejos). Por default 30 días.
-    // Configurable via campaign.fu_max_age_days o env FU_MAX_AGE_DAYS.
-    const maxAgeDays = campaign.fu_max_age_days ?? parseInt(process.env.FU_MAX_AGE_DAYS ?? '30')
+    // Knob GLOBAL vía env FU_MAX_AGE_DAYS; no hay columna por-campaña (la lectura
+    // campaign.fu_max_age_days era fantasma: la columna no existe → siempre undefined).
+    const maxAgeDays = parseInt(process.env.FU_MAX_AGE_DAYS ?? '30')
     const tooOldIso = new Date(Date.now() - maxAgeDays * 86_400_000).toISOString()
 
     // LEFT JOIN: traemos leads con O sin thread_id — para invites sin nota
@@ -1053,7 +1059,9 @@ async function tryAutoReplyForCampaign(campaign, account) {
 
   // Safety gate: solo procesar replies recientes — los históricos viejos
   // probablemente ya se respondieron manualmente o quedaron en olvido.
-  const maxAgeDays = campaign.fm_max_age_days ?? parseInt(process.env.FM_MAX_AGE_DAYS ?? '7')
+  // Knob GLOBAL vía env FM_MAX_AGE_DAYS; no hay columna por-campaña (la lectura
+  // campaign.fm_max_age_days era fantasma: la columna no existe → siempre undefined).
+  const maxAgeDays = parseInt(process.env.FM_MAX_AGE_DAYS ?? '7')
   const tooOldIso = new Date(Date.now() - maxAgeDays * 86_400_000).toISOString()
 
   // Orden DESC (replies MÁS RECIENTES primero) — antes era ASC limit 5, lo que
@@ -1233,11 +1241,13 @@ async function tryAutoReplyForCampaign(campaign, account) {
 
       // Marcamos AL DESPACHAR (no al confirmar): si esperáramos al ingest, el próximo tick
       // re-clasificaría y re-despacharía → doble cierre. hasInFlightCommand cubre la ventana.
-      await supabase.from('leads').update({
+      const { error: exitLeadErr } = await supabase.from('leads').update({
         status:      'dead',
         dead_reason: 'not_interested',
       }).eq('id', lead.id)
-      await supabase.from('conversations').update({ status: 'closed_lost' }).eq('id', conv.id)
+      if (exitLeadErr) console.error(`[SCH-EXT] ❌ exit leads.update ${lead.id.slice(0,8)}: ${exitLeadErr.message}`)
+      const { error: exitConvErr } = await supabase.from('conversations').update({ status: 'closed_lost' }).eq('id', conv.id)
+      if (exitConvErr) console.error(`[SCH-EXT] ❌ exit conversations.update ${conv.id.slice(0,8)}: ${exitConvErr.message}`)
 
       console.log(`[SCH-EXT]   🚪 EXIT ${lead.full_name} → dead/not_interested + closed_lost — "${exitRes.reason}"`)
       return {
