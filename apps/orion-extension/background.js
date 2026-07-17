@@ -30,6 +30,7 @@ let reconnectTimer = null      // timer del setTimeout en scheduleReconnect (can
 let lastCommandAt = 0          // timestamp del último comando dispatchado a un tab
 let lastCommandAction = null   // acción del último comando (para el indicador visual)
 let boundTabId = null          // tab.id de LinkedIn que recibió el último comando
+let lastInboundAt = 0          // ts del último frame del bridge (watchdog anti-zombie half-open, ext2)
 
 // ── Lifecycle ────────────────────────────────────────────────────────────────
 
@@ -71,6 +72,15 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'keep-alive') {
     if (ws && ws.readyState === WebSocket.OPEN) {
       try { ws.send(JSON.stringify({ type: 'ping', ts: Date.now() })) } catch {}
+      // ext2: watchdog de socket half-open. Tras un corte de red sin FIN el socket queda
+      // readyState=OPEN pero muerto; el bridge nos pinga cada 20s, así que >60s sin NINGÚN
+      // inbound = zombie. Cerrar → el handler 'close' dispara scheduleReconnect(). Sin esto la
+      // cuenta se apagaba en silencio (popup verde). El guard `lastInboundAt &&` evita cerrar
+      // un socket recién abierto que aún no recibió nada.
+      if (lastInboundAt && Date.now() - lastInboundAt > 60_000) {
+        console.warn('[Orion] socket half-open (>60s sin inbound) → forzando reconexión')
+        try { ws.close() } catch {}
+      }
     } else {
       initIfConfigured()
     }
@@ -277,9 +287,10 @@ async function connect(orionUrl, apiKey, accountId) {
   // Si había una vieja en estado raro, la cerramos
   if (ws) { try { ws.close() } catch {} ws = null }
 
-  // C1 fix (2026-05-29): auth lockout client-side. Si última auth_error fue hace
-  // <5min, NO intentes reconectar — evita loop infinito de 50+ Auth FAILED que
-  // satura logs del bridge y mata SW por retries excesivos.
+  // C1 fix (2026-05-29): auth lockout client-side SOLO para errores PERMANENTES (invalid_api_key
+  // / too_many_auth_failures_locked). Si sigue vigente, NO reconectes — evita el loop de 50+ Auth
+  // FAILED que satura el bridge y mata el SW. Se libera al expirar, al reconectar con auth_ok, o
+  // con el botón Reconectar del popup (que limpia auth_lockout_until). Transitorios NO ponen lockout.
   try {
     const { auth_lockout_until } = await chrome.storage.local.get('auth_lockout_until')
     if (auth_lockout_until && Date.now() < auth_lockout_until) {
@@ -308,6 +319,7 @@ async function connect(orionUrl, apiKey, accountId) {
     console.log('[Orion] WS connected')
     isConnecting = false
     reconnectAttempts = 0
+    lastInboundAt = Date.now()   // ext2: baseline para el watchdog (socket fresco = vivo)
     // Clear last auth error (estamos conectando otra vez)
     chrome.storage.local.remove('last_auth_error')
     // Auth handshake: enviar API key inmediatamente
@@ -325,6 +337,7 @@ async function connect(orionUrl, apiKey, accountId) {
   })
 
   ws.addEventListener('message', async (event) => {
+    lastInboundAt = Date.now()   // ext2: cualquier frame del bridge = socket vivo
     let msg
     try { msg = JSON.parse(event.data) } catch { return }
     await handleServerMessage(msg)
@@ -370,19 +383,31 @@ async function handleServerMessage(msg) {
   switch (msg.type) {
     case 'auth_ok':
       console.log('[Orion] Authenticated as', msg.accountLabel ?? msg.accountId)
+      chrome.storage.local.remove('auth_lockout_until')  // auth OK real → no queda lockout pendiente
+      // Re-afirma verde: 'open' setea CONNECTED=true optimista ANTES de autenticar; si un race
+      // dejó CONNECTED=false en un socket que sí autenticó, este es el momento de corregirlo.
+      chrome.storage.local.set({ [STORAGE_KEYS.CONNECTED]: true })
       return
-    case 'auth_error':
+    case 'auth_error': {
       console.error('[Orion] Auth failed:', msg.error)
-      // C1 fix (2026-05-29): set lockout client-side por 5min para no reciclar
-      // contra el server. Se libera automáticamente o con click manual en popup.
-      chrome.storage.local.set({
-        auth_lockout_until: Date.now() + 5 * 60_000,
-      })
+      // Clasificar PERMANENTE vs TRANSITORIO (incidente Josh 16-jul): antes CUALQUIER auth_error
+      // metía 5 min de lockout, así que un race transitorio de ~600ms mataba la cuenta 5 min.
+      // Solo los permanentes merecen lockout (evitan el retry-storm de 50+ Auth FAILED que motivó
+      // el fix C1); los transitorios reconectan con el backoff normal (~2s) y se auto-limpian al
+      // reconectar con auth_ok.
+      const PERMANENT = ['invalid_api_key']
+      if (msg.error === 'too_many_auth_failures_locked' && msg.retryAfter) {
+        chrome.storage.local.set({ auth_lockout_until: msg.retryAfter })  // honrar la ventana del server
+      } else if (PERMANENT.includes(msg.error)) {
+        chrome.storage.local.set({ auth_lockout_until: Date.now() + 5 * 60_000 })
+      }
+      // else: transitorio (auth_required, duplicate_connection_race, o código desconocido) → SIN lockout.
       chrome.storage.local.set({
         [STORAGE_KEYS.CONNECTED]: false,
         last_auth_error: { error: msg.error, ts: Date.now() },
       })
       return
+    }
     case 'ping':
       ws.send(JSON.stringify({ type: 'pong', ts: msg.ts }))
       return
@@ -1223,7 +1248,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false
   }
   if (msg.type === 'reconnect') {
-    initIfConfigured().catch(err => console.error('[Orion bg] initIfConfigured failed:', err))
+    // Reconexión MANUAL = override explícito del usuario. Limpiar el lockout ANTES de reconectar:
+    // antes el botón llamaba initIfConfigured() a secas, que respeta el lockout → era inútil
+    // justo cuando más se necesita (durante un lockout). Ahora sí desbloquea.
+    chrome.storage.local.remove('auth_lockout_until').then(() =>
+      initIfConfigured().catch(err => console.error('[Orion bg] initIfConfigured failed:', err)))
     sendResponse({ ok: true })
     return true
   }

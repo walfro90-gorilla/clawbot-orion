@@ -150,6 +150,14 @@ const ERROR_MESSAGES = {
   },
   auth_timeout: { title: 'Timeout de autenticación', detail: 'El server no respondió.' },
   auth_required: { title: 'Falta autenticación', detail: 'Reabre el popup.' },
+  too_many_auth_failures_locked: {
+    title: 'Demasiados intentos fallidos',
+    detail: 'El server bloqueó la reconexión unos minutos. Verifica tu API key; se reintenta solo, o pulsa Reconectar.',
+  },
+  duplicate_connection_race: {
+    title: 'Reconexión en curso',
+    detail: 'Otra pestaña/sesión estaba conectando. Se resuelve solo en segundos — no requiere acción.',
+  },
   config_invalid_ambos_campos_cruzados: {
     title: 'Cruzaste API Key y Account ID',
     detail: 'Abre Configuración abajo: API Key debe empezar con orion_sk_; Account ID debe ser un UUID con guiones. Re-pega ambos desde /dashboard/accounts.',
