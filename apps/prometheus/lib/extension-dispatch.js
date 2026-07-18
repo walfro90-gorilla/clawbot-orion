@@ -209,8 +209,9 @@ export async function hasInFlightCommand(leadId, action = null) {
 const ACCOUNT_HEALTH_CHECK_COOLDOWN_MS = 5 * 60 * 1000  // 5 min entre checks por cuenta
 const _lastAccountCheck = new Map()
 
-// Errores que NO cuentan al circuit breaker (son fault del lead, no de la cuenta)
-const LEAD_FAULT_ERRORS = new Set([
+// Errores que NO cuentan al circuit breaker (son fault del lead, no de la cuenta).
+// Exportado: el bridge lo usa para NO inflar daily_activity.errors con faults benignos.
+export const LEAD_FAULT_ERRORS = new Set([
   'lead_not_first_degree',
   'lead_invite_still_pending',
   'profile_not_found',

@@ -13,11 +13,27 @@ import { GoogleGenAI } from '@google/genai'
 import { supabase } from './supabase.js'
 
 const GEMINI_MODEL = 'gemini-2.5-flash'
-const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile'
+
+// Registro de proveedores compatibles con la API OpenAI (POST /chat/completions). Añadir un
+// proveedor = una fila (base URL + env de la key + modelo). Groq es el primario; Cerebras sirve
+// el MISMO Llama 3.3 70B desde una empresa DISTINTA → fallback sin cambio de tono ni de familia
+// de modelo, resiliencia real (no depende del uptime de un solo proveedor). Ver lib/*/resolveProvider.
+const OPENAI_COMPAT = {
+  groq:       { baseUrl: 'https://api.groq.com/openai/v1', keyEnv: 'GROQ_API_KEY',       model: process.env.GROQ_MODEL       || 'llama-3.3-70b-versatile' },
+  cerebras:   { baseUrl: 'https://api.cerebras.ai/v1',     keyEnv: 'CEREBRAS_API_KEY',   model: process.env.CEREBRAS_MODEL   || 'llama-3.3-70b' },
+  openrouter: { baseUrl: 'https://openrouter.ai/api/v1',   keyEnv: 'OPENROUTER_API_KEY', model: process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct' },
+  together:   { baseUrl: 'https://api.together.xyz/v1',    keyEnv: 'TOGETHER_API_KEY',   model: process.env.TOGETHER_MODEL   || 'meta-llama/Llama-3.3-70B-Instruct-Turbo' },
+}
+
+// Puro + exportado para test: nombre de proveedor → config OpenAI-compat, o null si no es uno.
+export function resolveProvider(name) {
+  return OPENAI_COMPAT[String(name ?? '').trim().toLowerCase()] ?? null
+}
+
 // Cadena de proveedores LLM: primario → fallback. Post-mortem 2026-07-03: el billing de
-// Gemini ("dunning deny") rompió TODA la generación por ser proveedor único. Groq primario
-// (rápido, free-tier, calidad Llama 3.3 70B validada) + Gemini fallback. Config por env:
-//   LLM_PROVIDERS="groq,gemini"  ·  GROQ_MODEL="llama-3.3-70b-versatile"
+// Gemini ("dunning deny") rompió TODA la generación por ser proveedor único. Config por env
+// (default groq,gemini). Cualquier combo OpenAI-compat es válido sin tocar código:
+//   LLM_PROVIDERS="groq,cerebras"  ·  GROQ_MODEL=…  ·  CEREBRAS_API_KEY=…
 const LLM_PROVIDERS = (process.env.LLM_PROVIDERS || 'groq,gemini')
   .split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
 
@@ -362,21 +378,28 @@ function buildReplyUserPrompt(lead, conversationHistory, calUrl) {
 }
 
 // ── Llamadas CRUDAS por proveedor (devuelven texto trimmed, o lanzan) ───────────
-async function callGroqRaw(systemPrompt, userPrompt, opts) {
-  const apiKey = process.env.GROQ_API_KEY
-  if (!apiKey) throw new Error('GROQ_API_KEY missing')
-  const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+// Genérico OpenAI-compatible: cubre groq/cerebras/openrouter/together (texto y JSON). Params
+// idénticos a los que tenían los callers específicos de Groq: texto → temp 0.85/max 500;
+// json → temp 0.2/max 300 + response_format json_object.
+async function callOpenAICompatRaw(providerName, systemPrompt, userPrompt, opts, json = false) {
+  const cfg = resolveProvider(providerName)
+  if (!cfg) throw new Error(`unknown OpenAI-compat provider: ${providerName}`)
+  const apiKey = process.env[cfg.keyEnv]
+  if (!apiKey) throw new Error(`${cfg.keyEnv} missing`)
+  const body = {
+    model: cfg.model,
+    messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
+    temperature: opts.temperature ?? (json ? 0.2 : 0.85),
+    max_tokens: json ? 300 : 500,
+  }
+  if (json) body.response_format = { type: 'json_object' }
+  const resp = await fetch(`${cfg.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: GROQ_MODEL,
-      messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
-      temperature: opts.temperature ?? 0.85,
-      max_tokens: 500,
-    }),
+    body: JSON.stringify(body),
   })
   const j = await resp.json()
-  if (j.error) throw new Error(`groq_${resp.status}: ${j.error.message || JSON.stringify(j.error)}`)
+  if (j.error) throw new Error(`${providerName}_${resp.status}: ${j.error.message || JSON.stringify(j.error)}`)
   return (j.choices?.[0]?.message?.content ?? '').trim()
 }
 
@@ -398,8 +421,8 @@ async function callGeminiRaw(systemPrompt, userPrompt, opts) {
 }
 
 function callProviderRaw(provider, systemPrompt, userPrompt, opts) {
-  if (provider === 'groq')   return callGroqRaw(systemPrompt, userPrompt, opts)
-  if (provider === 'gemini') return callGeminiRaw(systemPrompt, userPrompt, opts)
+  if (resolveProvider(provider)) return callOpenAICompatRaw(provider, systemPrompt, userPrompt, opts, false)
+  if (provider === 'gemini')     return callGeminiRaw(systemPrompt, userPrompt, opts)
   return Promise.reject(new Error(`unknown LLM provider: ${provider}`))
 }
 
@@ -641,26 +664,7 @@ export async function generateLinkedInReply(campaign, lead, ctx = {}, opts = {})
 
 // ── JSON mode con fallback de proveedor (clasificación, p.ej. qualifyPost) ───────
 // Pide JSON y parsea el objeto. NO aplica guard anti-placeholder ni truncación (eso es
-// para DMs). Mismo patrón Groq-primario/Gemini-fallback que callLLM.
-async function callGroqJsonRaw(systemPrompt, userPrompt, opts) {
-  const apiKey = process.env.GROQ_API_KEY
-  if (!apiKey) throw new Error('GROQ_API_KEY missing')
-  const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: GROQ_MODEL,
-      messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
-      temperature: opts.temperature ?? 0.2,
-      max_tokens: 300,
-      response_format: { type: 'json_object' },
-    }),
-  })
-  const j = await resp.json()
-  if (j.error) throw new Error(`groq_${resp.status}: ${j.error.message || JSON.stringify(j.error)}`)
-  return (j.choices?.[0]?.message?.content ?? '').trim()
-}
-
+// para DMs). El caller OpenAI-compat es el genérico callOpenAICompatRaw(..., json=true).
 async function callGeminiJsonRaw(systemPrompt, userPrompt, opts) {
   const apiKey = process.env.GEMINI_API_KEY
   if (!apiKey) throw new Error('GEMINI_API_KEY missing')
@@ -680,8 +684,8 @@ async function callGeminiJsonRaw(systemPrompt, userPrompt, opts) {
 }
 
 function callProviderJsonRaw(provider, systemPrompt, userPrompt, opts) {
-  if (provider === 'groq')   return callGroqJsonRaw(systemPrompt, userPrompt, opts)
-  if (provider === 'gemini') return callGeminiJsonRaw(systemPrompt, userPrompt, opts)
+  if (resolveProvider(provider)) return callOpenAICompatRaw(provider, systemPrompt, userPrompt, opts, true)
+  if (provider === 'gemini')     return callGeminiJsonRaw(systemPrompt, userPrompt, opts)
   return Promise.reject(new Error(`unknown LLM provider: ${provider}`))
 }
 

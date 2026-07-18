@@ -22,7 +22,7 @@ import http from 'http'
 import { URL } from 'url'
 import { supabase } from './lib/supabase.js'
 import dotenv from 'dotenv'
-import { checkAndKillLeadIfStuck, checkAccountHealthAndPause, dispatchInvite } from './lib/extension-dispatch.js'
+import { checkAndKillLeadIfStuck, checkAccountHealthAndPause, dispatchInvite, LEAD_FAULT_ERRORS } from './lib/extension-dispatch.js'
 import { isSystemLinkedInAccount } from './lib/system-accounts.js'
 import { isGroupConversationName } from './lib/group-conversation.js'
 import { applyLeadAttemptOutcome, isNonFaultError } from './lib/lead-failure.js'
@@ -393,6 +393,20 @@ async function handleCommandResult(msg) {
   }).eq('id', commandId)
 
   console.log(`[bridge] Command ${commandId.slice(0,8)} (${action}) → ${isError ? `ERROR (${result?.error ?? result?.status ?? 'unknown'})` : 'OK'}`)
+
+  // daily_activity.errors (17-jul): contar el error para el tile por cuenta — SOLO si NO es un
+  // lead-fault benigno (not_first_degree, etc.). Así el contador (que llevaba en 0 desde siempre)
+  // refleja fallas reales de sistema/página/red, no ruido esperado. Query de account_id solo en error.
+  if (isError) {
+    const errCode = result?.error ?? result?.reason ?? 'unknown'
+    if (!LEAD_FAULT_ERRORS.has(errCode)) {
+      const { data: cAcct } = await supabase.from('extension_commands').select('account_id').eq('id', commandId).maybeSingle()
+      if (cAcct?.account_id) {
+        const { error: incErrErr } = await supabase.rpc('increment_daily_activity', { p_account_id: cAcct.account_id, p_field: 'errors' })
+        if (incErrErr) console.error(`[bridge] ❌ RPC increment_daily_activity(errors) ${cAcct.account_id.slice(0,8)}: ${incErrErr.message}`)
+      }
+    }
+  }
 
   // ── Lead fault-tolerance tracking (FIFO + cooldown + quarantine) ──────────
   // Solo para acciones lead-scoped (invite/followup/reply). check_inbox/search

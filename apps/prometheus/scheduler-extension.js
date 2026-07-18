@@ -2253,6 +2253,12 @@ async function tick() {
 
     console.log(`[SCH-EXT] ━━ "${campaign.name}" (${account.label}) ━━`)
 
+    // try/catch por campaña (17-jul): antes un throw inesperado en cualquier job abortaba el TICK
+    // COMPLETO → las campañas siguientes perdían su turno (~5min). Ahora el error se aísla, se
+    // registra como scheduler_log status='error' (el tile "Errores hoy" deja de mentir) y el loop
+    // sigue con la próxima campaña. Cada tryXForCampaign ya maneja sus fallos esperados (return
+    // {reason}); esto captura solo lo inesperado.
+    try {
     // SEARCH (3.2)
     const searchRes = await trySearchForCampaign(campaign, account)
     if (searchRes.dispatched) {
@@ -2292,6 +2298,18 @@ async function tick() {
 
     // Pequeño jitter entre campañas (no ráfaga)
     await sleep(randInt(1000, 3000))
+    } catch (err) {
+      // ⚠️ NO tragarse abort/timeout: el soft-timeout del tick aborta la señal para CANCELAR las
+      // queries en vuelo y matar el tick zombie de raíz (post-mortem 03-jul). Si lo atrapáramos,
+      // el tick huérfano seguiría iterando campañas (cada una abortando al instante) en vez de
+      // morir en la primera → se anula el diseño anti-pile-up. Estos SÍ se propagan.
+      const msg = String(err?.message ?? err)
+      if (err?.name === 'AbortError' || /tick_soft_timeout|supabase_query_timeout|aborted/i.test(msg)) throw err
+      console.error(`[SCH-EXT] ❌ "${campaign.name}" (${account.label}) falló: ${msg}`)
+      await logJob({ campaignId: campaign.id, accountId: account.id, jobType: 'tick',
+        status: 'error', skipReason: msg.slice(0, 300) })
+      // resto: error de lógica de ESA campaña → aislado, el tick sigue con la próxima
+    }
   }
 
   // POST-PROSPECTING (v0.9): agente nuevo, corre junto a los demás. Inerte si no
@@ -2410,6 +2428,16 @@ async function runTickSafely() {
     console.error(`[SCH-EXT] Tick error (${consecutiveTickFailures} consecutivos): ${err?.message ?? err}`)
     if (err?.stack) console.error(`[SCH-EXT] Stack: ${err.stack.split('\n').slice(0, 6).join('\n')}`)
     lastTickAt = Date.now()  // el watchdog HUNG no debe doble-matar por el mismo tick lento
+    // Visibilidad en el tile "Errores hoy". OJO con el orden: la señal que acabamos de abortar
+    // mataría este insert — fetchWithTimeout la ve .aborted y aborta ANTES del fetch
+    // (lib/supabase.js:51), postgrest devuelve {data:null,error} (NO lanza, así que un .catch no
+    // salva) y la fila nunca existe. La desinstalamos solo para esta query y la re-instalamos
+    // ABORTADA → el kill-switch anti-zombie queda intacto. El await es necesario: sin él,
+    // setTickSignal(ctrl.signal) correría antes de que el fetch arranque y el insert volvería a morir
+    // (y un tick nuevo podría instalar su señal fresca y quedar envenenado por la vieja).
+    setTickSignal(null)
+    await logJob({ jobType: 'tick', status: 'error', skipReason: String(err?.message ?? err).slice(0, 300) }).catch(() => {})
+    setTickSignal(ctrl.signal)
     if (consecutiveTickFailures >= 3) notifyOps('scheduler_tick_fail', `Scheduler: ${consecutiveTickFailures} ticks fallidos consecutivos (último: ${err?.message ?? err}).`).catch(() => {})
   } finally {
     tickInFlight = false

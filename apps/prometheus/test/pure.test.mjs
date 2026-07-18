@@ -9,7 +9,7 @@ process.env.SUPABASE_URL ||= 'https://dummy.supabase.co'
 process.env.SUPABASE_SERVICE_ROLE_KEY ||= 'dummy_key_for_test'
 
 const { passesTitleFilters, meetsVersion } = await import('../lib/extension-dispatch.js')
-const { campaignPersonaBlock, hasLeftoverPlaceholder, detectExitIntent } = await import('../lib/ai-message.js')
+const { campaignPersonaBlock, hasLeftoverPlaceholder, detectExitIntent, resolveProvider } = await import('../lib/ai-message.js')
 
 test('passesTitleFilters — substring whitelist, junk, vacío, acentos, blacklist', () => {
   const wl = ['Director de Ventas', 'CEO', 'Director de Logística', 'Gerente General']
@@ -59,4 +59,18 @@ test('detectExitIntent — inbound vacío corta antes del LLM y no dispara exit'
     const r = await detectExitIntent(empty, 'nuestro último mensaje')
     assert.deepEqual(r, { exit: false, reason: 'empty_inbound' }, `vacío (${JSON.stringify(empty)}) → sin exit`)
   }
+})
+
+// Registro de proveedores LLM (fallback sin Gemini): resolveProvider mapea nombre→config.
+// La llamada real necesita API key (no testeable en local); esto fija el ruteo de la cadena.
+test('resolveProvider — proveedores OpenAI-compat + desconocidos', () => {
+  const g = resolveProvider('groq')
+  assert.ok(g && g.baseUrl.includes('groq.com') && g.keyEnv === 'GROQ_API_KEY' && g.model, 'groq resuelve')
+  const c = resolveProvider('cerebras')
+  assert.ok(c && c.baseUrl.includes('cerebras.ai') && c.keyEnv === 'CEREBRAS_API_KEY', 'cerebras resuelve (fallback sin Gemini)')
+  assert.equal(resolveProvider('GROQ'), g, 'case-insensitive')
+  assert.equal(resolveProvider('  groq '), g, 'trim')
+  assert.equal(resolveProvider('gemini'), null, 'gemini NO es OpenAI-compat (caso especial en callProviderRaw)')
+  assert.equal(resolveProvider('desconocido'), null, 'desconocido → null')
+  assert.equal(resolveProvider(null), null, 'null → null (no lanza)')
 })
