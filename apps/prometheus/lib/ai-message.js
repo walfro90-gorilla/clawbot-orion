@@ -399,7 +399,13 @@ async function callOpenAICompatRaw(providerName, systemPrompt, userPrompt, opts,
     body: JSON.stringify(body),
   })
   const j = await resp.json()
-  if (j.error) throw new Error(`${providerName}_${resp.status}: ${j.error.message || JSON.stringify(j.error)}`)
+  // Surface el HTTP status ADEMÁS de j.error: no todos los proveedores OpenAI-compat devuelven el
+  // fallo en {error:{message}} — Cerebras manda {message,type} plano en un 402, que con solo mirar
+  // j.error se colaba como respuesta vacía ("empty_response") y ocultaba el motivo real (billing).
+  if (!resp.ok || j.error) {
+    const detail = j.error?.message || j.message || JSON.stringify(j.error ?? j).slice(0, 200)
+    throw new Error(`${providerName}_${resp.status}: ${detail}`)
+  }
   return (j.choices?.[0]?.message?.content ?? '').trim()
 }
 
