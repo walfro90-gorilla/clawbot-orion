@@ -22,7 +22,7 @@ import {
   hasInFlightCommand, wasMessageRecentlySent,
   passesTitleFilters,
   dispatchSearch, dispatchInvite, dispatchCheckInbox, dispatchCheckSentInvites, dispatchCheckConnections, dispatchFollowup,
-  dispatchCommand,
+  dispatchCommand, dispatchResolveCompanies, COMPANY_SCOPED_MIN_VERSION, meetsVersion,
   checkCampaignActiveGates,
   dispatchPostSearch, dispatchCommentOnPost, checkPostCampaignActiveGates,
   getDailyCommentsToday, getEffectiveCommentCap,
@@ -224,9 +224,141 @@ async function getEligiblePendingCount(campaign) {
   return n
 }
 
+// ── v0.10.0 — cursor de empresas objetivo (campaign_target_companies) ────────
+// La lista que el usuario edita sigue siendo campaigns.search_company_names (sin UI
+// nueva); estas filas son el CURSOR (qué empresa toca) + la caché del company URN.
+// Lote chico a propósito: el comando ocupa la pestaña ~1-2min (una navegación por
+// empresa) y un invite en cola expira a los 10min. 12 × ~5s ≈ 1min de ocupación.
+const COMPANY_RESOLVE_BATCH  = 12      // empresas por comando resolve_companies
+const COMPANY_RESOLVE_MAX_TRIES = 3
+const COMPANY_RESOLVE_RETRY_H = 24
+const TITLE_GROUP_MAX_CHARS  = 200     // cap del query booleano de LinkedIn
+const COMPANY_DRY_STREAK_ESCAPE = 5    // válvula: N búsquedas secas seguidas → 1 title-only
+
+// Sincroniza search_company_names → filas. Inserta las nuevas, borra las que el
+// usuario quitó de la lista. Idempotente (unique index por campaign+lower(name)).
+// IO: la lista cambia rara vez y el tick corre cada 5min → TTL en proceso para no
+// releer 200 filas 288 veces al día (post-mortem 2026-07-03).
+const COMPANY_SYNC_TTL_MS = 30 * 60_000
+const lastCompanySync = new Map()
+
+async function syncTargetCompanies(campaignId, names) {
+  const last = lastCompanySync.get(campaignId) ?? 0
+  if (Date.now() - last < COMPANY_SYNC_TTL_MS) return
+  lastCompanySync.set(campaignId, Date.now())
+
+  const { data: rows } = await supabase
+    .from('campaign_target_companies')
+    .select('id, name')
+    .eq('campaign_id', campaignId)
+  const have = new Map((rows ?? []).map(r => [r.name.toLowerCase(), r]))
+  const want = new Map(names.map(n => [n.toLowerCase(), n]))
+
+  const toInsert = [...want].filter(([k]) => !have.has(k))
+    .map(([, name]) => ({ campaign_id: campaignId, name }))
+  if (toInsert.length) {
+    const { error } = await supabase.from('campaign_target_companies').insert(toInsert)
+    if (error) console.warn(`[SCH-EXT] syncTargetCompanies insert: ${error.message}`)
+    else console.log(`[SCH-EXT]   🏢 +${toInsert.length} empresas objetivo nuevas`)
+  }
+  const toDelete = [...have].filter(([k]) => !want.has(k)).map(([, r]) => r.id)
+  if (toDelete.length) {
+    await supabase.from('campaign_target_companies').delete().in('id', toDelete)
+    console.log(`[SCH-EXT]   🏢 -${toDelete.length} empresas fuera de la lista`)
+  }
+}
+
+// Empresas sin URN todavía resolvible (nunca intentadas, o reintentables tras 24h).
+async function pendingResolveCompanies(campaignId, limit) {
+  const retryIso = new Date(Date.now() - COMPANY_RESOLVE_RETRY_H * 3_600_000).toISOString()
+  const { data } = await supabase
+    .from('campaign_target_companies')
+    .select('id, name, resolve_attempts, resolve_attempted_at')
+    .eq('campaign_id', campaignId)
+    .eq('status', 'pending')
+    .lt('resolve_attempts', COMPANY_RESOLVE_MAX_TRIES)
+    .or(`resolve_attempted_at.is.null,resolve_attempted_at.lt.${retryIso}`)
+    .order('resolve_attempts', { ascending: true })
+    .order('created_at', { ascending: true })
+    .limit(limit)
+  return data ?? []
+}
+
+// Cursor: la empresa lista (o degradada) que lleva más tiempo sin visitarse.
+// nulls first ⇒ primero las que nunca se buscaron → una vuelta completa a la lista
+// antes de repetir ninguna.
+async function pickNextTargetCompany(campaignId) {
+  const { data } = await supabase
+    .from('campaign_target_companies')
+    .select('id, name, linkedin_urn, slug, status, last_searched_at')
+    .eq('campaign_id', campaignId)
+    .in('status', ['ready', 'unresolved'])
+    .order('last_searched_at', { ascending: true, nullsFirst: true })
+    .limit(1)
+    .maybeSingle()
+  return data ?? null
+}
+
+// Grupo booleano de títulos: una visita a la empresa cubre VARIOS puestos objetivo
+// ("Director de Compras" OR "Gerente de Logística" OR ...), que es lo que pide el flujo
+// (revisar los 20-30 puestos de la empresa) en vez de 1 título por búsqueda.
+// Devuelve { query, used } — `used` avanza el cursor de keywords.
+function buildTitleGroup(kws, startIdx) {
+  const parts = []
+  let used = 0
+  for (let i = 0; i < kws.length; i++) {
+    const kw = kws[(startIdx + i) % kws.length]
+    const term = /\s/.test(kw) ? `"${kw}"` : kw
+    const next = parts.concat(term).join(' OR ')
+    if (parts.length && next.length > TITLE_GROUP_MAX_CHARS) break
+    parts.push(term)
+    used++
+  }
+  return { query: parts.join(' OR '), used: Math.max(1, used) }
+}
+
 async function trySearchForCampaign(campaign, account) {
   if (campaign.search_paused) {
     return { skipped: true, reason: 'search_paused' }
+  }
+
+  // ── Modo company-scoped (v0.10.0) ──────────────────────────────────────────
+  // Requiere ext ≥0.10.0: una ext vieja ignora companyUrn y buscaría por título en
+  // TODO LinkedIn (el bug que reportó Josh). Sin la versión, degradamos a title-only.
+  const companyNames = Array.isArray(campaign.search_company_names)
+    ? campaign.search_company_names.filter(Boolean) : []
+  const extReady = meetsVersion(account.ext_version, COMPANY_SCOPED_MIN_VERSION)
+  const companyMode = companyNames.length > 0 && extReady
+  if (companyNames.length > 0 && !extReady) {
+    console.warn(`[SCH-EXT]   ⚠️  "${campaign.name}": ${companyNames.length} empresas configuradas pero ext ${account.ext_version ?? '?'} <${COMPANY_SCOPED_MIN_VERSION} — recarga la extensión. Búsqueda title-only mientras tanto.`)
+  }
+
+  // Resolución de URNs: NO pasa por el gap de búsqueda (si no, 182 empresas = meses).
+  // Un comando resuelve un lote entero; a ~1 lote por tick la lista queda lista en <1h.
+  if (companyMode) {
+    await syncTargetCompanies(campaign.id, companyNames)
+    const toResolve = await pendingResolveCompanies(campaign.id, COMPANY_RESOLVE_BATCH)
+    if (toResolve.length > 0) {
+      if (DRY_RUN) {
+        console.log(`[SCH-EXT] DRY_RUN resolve_companies ×${toResolve.length}`)
+        return { dispatched: false, dryRun: true, keyword: `resolve×${toResolve.length}` }
+      }
+      const cmdId = await dispatchResolveCompanies(account, toResolve)
+      if (cmdId) {
+        // Stamp del intento AL DESPACHAR: si el comando se pierde, el lote no se
+        // reintenta hasta dentro de 24h en vez de martillarse cada tick.
+        const nowIso = new Date().toISOString()
+        await Promise.all(toResolve.map(c =>
+          supabase.from('campaign_target_companies')
+            .update({ resolve_attempts: (c.resolve_attempts ?? 0) + 1, resolve_attempted_at: nowIso })
+            .eq('id', c.id)))
+        await logJob({
+          campaignId: campaign.id, accountId: account.id, jobType: 'search',
+          status: 'dispatched', details: { commandId: cmdId, mode: 'resolve_companies', count: toResolve.length },
+        })
+        return { dispatched: true, commandId: cmdId, keyword: `resolve×${toResolve.length}` }
+      }
+    }
   }
 
   const searchGapHours = campaign.search_gap_hours ?? 24
@@ -270,25 +402,43 @@ async function trySearchForCampaign(campaign, account) {
   }
   const curIdx = campaign.last_search_keyword_idx ?? 0
   const idx = curIdx % kws.length
-  const keyword = kws[idx]
-  const nextIdx = (idx + 1) % kws.length
+
+  // v0.10.0: la válvula anti-sequía YA NO borra la lista de empresas. Antes:
+  // `starving = criticalDrought && companies.length > 0` → la búsqueda por empresa rinde
+  // pocos ejecutivos ⇒ drought permanente ⇒ empresa borrada SIEMPRE (15 de 17 búsquedas
+  // medidas) ⇒ nunca salía del drought. Bucle que se auto-alimentaba y anulaba la feature.
+  // Escape nuevo, acotado: solo si N búsquedas SEGUIDAS vinieron secas se hace UNA
+  // title-only de reabastecimiento (dry_search_streak se resetea al primer lead nuevo).
+  const escapeDry = companyMode && dryStreak >= COMPANY_DRY_STREAK_ESCAPE
+  const target = (companyMode && !escapeDry) ? await pickNextTargetCompany(campaign.id) : null
+  if (escapeDry) console.log(`[SCH-EXT]   🔎 ${campaign.name}: ${dryStreak} búsquedas secas seguidas → 1 title-only de reabastecimiento`)
+
+  // Con empresa: grupo booleano de títulos (varios puestos objetivo en UNA visita).
+  // Sin empresa: 1 keyword rotado, comportamiento de siempre.
+  const group = target ? buildTitleGroup(kws, idx) : null
+  const keyword = target ? group.query : kws[idx]
+  const nextIdx = (idx + (target ? group.used : 1)) % kws.length
 
   if (DRY_RUN) {
-    console.log(`[SCH-EXT] DRY_RUN search "${campaign.name}" keyword="${keyword}"`)
+    console.log(`[SCH-EXT] DRY_RUN search "${campaign.name}" keyword="${keyword}"${target ? ` @${target.name}` : ''}`)
     return { dispatched: false, dryRun: true, keyword }
   }
 
-  // v0.7.46/48: válvula de volumen — en DROUGHT CRÍTICO (≤critical ejecutivos elegibles) y
-  // campaña company-scoped (rinde ~1 exec/50), esta búsqueda va title-only para reabastecer
-  // rápido y NO secarse. Con pool sano (>critical) se mantiene el targeting por empresa.
-  const companies = Array.isArray(campaign.search_company_names) ? campaign.search_company_names.filter(Boolean) : []
-  const starving = criticalDrought && companies.length > 0
-  const searchCampaign = starving ? { ...campaign, search_company_names: [] } : campaign
-  if (starving) console.log(`[SCH-EXT]   🔎 ${campaign.name}: drought crítico (${eligibleCount} elegibles) → búsqueda title-only "${keyword}" (válvula de volumen)`)
+  if (target) {
+    console.log(`[SCH-EXT]   🏢 ${campaign.name}: empresa "${target.name}"${target.linkedin_urn ? ` (urn ${target.linkedin_urn})` : ' (sin urn — match por nombre)'} × ${group.used} títulos`)
+  }
 
-  const cmdId = await dispatchSearch(account, searchCampaign, keyword)
+  const cmdId = await dispatchSearch(account, campaign, keyword, { targetCompany: target })
   if (!cmdId) {
     return { skipped: true, reason: 'dispatch_failed' }
+  }
+
+  // Cursor: stamp AL DESPACHAR (no al ingest) — si la búsqueda falla o vuelve vacía,
+  // el cursor igual avanza a la siguiente empresa en vez de atascarse en una.
+  if (target) {
+    await supabase.from('campaign_target_companies')
+      .update({ last_searched_at: new Date().toISOString() })
+      .eq('id', target.id)
   }
 
   await supabase.from('campaigns')
@@ -301,7 +451,7 @@ async function trySearchForCampaign(campaign, account) {
   await logJob({
     campaignId: campaign.id, accountId: account.id, jobType: 'search',
     status: 'dispatched',
-    details: { commandId: cmdId, keyword, pendingBefore: eligibleCount },
+    details: { commandId: cmdId, keyword, pendingBefore: eligibleCount, company: target?.name ?? null },
   })
 
   return { dispatched: true, commandId: cmdId, keyword }
@@ -2150,7 +2300,7 @@ async function tick() {
       fm1_example_reply, fm2_example_reply, fm3_example_reply,
       min_pending_threshold, daily_invite_target, min_batch_gap_min, search_gap_hours,
       schedule_start_hour, schedule_end_hour, schedule_days,
-      last_searched_at, last_batch_at, last_search_keyword_idx,
+      last_searched_at, last_batch_at, last_search_keyword_idx, dry_search_streak,
       last_followup_at, last_followup2_at, last_followup3_at, last_followup4_at, last_followup5_at,
       follow_up_message, follow_up_delay_days, follow_up_delay_hours,
       follow_up_step2_message, follow_up_step2_delay_hours,
@@ -2168,7 +2318,7 @@ async function tick() {
         sent_invites_gap_min, last_sent_invites_check_at, last_connections_check_at,
         reply_delay_min, reply_delay_max,
         extension_paused, extension_paused_reason, extension_paused_until, timezone, cal_com_url,
-        extension_last_seen_at, search_mode
+        extension_last_seen_at, search_mode, ext_version
       )
     `)
     .eq('is_active', true)

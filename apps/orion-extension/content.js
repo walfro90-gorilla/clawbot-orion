@@ -1448,6 +1448,8 @@ async function executeAction(action, payload) {
         : searchLeads(payload))
     case 'search_posts':
       return await searchPosts(payload)
+    case 'resolve_company':
+      return await resolveCompanyOnPage(payload)
     case 'comment_on_post':
       return await commentOnPost(payload)
     case 'publish_post':
@@ -4723,6 +4725,63 @@ async function humanTypeContentEditable(el, text, options = {}) {
 // los perfiles aunque geoUrn ya filtró server-side → Wal/Josh scrapeaban 0.
 function _normForFilter(s) {
   return String(s ?? '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+}
+
+// ── v0.10.0 — resolve_company: nombre de empresa → company URN + slug ────────
+// background.js ya navegó a /search/results/companies/?keywords=<nombre>. Aquí
+// sacamos el primer resultado. El URN numérico es lo que necesita el facet
+// currentCompany de people-search (única forma de acotar DE VERDAD por empresa;
+// meter el nombre en el keyword es match difuso).
+const COMPANY_URN_RE = /urn:li:(?:fsd_company|organization|company):(\d+)/
+
+async function resolveCompanyOnPage(payload = {}) {
+  const wanted = _normForFilter(payload.name)
+  if (!/\/search\/results\/companies/.test(location.pathname)) {
+    return { action: 'resolve_company', status: 'error', error: 'not_on_company_search_page', currentUrl: location.href }
+  }
+  await waitForSelector(['main', 'div.search-results-container'], 15000)
+  await sleep(1200)  // hidratación del primer resultado
+
+  // Scope a <main>: fuera de ahí hay links a /company/ del chrome de LinkedIn
+  // (anuncios, footer) que secuestrarían el primer resultado.
+  const scope = document.querySelector('main') ?? document
+  const link = Array.from(scope.querySelectorAll('a[href*="/company/"]'))
+    .find(a => /\/company\/[^/?#]+/.test(a.getAttribute('href') ?? '')
+            && (a.textContent ?? '').trim().length > 0)
+  if (!link) {
+    const bodyTxt = _normForFilter(document.body?.innerText ?? '')
+    const captcha = ['captcha', 'verify you are human', 'verifica que eres humano', 'security check'].some(s => bodyTxt.includes(s))
+    return { action: 'resolve_company', status: captcha ? 'error' : 'ok',
+             error: captcha ? 'captcha_detected' : 'no_company_results',
+             urn: null, slug: null, matched: false, currentUrl: location.href }
+  }
+
+  const href = link.getAttribute('href') ?? ''
+  const slug = (href.match(/\/company\/([^/?#]+)/) ?? [])[1] ?? null
+
+  // Card = ancestro con el urn del resultado; si no, subimos 4 niveles como en people-search.
+  const card = link.closest('[data-chameleon-result-urn]')
+    || link.closest('li')
+    || link.parentElement?.parentElement?.parentElement?.parentElement
+    || null
+
+  let urn = null
+  const attr = card?.getAttribute?.('data-chameleon-result-urn') ?? ''
+  urn = (attr.match(COMPANY_URN_RE) ?? [])[1]
+     ?? (card?.outerHTML?.match(COMPANY_URN_RE) ?? [])[1]
+     ?? (document.documentElement.innerHTML.match(COMPANY_URN_RE) ?? [])[1]
+     ?? null
+
+  // Guard anti-empresa-equivocada: el primer resultado debe compartir su token más
+  // largo con lo que pedimos. Sin esto, "Alcosa" podría bindear a otra empresa y
+  // toda la campaña invitaría a la compañía incorrecta.
+  const title = _normForFilter(link.textContent ?? '')
+  const tokens = wanted.split(/[^a-z0-9]+/).filter(t => t.length > 3)
+  const matched = tokens.length === 0
+    ? title.includes(wanted)
+    : tokens.some(t => title.includes(t) || _normForFilter(slug ?? '').includes(t))
+
+  return { action: 'resolve_company', status: 'ok', urn, slug, matched, resultTitle: title.slice(0, 80) }
 }
 
 // ── Post-Prospecting (v0.9) ──────────────────────────────────────────────────

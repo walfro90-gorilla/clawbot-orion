@@ -546,6 +546,16 @@ async function executeCommand(commandId, action, payload) {
     // como defensa-en-profundidad para el caso SW respawn / commandChain perdida.
     await pingContentForTypingPhase(commandId, 30_000)
 
+    // v0.10.0 resolve_companies: MULTI-navegación en un solo comando (N empresas por
+    // comando, no N comandos). Cada empresa = 1 nav a /search/results/companies/ +
+    // 1 extract. Sale del flujo normal (que es 1 nav + 1 sendMessage) por eso el
+    // return temprano.
+    if (action === 'resolve_companies') {
+      const result = await resolveCompanies(commandId, payload ?? {})
+      reportResult(commandId, action, result)
+      return
+    }
+
     let tab
     // send_invite: navegar DIRECTO al SPA route /preload/custom-invite/?vanityName=
     // — LinkedIn abre el modal automáticamente. Evitamos el click problemático
@@ -723,6 +733,35 @@ function locationsToGeoUrns(locs) {
   return [...ids]
 }
 
+// v0.10.0 — resuelve N empresas (nombre → company URN + slug) en UN comando.
+// Una empresa = 1 navegación a /search/results/companies/ + 1 extract en content.js.
+// Batchear evita gastar un comando (y un gap de search) por empresa: una lista de 180
+// empresas se resuelve en ~9 ticks en vez de ~76 días.
+async function resolveCompanies(commandId, payload) {
+  const companies = Array.isArray(payload.companies) ? payload.companies : []
+  const resolved = []
+  for (const c of companies) {
+    if (!c?.name) continue
+    const url = `https://www.linkedin.com/search/results/companies/?keywords=${encodeURIComponent(c.name)}&origin=GLOBAL_SEARCH_HEADER`
+    try {
+      const tab = await navigateTabAndWait(url, 20000)
+      const r = await sendMessageWithRetry(tab.id, {
+        type: 'orion_command', commandId, action: 'resolve_company', payload: { name: c.name },
+      }, 4)
+      resolved.push({
+        id: c.id, name: c.name,
+        urn: r?.urn ?? null, slug: r?.slug ?? null,
+        matched: !!r?.matched, error: r?.error ?? null,
+      })
+      console.log(`[Orion] resolve_company "${c.name}" → urn=${r?.urn ?? '—'} slug=${r?.slug ?? '—'}`)
+    } catch (err) {
+      resolved.push({ id: c.id, name: c.name, urn: null, slug: null, matched: false, error: err.message ?? String(err) })
+    }
+    await sleep(2000 + Math.floor(Math.random() * 2500))  // ritmo humano entre navegaciones
+  }
+  return { action: 'resolve_companies', status: 'ok', resolved }
+}
+
 function buildSearchUrl(payload) {
   const base = 'https://www.linkedin.com/search/results/people/'
   const params = new URLSearchParams()
@@ -736,12 +775,22 @@ function buildSearchUrl(payload) {
     const buckets = mapMinEmployeesToBuckets(minE)
     if (buckets?.length) params.set('companySize', JSON.stringify(buckets))
   }
+  // v0.10.0 COMPANY-SCOPED: facet nativo currentCompany (id numérico de la organización).
+  // Sustituye al hack de meter el nombre de la empresa dentro del keyword (match difuso,
+  // ~10% de acierto medido). Con facet, el 100% de los resultados trabaja AHÍ.
+  if (payload.companyUrn) {
+    params.set('currentCompany', JSON.stringify([String(payload.companyUrn)]))
+    params.set('origin', 'FACETED_SEARCH')  // el que usa la UI al aplicar filtros
+  }
   // geoUrn array (fix 29-may-2026): mapea locations conocidas → IDs LinkedIn.
   // Si user pone "Mexico City, Monterrey, Chile" → params.geoUrn=["101463827","103642308","104621616"]
   // → LinkedIn filtra resultados a esas 3 ubicaciones server-side (eficiente).
   // Si ninguna location matchea (ej. "Mi pueblo"), no se pasa geoUrn → búsqueda global +
   // content.js post-filter por substring (menos eficiente pero universal).
-  const geoUrns = locationsToGeoUrns(payload.locations)
+  // Con empresa NO filtramos geografía: el diagrama pide la empresa "en todas las
+  // regiones donde opera", y el geo rotado peleaba contra la empresa (caso real:
+  // Nexteer Automotive Mexico + geoUrn=Estados Unidos → 0 resultados).
+  const geoUrns = payload.companyUrn ? [] : locationsToGeoUrns(payload.locations)
   if (geoUrns.length) params.set('geoUrn', JSON.stringify(geoUrns))
   return `${base}?${params.toString()}`
 }

@@ -461,7 +461,7 @@ export default async function CampaignEditPage({ params }: { params: Promise<{ i
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <Field label="🏢 Empresas específicas (opcional)"
-                  hint="Lista separada por comas. Si se llena, solo se conservan leads cuyo headline contenga alguna. Vacío = no filtrar.">
+                  hint="Lista maestra separada por comas. Cada búsqueda se acota a UNA empresa con el filtro nativo de LinkedIn (rota hasta cubrir la lista completa) y barre varios puestos objetivo por visita. Vacío = búsqueda por título.">
                   <input name="search_company_names"
                     defaultValue={toComma((c as any).search_company_names)}
                     placeholder="Coca-Cola, Microsoft, IBM" className={inp} />

@@ -823,6 +823,14 @@ async function handleCommandResult(msg) {
       console.error(`[bridge] ingest search failed:`, err.message)
     }
   }
+  // resolve_companies ingest (v0.10.0) — nombre de empresa → company URN cacheado
+  if (!isError && action === 'resolve_companies' && Array.isArray(result?.resolved)) {
+    try {
+      await ingestResolveCompanies(result.resolved)
+    } catch (err) {
+      console.error(`[bridge] ingest resolve_companies failed:`, err.message)
+    }
+  }
   // check_sent_invites ingest — marca leads como connected si dejaron de estar pending
   if (!isError && action === 'check_sent_invites' && result?.status === 'ok' && Array.isArray(result?.pending)) {
     try {
@@ -1126,9 +1134,17 @@ async function ingestSearch(commandId, result) {
     return
   }
 
+  // v0.10.0: de qué empresa objetivo vino esta búsqueda (null = búsqueda por título).
+  const targetCompanyId   = cmd.payload?.targetCompanyId ?? null
+  const targetCompanyName = cmd.payload?.targetCompany ?? null
+  // Solo con facet currentCompany LinkedIn GARANTIZA que el perfil trabaja ahí. Sin URN
+  // (empresa no resuelta) la búsqueda fue por texto → NO poblamos currentCompany: sería
+  // darle a la IA una empresa inventada (NO_INVENT_COMPANY_RULE).
+  const companyIsCertain = !!cmd.payload?.companyUrn && !!targetCompanyName
+
   const profiles = result.profiles ?? []
   if (profiles.length === 0) {
-    console.log(`[bridge] search ${commandId.slice(0,8)}: 0 perfiles`)
+    console.log(`[bridge] search ${commandId.slice(0,8)}: 0 perfiles${targetCompanyName ? ` (@${targetCompanyName})` : ''}`)
     await bumpDrySearchStreak(campaignId, 0)
     return
   }
@@ -1148,7 +1164,14 @@ async function ingestSearch(commandId, result) {
       campaign_id:  campaignId,
       linkedin_url: p.profileUrl,
       full_name:    p.name ?? null,
-      profile_data: { headline: p.headline, location: p.location, source: 'extension_search' },
+      profile_data: {
+        headline: p.headline, location: p.location, source: 'extension_search',
+        // v0.10.0: empresa objetivo de la que salió el lead.
+        ...(targetCompanyName ? { targetCompany: targetCompanyName } : {}),
+        // Con facet es dato DURO (lo filtró LinkedIn) → mejor que la inferencia del LLM
+        // desde el headline, y ahorra ese pass.
+        ...(companyIsCertain ? { currentCompany: targetCompanyName } : {}),
+      },
       status:       'scraped',
       source:       'extension_search',
       scraped_at:   new Date().toISOString(),
@@ -1166,8 +1189,49 @@ async function ingestSearch(commandId, result) {
     return
   }
 
-  console.log(`[bridge] ✅ search ingested: ${toInsert.length} leads nuevos (${profiles.length - toInsert.length} duplicados) en campaña ${campaignId.slice(0,8)}`)
+  console.log(`[bridge] ✅ search ingested: ${toInsert.length} leads nuevos (${profiles.length - toInsert.length} duplicados) en campaña ${campaignId.slice(0,8)}${targetCompanyName ? ` @${targetCompanyName}` : ''}`)
   await bumpDrySearchStreak(campaignId, toInsert.length)
+
+  if (targetCompanyId) {
+    const { data: row } = await supabase
+      .from('campaign_target_companies').select('leads_found').eq('id', targetCompanyId).maybeSingle()
+    await supabase.from('campaign_target_companies')
+      .update({ leads_found: (row?.leads_found ?? 0) + toInsert.length })
+      .eq('id', targetCompanyId)
+  }
+}
+
+// v0.10.0 — resultado de resolve_companies → caché de URNs.
+// ready      = URN resuelto y el nombre matchea → facet currentCompany en las búsquedas.
+// unresolved = agotó los 3 intentos → se busca por "nombre exacto" (degradado, no bloqueado).
+// pending    = falló pero le quedan intentos → el scheduler reintenta en 24h.
+const COMPANY_RESOLVE_MAX_TRIES = 3
+
+async function ingestResolveCompanies(resolved) {
+  const ids = resolved.map(r => r?.id).filter(Boolean)
+  if (ids.length === 0) return
+  const { data: rows } = await supabase
+    .from('campaign_target_companies').select('id, resolve_attempts').in('id', ids)
+  const attempts = new Map((rows ?? []).map(r => [r.id, r.resolve_attempts ?? 0]))
+
+  let ok = 0, degraded = 0, retry = 0
+  for (const r of resolved) {
+    if (!r?.id) continue
+    if (r.urn && r.matched) {
+      await supabase.from('campaign_target_companies')
+        .update({ status: 'ready', linkedin_urn: String(r.urn), slug: r.slug ?? null })
+        .eq('id', r.id)
+      ok++
+    } else if ((attempts.get(r.id) ?? 0) >= COMPANY_RESOLVE_MAX_TRIES) {
+      await supabase.from('campaign_target_companies')
+        .update({ status: 'unresolved', slug: r.slug ?? null })
+        .eq('id', r.id)
+      degraded++
+    } else {
+      retry++
+    }
+  }
+  console.log(`[bridge] ✅ resolve_companies: ${ok} ready, ${degraded} sin URN (búsqueda por nombre), ${retry} a reintento`)
 }
 
 // ── Ingest: search_posts → inserta post_opportunities (status='scraped') ─────

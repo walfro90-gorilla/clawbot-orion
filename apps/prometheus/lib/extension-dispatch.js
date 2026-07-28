@@ -14,7 +14,13 @@ import { stampLastAttempt } from './lead-failure.js'
 // Solo se listan las acciones nuevas — las demás no se gatean (min undefined = sin gate).
 const ACTION_MIN_VERSION = {
   check_connections: '0.9.15',
+  resolve_companies: '0.10.0',
 }
+
+// v0.10.0: la búsqueda con facet currentCompany requiere la misma versión. Una ext
+// vieja IGNORA payload.companyUrn y buscaría solo por título → leads de cualquier
+// empresa. El scheduler consulta esto antes de entrar en modo company-scoped.
+export const COMPANY_SCOPED_MIN_VERSION = '0.10.0'
 
 // Compara semver simple (a.b.c). Versión desconocida (null) = demasiado vieja → fail-closed.
 export function meetsVersion(have, min) {
@@ -646,7 +652,7 @@ export async function dispatchCommand(accountId, action, payload, opts = {}) {
 
 // ── Convenience wrappers ─────────────────────────────────────────────────────
 
-export async function dispatchSearch(account, campaign, keywords) {
+export async function dispatchSearch(account, campaign, keywords, opts = {}) {
   // Convertir location single-string ("Mexico City, Monterrey, Guadalajara, ...")
   // a array de strings para que content.js pueda hacer post-filter por substring
   // y background.js mapeé a geoUrn IDs en URL.
@@ -666,41 +672,55 @@ export async function dispatchSearch(account, campaign, keywords) {
     rotatedLocations = [locationArr[locIdx]]
   }
 
-  // v0.7.26 BUSCAR POR EMPRESA (opción C): si la campaña tiene search_company_names,
-  // la empresa va DENTRO de los keywords ("Director General Softtek"). LinkedIn
-  // full-text search indexa la empresa actual aunque NO esté en el headline, así
-  // que esto SÍ surface gente de esa empresa — sin el bug del post-filter por
-  // headline (que mataba todo) ni necesidad de company URN lookup.
-  //   - company_names vacío → búsqueda por title (comportamiento normal).
-  //   - company_names con valores → keyword = "${title} ${empresa_rotada}", y NO
-  //     se pasa companyNames al post-filter (content.js no filtra — deja que la
-  //     relevancia de LinkedIn decida).
-  const companies = Array.isArray(campaign.search_company_names) ? campaign.search_company_names.filter(Boolean) : []
+  // v0.10.0 BUSCAR POR EMPRESA — facet nativo, cursor por empresa.
+  // Antes (v0.7.26): la empresa se concatenaba al keyword ("Director General Softtek")
+  // y se rotaba con el MISMO índice que el título → cobertura diagonal, match difuso,
+  // 10% de acierto medido en CAFE 57. Ahora la empresa llega resuelta desde
+  // campaign_target_companies (opts.targetCompany) y viaja como companyUrn → facet
+  // currentCompany en la URL. Sin URN resuelto degradamos al nombre entre comillas
+  // (mejor que nada, y el nombre exacto es más estricto que el texto suelto de antes).
+  const tc = opts.targetCompany ?? null
   let finalKeywords = keywords ?? campaign.search_keywords?.[0] ?? 'Director'
-  let postFilterCompanies = null
-  if (companies.length > 0) {
-    // Rotar empresa con el mismo idx que la keyword (cubre combinaciones title×empresa)
-    const compIdx = (campaign.last_search_keyword_idx ?? 0) % companies.length
-    finalKeywords = `${finalKeywords} ${companies[compIdx]}`
-    // postFilterCompanies queda null → content.js NO post-filtra por headline
-  }
+  if (tc && !tc.linkedin_urn) finalKeywords = `"${tc.name}" ${finalKeywords}`
 
   return dispatchCommand(account.id, 'search', {
     campaignId:       campaign.id,
     // Fase 1 (SalesNav): el modo viaja en el payload. La extensión aún lo IGNORA (busca free);
     // en fase 2, buildSearchUrl ramifica a /sales/search/people/ cuando es 'sales_navigator'.
-    searchMode:       account.search_mode ?? 'free',
+    // v0.10.0: con empresa forzamos el buscador FREE. La URL de SalesNav que construimos hoy
+    // es keywords-only (sin filtros nativos) → no sabe de currentCompany y se comería el
+    // scoping por empresa (caso real: la cuenta de Josh, search_mode='sales_navigator').
+    // El free con facet es MÁS targeted que ese SalesNav v1, y SalesNav no restringe la
+    // búsqueda free de su propia cuenta.
+    // ponytail: si algún día hace falta el alcance nativo de SalesNav, el upgrade es añadir
+    // filters:List((type:CURRENT_COMPANY,...)) a buildSalesNavSearchUrl y quitar este forzado.
+    searchMode:       tc ? 'free' : (account.search_mode ?? 'free'),
     keywords:         finalKeywords,
-    locations:        rotatedLocations.length ? rotatedLocations : null,  // 1 país rotado (geoUrn + post-filter)
-    location:         locationStr || null,                       // legacy single-string (ignorado en URL builder)
+    companyUrn:       tc?.linkedin_urn ?? null,   // facet currentCompany (v0.10.0)
+    targetCompanyId:  tc?.id ?? null,             // para que el bridge marque el cursor + etiquete leads
+    targetCompany:    tc?.name ?? null,
+    // Con empresa NO se filtra geografía (la empresa opera donde opera) ni se post-filtra
+    // por location: el facet ya acota y el geo rotado mataba búsquedas legítimas.
+    locations:        tc ? null : (rotatedLocations.length ? rotatedLocations : null),
+    location:         tc ? null : (locationStr || null),         // legacy single-string (ignorado en URL builder)
     secondDegreeOnly: campaign.search_2nd_degree_only !== false,
-    minEmployees:     campaign.search_min_employees ?? null,
-    companyNames:     postFilterCompanies,  // v0.7.26: null cuando buscamos por empresa en keyword
+    // El filtro de tamaño no aplica cuando YA elegimos la empresa (y podría excluirla).
+    minEmployees:     tc ? null : (campaign.search_min_employees ?? null),
+    companyNames:     null,  // post-filter por headline: sigue muerto (era el bug de v0.7.26)
     titleWhitelist:   campaign.title_whitelist ?? null,
     titleBlacklist:   campaign.title_blacklist ?? null,
     targetCount:      Math.min(campaign.search_count ?? 25, 50),
     maxPages:         4,
   }, { expiresInMinutes: 15 })
+}
+
+// v0.10.0 — resuelve un LOTE de empresas (nombre → company URN) en un solo comando.
+// La extensión navega una vez por empresa dentro del mismo comando; batchear evita
+// gastar un gap de búsqueda por empresa.
+export async function dispatchResolveCompanies(account, companies) {
+  return dispatchCommand(account.id, 'resolve_companies', {
+    companies: companies.map(c => ({ id: c.id, name: c.name })),
+  }, { expiresInMinutes: 20 })
 }
 
 export async function dispatchInvite(account, lead, opts = {}) {

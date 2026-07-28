@@ -62,7 +62,7 @@ export const FIELDS: ConfigField[] = [
 
   // ── Búsqueda ───────────────────────────────────────────────────────────────
   { key: "search_keywords", store: "campaign", type: "list", tab: "busqueda", label: "Keywords (coma)", hint: "Títulos a buscar. Se rotan." },
-  { key: "search_company_names", store: "campaign", type: "list", tab: "busqueda", label: "Empresas (coma)", hint: "Opcional. Empresa va dentro del keyword (match suave)." },
+  { key: "search_company_names", store: "campaign", type: "list", tab: "busqueda", label: "Empresas (coma)", hint: "Opcional. Lista maestra: se busca UNA empresa por búsqueda (filtro nativo de LinkedIn), rotando hasta cubrirlas todas." },
   { key: "search_location", store: "campaign", type: "text", tab: "busqueda", label: "Ubicación" },
   { key: "search_count", store: "campaign", type: "int", tab: "busqueda", label: "Perfiles por búsqueda", bounds: { hardMin: 1, hardMax: 50 } },
   { key: "search_2nd_degree_only", store: "campaign", type: "bool", tab: "busqueda", label: "Solo 2do grado" },

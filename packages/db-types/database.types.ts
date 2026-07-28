@@ -92,6 +92,117 @@ export type Database = {
           },
         ]
       }
+      account_config: {
+        Row: {
+          account_id: string
+          key: string
+          locked: boolean
+          previous_value: Json | null
+          reason: string | null
+          source: string
+          updated_at: string
+          updated_by: string
+          value: Json
+        }
+        Insert: {
+          account_id: string
+          key: string
+          locked?: boolean
+          previous_value?: Json | null
+          reason?: string | null
+          source?: string
+          updated_at?: string
+          updated_by?: string
+          value: Json
+        }
+        Update: {
+          account_id?: string
+          key?: string
+          locked?: boolean
+          previous_value?: Json | null
+          reason?: string | null
+          source?: string
+          updated_at?: string
+          updated_by?: string
+          value?: Json
+        }
+        Relationships: [
+          {
+            foreignKeyName: "account_config_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: false
+            referencedRelation: "linkedin_accounts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "account_config_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: false
+            referencedRelation: "v_account_today"
+            referencedColumns: ["account_id"]
+          },
+        ]
+      }
+      account_config_audit: {
+        Row: {
+          account_id: string
+          actor_email: string | null
+          actor_id: string | null
+          created_at: string
+          id: string
+          key: string
+          payload_after: Json | null
+          payload_before: Json | null
+          reason: string | null
+          reverted_at: string | null
+          reverted_by: string | null
+          source: string | null
+        }
+        Insert: {
+          account_id: string
+          actor_email?: string | null
+          actor_id?: string | null
+          created_at?: string
+          id?: string
+          key: string
+          payload_after?: Json | null
+          payload_before?: Json | null
+          reason?: string | null
+          reverted_at?: string | null
+          reverted_by?: string | null
+          source?: string | null
+        }
+        Update: {
+          account_id?: string
+          actor_email?: string | null
+          actor_id?: string | null
+          created_at?: string
+          id?: string
+          key?: string
+          payload_after?: Json | null
+          payload_before?: Json | null
+          reason?: string | null
+          reverted_at?: string | null
+          reverted_by?: string | null
+          source?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "account_config_audit_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: false
+            referencedRelation: "linkedin_accounts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "account_config_audit_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: false
+            referencedRelation: "v_account_today"
+            referencedColumns: ["account_id"]
+          },
+        ]
+      }
       account_connectivity_log: {
         Row: {
           created_at: string
@@ -206,12 +317,14 @@ export type Database = {
       ai_playbook: {
         Row: {
           applies_to_turns: number[]
+          campaign_id: string | null
           created_at: string
           created_by: string | null
           description: string | null
           example_message: string
           id: string
           is_active: boolean
+          kind: string
           outcome: string
           outcome_count: number
           situation: string | null
@@ -220,12 +333,14 @@ export type Database = {
         }
         Insert: {
           applies_to_turns?: number[]
+          campaign_id?: string | null
           created_at?: string
           created_by?: string | null
           description?: string | null
           example_message: string
           id?: string
           is_active?: boolean
+          kind?: string
           outcome?: string
           outcome_count?: number
           situation?: string | null
@@ -234,19 +349,43 @@ export type Database = {
         }
         Update: {
           applies_to_turns?: number[]
+          campaign_id?: string | null
           created_at?: string
           created_by?: string | null
           description?: string | null
           example_message?: string
           id?: string
           is_active?: boolean
+          kind?: string
           outcome?: string
           outcome_count?: number
           situation?: string | null
           tags?: string[]
           title?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "ai_playbook_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "campaigns"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "ai_playbook_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "v_campaign_stats"
+            referencedColumns: ["campaign_id"]
+          },
+          {
+            foreignKeyName: "ai_playbook_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "v_crm_lead_list"
+            referencedColumns: ["campaign_id_actual"]
+          },
+        ]
       }
       appointments: {
         Row: {
@@ -387,6 +526,131 @@ export type Database = {
           },
         ]
       }
+      campaign_followups: {
+        Row: {
+          campaign_id: string
+          created_at: string | null
+          delay_unit: string
+          delay_value: number
+          enabled: boolean
+          id: string
+          jitter_hours: number
+          message: string | null
+          step: number
+          updated_at: string | null
+        }
+        Insert: {
+          campaign_id: string
+          created_at?: string | null
+          delay_unit?: string
+          delay_value?: number
+          enabled?: boolean
+          id?: string
+          jitter_hours?: number
+          message?: string | null
+          step: number
+          updated_at?: string | null
+        }
+        Update: {
+          campaign_id?: string
+          created_at?: string | null
+          delay_unit?: string
+          delay_value?: number
+          enabled?: boolean
+          id?: string
+          jitter_hours?: number
+          message?: string | null
+          step?: number
+          updated_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "campaign_followups_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "campaigns"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "campaign_followups_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "v_campaign_stats"
+            referencedColumns: ["campaign_id"]
+          },
+          {
+            foreignKeyName: "campaign_followups_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "v_crm_lead_list"
+            referencedColumns: ["campaign_id_actual"]
+          },
+        ]
+      }
+      campaign_target_companies: {
+        Row: {
+          campaign_id: string
+          created_at: string
+          id: string
+          last_searched_at: string | null
+          leads_found: number
+          linkedin_urn: string | null
+          name: string
+          resolve_attempted_at: string | null
+          resolve_attempts: number
+          slug: string | null
+          status: string
+        }
+        Insert: {
+          campaign_id: string
+          created_at?: string
+          id?: string
+          last_searched_at?: string | null
+          leads_found?: number
+          linkedin_urn?: string | null
+          name: string
+          resolve_attempted_at?: string | null
+          resolve_attempts?: number
+          slug?: string | null
+          status?: string
+        }
+        Update: {
+          campaign_id?: string
+          created_at?: string
+          id?: string
+          last_searched_at?: string | null
+          leads_found?: number
+          linkedin_urn?: string | null
+          name?: string
+          resolve_attempted_at?: string | null
+          resolve_attempts?: number
+          slug?: string | null
+          status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "campaign_target_companies_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "campaigns"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "campaign_target_companies_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "v_campaign_stats"
+            referencedColumns: ["campaign_id"]
+          },
+          {
+            foreignKeyName: "campaign_target_companies_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "v_crm_lead_list"
+            referencedColumns: ["campaign_id_actual"]
+          },
+        ]
+      }
       campaigns: {
         Row: {
           ai_company_context: string | null
@@ -400,6 +664,7 @@ export type Database = {
           batch_paused: boolean
           created_at: string | null
           daily_invite_target: number
+          dry_search_streak: number
           fm1_example_reply: string | null
           fm2_example_reply: string | null
           fm3_example_reply: string | null
@@ -418,10 +683,12 @@ export type Database = {
           follow_up_step4_message: string | null
           follow_up_step5_delay_hours: number | null
           follow_up_step5_message: string | null
+          followup_tone_directive: string | null
           gemini_system_prompt: string
           id: string
           invite_with_note: boolean
           is_active: boolean | null
+          is_shadow: boolean
           last_batch_at: string | null
           last_followup_at: string | null
           last_followup2_at: string | null
@@ -462,6 +729,7 @@ export type Database = {
           batch_paused?: boolean
           created_at?: string | null
           daily_invite_target?: number
+          dry_search_streak?: number
           fm1_example_reply?: string | null
           fm2_example_reply?: string | null
           fm3_example_reply?: string | null
@@ -480,10 +748,12 @@ export type Database = {
           follow_up_step4_message?: string | null
           follow_up_step5_delay_hours?: number | null
           follow_up_step5_message?: string | null
+          followup_tone_directive?: string | null
           gemini_system_prompt: string
           id?: string
           invite_with_note?: boolean
           is_active?: boolean | null
+          is_shadow?: boolean
           last_batch_at?: string | null
           last_followup_at?: string | null
           last_followup2_at?: string | null
@@ -524,6 +794,7 @@ export type Database = {
           batch_paused?: boolean
           created_at?: string | null
           daily_invite_target?: number
+          dry_search_streak?: number
           fm1_example_reply?: string | null
           fm2_example_reply?: string | null
           fm3_example_reply?: string | null
@@ -542,10 +813,12 @@ export type Database = {
           follow_up_step4_message?: string | null
           follow_up_step5_delay_hours?: number | null
           follow_up_step5_message?: string | null
+          followup_tone_directive?: string | null
           gemini_system_prompt?: string
           id?: string
           invite_with_note?: boolean
           is_active?: boolean | null
+          is_shadow?: boolean
           last_batch_at?: string | null
           last_followup_at?: string | null
           last_followup2_at?: string | null
@@ -788,6 +1061,7 @@ export type Database = {
       }
       daily_activity: {
         Row: {
+          comments_posted: number
           created_at: string | null
           date: string
           errors: number
@@ -799,6 +1073,7 @@ export type Database = {
           updated_at: string | null
         }
         Insert: {
+          comments_posted?: number
           created_at?: string | null
           date?: string
           errors?: number
@@ -810,6 +1085,7 @@ export type Database = {
           updated_at?: string | null
         }
         Update: {
+          comments_posted?: number
           created_at?: string | null
           date?: string
           errors?: number
@@ -840,6 +1116,7 @@ export type Database = {
       extension_commands: {
         Row: {
           account_id: string
+          acked_at: string | null
           action: string
           completed_at: string | null
           created_at: string
@@ -857,6 +1134,7 @@ export type Database = {
         }
         Insert: {
           account_id: string
+          acked_at?: string | null
           action: string
           completed_at?: string | null
           created_at?: string
@@ -874,6 +1152,7 @@ export type Database = {
         }
         Update: {
           account_id?: string
+          acked_at?: string | null
           action?: string
           completed_at?: string | null
           created_at?: string
@@ -924,6 +1203,85 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "v_lead_pipeline"
             referencedColumns: ["id"]
+          },
+        ]
+      }
+      generated_posts: {
+        Row: {
+          agent_id: string
+          approved_at: string | null
+          command_id: string | null
+          created_at: string
+          draft_text: string | null
+          edited_text: string | null
+          id: string
+          image_prompt: string | null
+          image_url: string | null
+          linkedin_account_id: string
+          published_at: string | null
+          reject_reason: string | null
+          scheduled_for: string | null
+          source_news: Json | null
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          agent_id: string
+          approved_at?: string | null
+          command_id?: string | null
+          created_at?: string
+          draft_text?: string | null
+          edited_text?: string | null
+          id?: string
+          image_prompt?: string | null
+          image_url?: string | null
+          linkedin_account_id: string
+          published_at?: string | null
+          reject_reason?: string | null
+          scheduled_for?: string | null
+          source_news?: Json | null
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          agent_id?: string
+          approved_at?: string | null
+          command_id?: string | null
+          created_at?: string
+          draft_text?: string | null
+          edited_text?: string | null
+          id?: string
+          image_prompt?: string | null
+          image_url?: string | null
+          linkedin_account_id?: string
+          published_at?: string | null
+          reject_reason?: string | null
+          scheduled_for?: string | null
+          source_news?: Json | null
+          status?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "generated_posts_agent_id_fkey"
+            columns: ["agent_id"]
+            isOneToOne: false
+            referencedRelation: "publish_agents"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "generated_posts_linkedin_account_id_fkey"
+            columns: ["linkedin_account_id"]
+            isOneToOne: false
+            referencedRelation: "linkedin_accounts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "generated_posts_linkedin_account_id_fkey"
+            columns: ["linkedin_account_id"]
+            isOneToOne: false
+            referencedRelation: "v_account_today"
+            referencedColumns: ["account_id"]
           },
         ]
       }
@@ -1020,6 +1378,8 @@ export type Database = {
           ai_message: string | null
           ai_qualified: boolean | null
           ai_subject: string | null
+          automation_paused: boolean
+          automation_paused_at: string | null
           awaiting_response_reason: string | null
           awaiting_response_since: string | null
           campaign_id: string | null
@@ -1028,7 +1388,9 @@ export type Database = {
           cooldown_until: string | null
           created_at: string | null
           dead_reason: string | null
+          disconnected_at: string | null
           disqualification_reason: string | null
+          followup_step: number
           full_name: string | null
           id: string
           inbound_message: string | null
@@ -1060,6 +1422,8 @@ export type Database = {
           ai_message?: string | null
           ai_qualified?: boolean | null
           ai_subject?: string | null
+          automation_paused?: boolean
+          automation_paused_at?: string | null
           awaiting_response_reason?: string | null
           awaiting_response_since?: string | null
           campaign_id?: string | null
@@ -1068,7 +1432,9 @@ export type Database = {
           cooldown_until?: string | null
           created_at?: string | null
           dead_reason?: string | null
+          disconnected_at?: string | null
           disqualification_reason?: string | null
+          followup_step?: number
           full_name?: string | null
           id?: string
           inbound_message?: string | null
@@ -1100,6 +1466,8 @@ export type Database = {
           ai_message?: string | null
           ai_qualified?: boolean | null
           ai_subject?: string | null
+          automation_paused?: boolean
+          automation_paused_at?: string | null
           awaiting_response_reason?: string | null
           awaiting_response_since?: string | null
           campaign_id?: string | null
@@ -1108,7 +1476,9 @@ export type Database = {
           cooldown_until?: string | null
           created_at?: string | null
           dead_reason?: string | null
+          disconnected_at?: string | null
           disqualification_reason?: string | null
+          followup_step?: number
           full_name?: string | null
           id?: string
           inbound_message?: string | null
@@ -1254,6 +1624,8 @@ export type Database = {
           extension_api_key: string | null
           extension_last_seen_at: string | null
           extension_paused: boolean
+          extension_paused_reason: string | null
+          extension_paused_until: string | null
           fingerprint_json: Json | null
           fingerprint_locked_at: string | null
           id: string
@@ -1264,6 +1636,7 @@ export type Database = {
           inbox_gap_min: number
           inbox_paused: boolean
           label: string | null
+          last_connections_check_at: string | null
           last_inbox_check_at: string | null
           last_sent_invites_check_at: string | null
           li_at_cookie: string
@@ -1277,12 +1650,12 @@ export type Database = {
           proxy_url: string | null
           reply_delay_max: number | null
           reply_delay_min: number | null
+          search_mode: string
           sent_invites_gap_min: number
           status: string | null
           timezone: string
           user_id: string | null
           warmup_started_at: string | null
-          search_mode: string
           warmup_status: string
         }
         Insert: {
@@ -1293,6 +1666,8 @@ export type Database = {
           extension_api_key?: string | null
           extension_last_seen_at?: string | null
           extension_paused?: boolean
+          extension_paused_reason?: string | null
+          extension_paused_until?: string | null
           fingerprint_json?: Json | null
           fingerprint_locked_at?: string | null
           id?: string
@@ -1303,6 +1678,7 @@ export type Database = {
           inbox_gap_min?: number
           inbox_paused?: boolean
           label?: string | null
+          last_connections_check_at?: string | null
           last_inbox_check_at?: string | null
           last_sent_invites_check_at?: string | null
           li_at_cookie: string
@@ -1316,12 +1692,12 @@ export type Database = {
           proxy_url?: string | null
           reply_delay_max?: number | null
           reply_delay_min?: number | null
+          search_mode?: string
           sent_invites_gap_min?: number
           status?: string | null
           timezone?: string
           user_id?: string | null
           warmup_started_at?: string | null
-          search_mode?: string
           warmup_status?: string
         }
         Update: {
@@ -1332,6 +1708,8 @@ export type Database = {
           extension_api_key?: string | null
           extension_last_seen_at?: string | null
           extension_paused?: boolean
+          extension_paused_reason?: string | null
+          extension_paused_until?: string | null
           fingerprint_json?: Json | null
           fingerprint_locked_at?: string | null
           id?: string
@@ -1342,6 +1720,7 @@ export type Database = {
           inbox_gap_min?: number
           inbox_paused?: boolean
           label?: string | null
+          last_connections_check_at?: string | null
           last_inbox_check_at?: string | null
           last_sent_invites_check_at?: string | null
           li_at_cookie?: string
@@ -1355,12 +1734,12 @@ export type Database = {
           proxy_url?: string | null
           reply_delay_max?: number | null
           reply_delay_min?: number | null
+          search_mode?: string
           sent_invites_gap_min?: number
           status?: string | null
           timezone?: string
           user_id?: string | null
           warmup_started_at?: string | null
-          search_mode?: string
           warmup_status?: string
         }
         Relationships: [
@@ -1689,6 +2068,250 @@ export type Database = {
           },
         ]
       }
+      post_campaigns: {
+        Row: {
+          comment_rules: string | null
+          created_at: string
+          daily_comment_target: number
+          gemini_system_prompt: string | null
+          id: string
+          is_active: boolean
+          last_commented_at: string | null
+          last_search_keyword_idx: number
+          last_searched_at: string | null
+          linkedin_account_id: string
+          min_comment_gap_min: number
+          min_pending_threshold: number
+          name: string
+          pitch_note: string | null
+          post_keywords: string[]
+          post_recency: string | null
+          post_search_paused: boolean
+          qualify_min_score: number
+          schedule_days: string[]
+          schedule_end_hour: number
+          schedule_start_hour: number
+          search_gap_hours: number
+          service_description: string | null
+          shadow_campaign_id: string | null
+          updated_at: string
+        }
+        Insert: {
+          comment_rules?: string | null
+          created_at?: string
+          daily_comment_target?: number
+          gemini_system_prompt?: string | null
+          id?: string
+          is_active?: boolean
+          last_commented_at?: string | null
+          last_search_keyword_idx?: number
+          last_searched_at?: string | null
+          linkedin_account_id: string
+          min_comment_gap_min?: number
+          min_pending_threshold?: number
+          name: string
+          pitch_note?: string | null
+          post_keywords?: string[]
+          post_recency?: string | null
+          post_search_paused?: boolean
+          qualify_min_score?: number
+          schedule_days?: string[]
+          schedule_end_hour?: number
+          schedule_start_hour?: number
+          search_gap_hours?: number
+          service_description?: string | null
+          shadow_campaign_id?: string | null
+          updated_at?: string
+        }
+        Update: {
+          comment_rules?: string | null
+          created_at?: string
+          daily_comment_target?: number
+          gemini_system_prompt?: string | null
+          id?: string
+          is_active?: boolean
+          last_commented_at?: string | null
+          last_search_keyword_idx?: number
+          last_searched_at?: string | null
+          linkedin_account_id?: string
+          min_comment_gap_min?: number
+          min_pending_threshold?: number
+          name?: string
+          pitch_note?: string | null
+          post_keywords?: string[]
+          post_recency?: string | null
+          post_search_paused?: boolean
+          qualify_min_score?: number
+          schedule_days?: string[]
+          schedule_end_hour?: number
+          schedule_start_hour?: number
+          search_gap_hours?: number
+          service_description?: string | null
+          shadow_campaign_id?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "post_campaigns_linkedin_account_id_fkey"
+            columns: ["linkedin_account_id"]
+            isOneToOne: false
+            referencedRelation: "linkedin_accounts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "post_campaigns_linkedin_account_id_fkey"
+            columns: ["linkedin_account_id"]
+            isOneToOne: false
+            referencedRelation: "v_account_today"
+            referencedColumns: ["account_id"]
+          },
+          {
+            foreignKeyName: "post_campaigns_shadow_campaign_id_fkey"
+            columns: ["shadow_campaign_id"]
+            isOneToOne: false
+            referencedRelation: "campaigns"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "post_campaigns_shadow_campaign_id_fkey"
+            columns: ["shadow_campaign_id"]
+            isOneToOne: false
+            referencedRelation: "v_campaign_stats"
+            referencedColumns: ["campaign_id"]
+          },
+          {
+            foreignKeyName: "post_campaigns_shadow_campaign_id_fkey"
+            columns: ["shadow_campaign_id"]
+            isOneToOne: false
+            referencedRelation: "v_crm_lead_list"
+            referencedColumns: ["campaign_id_actual"]
+          },
+        ]
+      }
+      post_opportunities: {
+        Row: {
+          approved_at: string | null
+          approved_by: string | null
+          author_headline: string | null
+          author_name: string | null
+          author_profile_url: string | null
+          command_id: string | null
+          created_at: string
+          draft_comment: string | null
+          edited_comment: string | null
+          id: string
+          last_error: string | null
+          lead_id: string | null
+          linkedin_account_id: string
+          post_campaign_id: string
+          post_permalink: string | null
+          post_text: string | null
+          post_urn: string
+          posted_at: string | null
+          qualify_reason: string | null
+          qualify_relevant: boolean | null
+          qualify_score: number | null
+          rejected_reason: string | null
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          approved_at?: string | null
+          approved_by?: string | null
+          author_headline?: string | null
+          author_name?: string | null
+          author_profile_url?: string | null
+          command_id?: string | null
+          created_at?: string
+          draft_comment?: string | null
+          edited_comment?: string | null
+          id?: string
+          last_error?: string | null
+          lead_id?: string | null
+          linkedin_account_id: string
+          post_campaign_id: string
+          post_permalink?: string | null
+          post_text?: string | null
+          post_urn: string
+          posted_at?: string | null
+          qualify_reason?: string | null
+          qualify_relevant?: boolean | null
+          qualify_score?: number | null
+          rejected_reason?: string | null
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          approved_at?: string | null
+          approved_by?: string | null
+          author_headline?: string | null
+          author_name?: string | null
+          author_profile_url?: string | null
+          command_id?: string | null
+          created_at?: string
+          draft_comment?: string | null
+          edited_comment?: string | null
+          id?: string
+          last_error?: string | null
+          lead_id?: string | null
+          linkedin_account_id?: string
+          post_campaign_id?: string
+          post_permalink?: string | null
+          post_text?: string | null
+          post_urn?: string
+          posted_at?: string | null
+          qualify_reason?: string | null
+          qualify_relevant?: boolean | null
+          qualify_score?: number | null
+          rejected_reason?: string | null
+          status?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "post_opportunities_lead_id_fkey"
+            columns: ["lead_id"]
+            isOneToOne: false
+            referencedRelation: "leads"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "post_opportunities_lead_id_fkey"
+            columns: ["lead_id"]
+            isOneToOne: false
+            referencedRelation: "v_crm_lead_list"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "post_opportunities_lead_id_fkey"
+            columns: ["lead_id"]
+            isOneToOne: false
+            referencedRelation: "v_lead_pipeline"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "post_opportunities_linkedin_account_id_fkey"
+            columns: ["linkedin_account_id"]
+            isOneToOne: false
+            referencedRelation: "linkedin_accounts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "post_opportunities_linkedin_account_id_fkey"
+            columns: ["linkedin_account_id"]
+            isOneToOne: false
+            referencedRelation: "v_account_today"
+            referencedColumns: ["account_id"]
+          },
+          {
+            foreignKeyName: "post_opportunities_post_campaign_id_fkey"
+            columns: ["post_campaign_id"]
+            isOneToOne: false
+            referencedRelation: "post_campaigns"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       profiles: {
         Row: {
           company_name: string | null
@@ -1730,6 +2353,78 @@ export type Database = {
           },
           {
             foreignKeyName: "profiles_linkedin_account_id_fkey"
+            columns: ["linkedin_account_id"]
+            isOneToOne: false
+            referencedRelation: "v_account_today"
+            referencedColumns: ["account_id"]
+          },
+        ]
+      }
+      publish_agents: {
+        Row: {
+          business_context: string | null
+          created_at: string
+          do_dont: string | null
+          gemini_system_prompt: string | null
+          id: string
+          ideas: string | null
+          is_active: boolean
+          last_generated_at: string | null
+          last_generated_for_date: string | null
+          linkedin_account_id: string
+          name: string
+          schedule_days: string[]
+          schedule_end_hour: number
+          schedule_start_hour: number
+          tone: string | null
+          updated_at: string
+        }
+        Insert: {
+          business_context?: string | null
+          created_at?: string
+          do_dont?: string | null
+          gemini_system_prompt?: string | null
+          id?: string
+          ideas?: string | null
+          is_active?: boolean
+          last_generated_at?: string | null
+          last_generated_for_date?: string | null
+          linkedin_account_id: string
+          name?: string
+          schedule_days?: string[]
+          schedule_end_hour?: number
+          schedule_start_hour?: number
+          tone?: string | null
+          updated_at?: string
+        }
+        Update: {
+          business_context?: string | null
+          created_at?: string
+          do_dont?: string | null
+          gemini_system_prompt?: string | null
+          id?: string
+          ideas?: string | null
+          is_active?: boolean
+          last_generated_at?: string | null
+          last_generated_for_date?: string | null
+          linkedin_account_id?: string
+          name?: string
+          schedule_days?: string[]
+          schedule_end_hour?: number
+          schedule_start_hour?: number
+          tone?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "publish_agents_linkedin_account_id_fkey"
+            columns: ["linkedin_account_id"]
+            isOneToOne: false
+            referencedRelation: "linkedin_accounts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "publish_agents_linkedin_account_id_fkey"
             columns: ["linkedin_account_id"]
             isOneToOne: false
             referencedRelation: "v_account_today"
@@ -2320,6 +3015,18 @@ export type Database = {
           },
         ]
       }
+      v_agent_health_7d: {
+        Row: {
+          action: string | null
+          business: number | null
+          failed: number | null
+          queued: number | null
+          success: number | null
+          success_pct: number | null
+          total: number | null
+        }
+        Relationships: []
+      }
       v_campaign_stats: {
         Row: {
           acceptance_rate_pct: number | null
@@ -2369,6 +3076,8 @@ export type Database = {
       v_crm_lead_list: {
         Row: {
           account_label: string | null
+          automation_paused: boolean | null
+          automation_paused_at: string | null
           awaiting_response_since: string | null
           campaign_id: string | null
           campaign_id_actual: string | null
@@ -2837,6 +3546,8 @@ export type Database = {
           ai_message: string | null
           ai_qualified: boolean | null
           ai_subject: string | null
+          automation_paused: boolean
+          automation_paused_at: string | null
           awaiting_response_reason: string | null
           awaiting_response_since: string | null
           campaign_id: string | null
@@ -2845,7 +3556,9 @@ export type Database = {
           cooldown_until: string | null
           created_at: string | null
           dead_reason: string | null
+          disconnected_at: string | null
           disqualification_reason: string | null
+          followup_step: number
           full_name: string | null
           id: string
           inbound_message: string | null
