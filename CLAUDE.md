@@ -128,6 +128,7 @@ Verifica el esquema real con el MCP de Supabase antes de cambiarlo.
 |-------|-----|
 | `linkedin_accounts` | cuentas LinkedIn: cookie, proxy, estado, `extension_api_key` |
 | `campaigns` | campañas vinculadas a una cuenta |
+| `campaign_target_companies` | lista maestra de empresas por campaña: cursor + caché del company URN — v0.10.0 (ver §5.1) |
 | `campaign_followups` | secuencia de FU por campaña (1..20 pasos) — v0.8 (ver §6) |
 | `leads` | leads: `profile_data` (JSON), `status`, `ai_message`, `headlineCompany`, `followup_step` |
 | `message_templates` | templates de mensaje por campaña (reglas para Gemini) |
@@ -151,6 +152,21 @@ pending → invite_sent → connected → follow_up_sent (followup_step 1..N) �
 `follow_up_sent` es genérico para toda la cadena; el paso vive en `leads.followup_step`.
 
 **Super DEAD — contacto que nos eliminó** (`leads.disconnected_at`, jul-2026): si un lead que estuvo **genuinamente conectado** (FU enviado / nos respondió / etapa post-conexión) vuelve a dar `not_first_degree`/`not_messageable`, significa que **el contacto nos ELIMINÓ de su red** → `markDisconnectedSuperDead` (`extension-bridge.js`): `status=dead` + `dead_reason=disconnected_by_contact` + `disconnected_at` + `automation_paused=true`. **NUNCA re-invitar/re-mensajear** (anti-ban). Distinto del revert a `invite_sent` que se aplica solo a un **falso-positivo** de accept-detection (lead sin evidencia de conexión real). `wasGenuinelyConnected()` decide. Cobertura reactiva = ruta compose (el guard InMail dispara antes de enviar); la ruta thread (FU multi-paso) requiere el check de grado en la extensión (pendiente).
+
+### 5.1 Búsqueda por empresa (v0.10.0, jul-2026)
+
+La lista que el usuario edita sigue siendo **`campaigns.search_company_names`** (Centro de Control → Búsqueda). `campaign_target_companies` NO tiene UI: el scheduler sincroniza filas desde ese array (TTL 30 min) y las usa como **cursor** (`last_searched_at nulls first` ⇒ una vuelta completa a la lista antes de repetir empresa) y como **caché del company URN**.
+
+Flujo por tick (`trySearchForCampaign` → `lib/extension-dispatch.js` → ext):
+1. **Resolver** (fuera del gap de búsqueda): empresas `status='pending'` → comando `resolve_companies` en lotes de 12; la ext navega `/search/results/companies/?keywords=<nombre>` y saca `urn:li:organization:<id>` + slug. `ready` (con URN) / `unresolved` (3 intentos fallidos → se busca por `"nombre exacto"`).
+2. **Buscar**: 1 empresa por búsqueda con **facet nativo `currentCompany`** + grupo booleano de títulos (`"Director de Compras" OR …`, cap 200 chars) ⇒ varios puestos objetivo por visita.
+3. Con empresa: **sin `geoUrn`**, sin `minEmployees`, y `searchMode` forzado a `free` (la URL de SalesNav es keywords-only y se comía el scoping).
+
+⚠️ **Requiere ext ≥0.10.0** (`COMPANY_SCOPED_MIN_VERSION`): una ext vieja ignora `companyUrn` y buscaría por título en TODO LinkedIn. Sin la versión el scheduler avisa y degrada a title-only.
+
+⚠️ **La válvula anti-sequía ya NO borra la lista de empresas.** Lo hacía en drought crítico, y como el modo empresa rinde pocos ejecutivos el drought era permanente → empresa borrada siempre → bucle que anulaba la feature (15 de 17 búsquedas medidas salieron title-only). Hoy el escape es acotado: solo tras `dry_search_streak ≥ 5` se hace UNA búsqueda title-only de reabastecimiento.
+
+Pendiente (Fase 2): invitar por **peso de responsabilidad** dentro de la empresa (hoy `tryInvitesForCampaign` toma random del top-5 del pool filtrado por whitelist, sin ranking de seniority ni agrupar por empresa).
 
 ### Tipos en código
 ```ts

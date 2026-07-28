@@ -72,11 +72,13 @@ Tres caídas de producción en un día (DB Supabase wedged por inanición de com
 | 2026-07-07 | **Warmup cliff + footgun del admin**: `effectiveWarmupCap` (rampa por edad) devuelve `null` al día 30 → una cuenta madura aún en `cold` colapsa a cap 5 (Wal 47d estrangulada 5/día). Fix operativo (promover `warmup_status`→`warming`, cap 5→12) + quitar el reset de `warmup_started_at` en `accounts/page.tsx` (promover desde el admin ya NO reinicia la rampa a día-0 = cap 3). |
 | 2026-07-07/08 | **Búsqueda dual Free / Sales Navigator** (`linkedin_accounts.search_mode`, toggle por cuenta): las cuentas Pro prospectan por `/sales/search/people` (pool sin el límite comercial de búsqueda del free) en vez de `/search/results/people/`. **Fase 1** flag + andamiaje scheduler (`6eeadca`). **Fase 2** scraper SalesNav en `content.js` (nombre en `[data-anonymize=person-name]`, v0.9.19). **Invite (v7-A, v0.9.23)**: SalesNav "Conectar" pide EMAIL a 2do-grado frío (gate anti-spam → empuja InMail); en vez de conectar desde SalesNav, la ext **resuelve el `/in/` público** del lead y el bridge persiste `linkedin_url=/in/` → invite + FU van por el **perfil público** (flujo free, sin muro de email). SalesNav = solo BÚSQUEDA. Anti-ban: SalesNav **no** sube el cap de invites — solo alimenta el supply (mata la sequía de cuentas hot). |
 
+| 2026-07-27 | **Búsqueda por empresa real** (ext v0.10.0, `campaign_target_companies`): la lista maestra de empresas apenas se usaba — medido en CAFE 57, 15 de 17 búsquedas salían title-only, 21/182 empresas tocadas, 10% de leads de la lista. Cuatro causas: la válvula anti-sequía **borraba** `search_company_names` en drought (y el modo empresa rinde poco ⇒ drought permanente ⇒ bucle que anulaba la feature); la empresa iba concatenada al keyword (match difuso, sin validar); la geografía rotada peleaba contra la empresa (0 resultados); y un solo índice `%N` para título y empresa (cobertura diagonal, ~76 días por vuelta). Ahora: tabla-cursor por empresa + caché de company URN (acción `resolve_companies`, por lotes), **facet nativo `currentCompany`** en la URL, sin `geoUrn` cuando hay empresa, grupo booleano de títulos (varios puestos por visita) y cursor `last_searched_at nulls first` (vuelta completa antes de repetir). Con empresa se fuerza el buscador free (la URL SalesNav es keywords-only y se comía el scoping). Ver `CLAUDE.md` §5/§7. |
+
 ---
 
 ## Estado de versiones (referencia rápida)
 
-- **Extensión Orion Sync**: `v0.9.23` (manifest) — popup FIFO/badges + búsqueda dual Free/SalesNav (scraper + invite vía resolución de `/in/`, v7-A).
+- **Extensión Orion Sync**: `v0.10.0` (manifest) — búsqueda company-scoped (facet `currentCompany` + `resolve_companies`) sobre popup FIFO/badges + búsqueda dual Free/SalesNav.
 - **Motor de follow-ups**: v0.8 (dinámico, `campaign_followups`).
 - **Orion**: Next 16.2.3 · React 19.
 - **Arquitectura**: Smart Hybrid (extensión + bridge WS). Playwright/Voyager = muerta.
