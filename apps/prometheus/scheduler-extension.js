@@ -20,7 +20,7 @@ import {
   isExtensionOnline, getConnectedAccountIds,
   getEffectiveDailyCap, getDailyActivityToday, getPendingLeadsCount,
   hasInFlightCommand, wasMessageRecentlySent,
-  passesTitleFilters,
+  passesTitleFilters, seniorityRank,
   dispatchSearch, dispatchInvite, dispatchCheckInbox, dispatchCheckSentInvites, dispatchCheckConnections, dispatchFollowup,
   dispatchCommand, dispatchResolveCompanies, COMPANY_SCOPED_MIN_VERSION, meetsVersion,
   checkCampaignActiveGates,
@@ -560,9 +560,18 @@ async function tryInvitesForCampaign(campaign, account) {
     return { skipped: true, reason: 'no_leads_pass_whitelist', candidatesChecked: candidates.length }
   }
 
-  // Pick aleatorio entre top 5 para humanización
-  const pool = whitelisted.slice(0, 5)
-  const lead = pool[Math.floor(Math.random() * pool.length)]
+  // Fase 2 (27-jul): ordenar por PESO DE RESPONSABILIDAD antes de elegir. El whitelist
+  // es plano (pasa/no pasa) → un Coordinador de Compras competía de igual a igual con el
+  // Director General y, como el desempate era FIFO, el ejecutivo top esperaba días
+  // (caso Josh 06-jul). Ahora: rank desc, y dentro del mismo rank se conserva el orden
+  // FIFO del SELECT (sort estable) para no romper la equidad ni el cooldown.
+  // Se mantiene el pick aleatorio para humanizar, pero sobre el top 3 ya rankeado.
+  const ranked = whitelisted
+    .map(l => ({ l, rank: seniorityRank(l.profile_data?.headline ?? '') }))
+    .sort((a, b) => b.rank - a.rank)
+  const pool = ranked.slice(0, 3)
+  const pick = pool[Math.floor(Math.random() * pool.length)]
+  const lead = pick.l
 
   // Decisión con/sin nota:
   // - campaign.invite_with_note=false (default) → SIEMPRE sin nota (mejor accept rate)
@@ -611,6 +620,8 @@ async function tryInvitesForCampaign(campaign, account) {
       withNote: !!message,
       messageLength: message?.length ?? 0,
       capUsage: `${invitesToday + 1}/${cap}`,
+      seniorityRank: pick.rank,
+      company: lead.profile_data?.targetCompany ?? lead.profile_data?.currentCompany ?? null,
     },
   })
 

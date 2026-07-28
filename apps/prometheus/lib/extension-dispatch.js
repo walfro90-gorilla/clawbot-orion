@@ -592,6 +592,35 @@ export function passesTitleFilters(headline, whitelist = [], blacklist = []) {
   return true
 }
 
+// ── Peso de responsabilidad (Fase 2, jul-2026) ───────────────────────────────
+// El flujo objetivo pide invitar "al top de más responsabilidad" de cada empresa. El
+// whitelist es PLANO (pasa/no pasa), así que un Coordinador de Compras competía de igual
+// a igual con el Director General. Esto ordena el pool ya filtrado.
+// Headline vacío → 0: no se penaliza ni se premia, cae al desempate FIFO de siempre.
+// ponytail: heurística por regex, no LLM. Si hace falta más finura (idiomas raros,
+// títulos inventados), el upgrade es puntuar con el LLM en el pass de enriquecimiento
+// y persistir el score — no complicar esta tabla.
+// OJO: normaliza con _stripAllMarks (no _stripAcc): ese preserva la ñ DESCOMPUESTA
+// (n + U+0303) para el whitelist, y un patrón con "ñ" precompuesta nunca casaría.
+const _stripAllMarks = (s) => (s ?? '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+
+const SENIORITY_TIERS = [
+  [5, /(^|[^a-z])(ceo|cfo|coo|cto|cio|cmo|cro|cso|cpo|chief|founder|co-?founder|owner|president[ea]?|propietari[oa]|duen[oa]|socio)([^a-z]|$)/],
+  [4, /(^|[^a-z])(vp|vicepresident[ea]?|vice president|director[a]? general|director[a]? ejecutiv[oa]|managing director|executive director|country manager|general manager|gerente general)([^a-z]|$)/],
+  [3, /(^|[^a-z])(director[a]?|head of|jef[ea])([^a-z]|$)/],
+  [2, /(^|[^a-z])(gerente|manager|lider|lead)([^a-z]|$)/],
+  [1, /(^|[^a-z])(coordinador[a]?|coordinator|supervisor[a]?|especialista|specialist|analista|analyst|ejecutiv[oa])([^a-z]|$)/],
+]
+
+export function seniorityRank(headline) {
+  const h = _stripAllMarks(headline)
+  if (!h) return 0
+  for (const [rank, re] of SENIORITY_TIERS) {
+    if (re.test(h)) return rank
+  }
+  return 0
+}
+
 // ── Core dispatch primitives ─────────────────────────────────────────────────
 
 /**
