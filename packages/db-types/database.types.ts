@@ -599,6 +599,7 @@ export type Database = {
           resolve_attempted_at: string | null
           resolve_attempts: number
           slug: string | null
+          sort_order: number
           status: string
         }
         Insert: {
@@ -612,6 +613,7 @@ export type Database = {
           resolve_attempted_at?: string | null
           resolve_attempts?: number
           slug?: string | null
+          sort_order?: number
           status?: string
         }
         Update: {
@@ -625,6 +627,7 @@ export type Database = {
           resolve_attempted_at?: string | null
           resolve_attempts?: number
           slug?: string | null
+          sort_order?: number
           status?: string
         }
         Relationships: [

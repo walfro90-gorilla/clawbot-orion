@@ -249,13 +249,16 @@ async function syncTargetCompanies(campaignId, names) {
 
   const { data: rows } = await supabase
     .from('campaign_target_companies')
-    .select('id, name')
+    .select('id, name, sort_order')
     .eq('campaign_id', campaignId)
   const have = new Map((rows ?? []).map(r => [r.name.toLowerCase(), r]))
-  const want = new Map(names.map(n => [n.toLowerCase(), n]))
+  // sort_order = posición en la lista del usuario. Sin esto, la primera vuelta iba en
+  // orden arbitrario (todas con last_searched_at NULL y el mismo created_at del INSERT
+  // en bloque) y "la 1era empresa de la lista" no era la primera en buscarse.
+  const want = new Map(names.map((n, i) => [n.toLowerCase(), { name: n, pos: i }]))
 
   const toInsert = [...want].filter(([k]) => !have.has(k))
-    .map(([, name]) => ({ campaign_id: campaignId, name }))
+    .map(([, v]) => ({ campaign_id: campaignId, name: v.name, sort_order: v.pos }))
   if (toInsert.length) {
     const { error } = await supabase.from('campaign_target_companies').insert(toInsert)
     if (error) console.warn(`[SCH-EXT] syncTargetCompanies insert: ${error.message}`)
@@ -265,6 +268,14 @@ async function syncTargetCompanies(campaignId, names) {
   if (toDelete.length) {
     await supabase.from('campaign_target_companies').delete().in('id', toDelete)
     console.log(`[SCH-EXT]   🏢 -${toDelete.length} empresas fuera de la lista`)
+  }
+  // Reordenar solo lo que cambió de posición (el usuario movió la lista).
+  for (const [k, v] of want) {
+    const row = have.get(k)
+    if (row && row.sort_order !== v.pos) {
+      await supabase.from('campaign_target_companies')
+        .update({ sort_order: v.pos }).eq('id', row.id)
+    }
   }
 }
 
@@ -279,7 +290,7 @@ async function pendingResolveCompanies(campaignId, limit) {
     .lt('resolve_attempts', COMPANY_RESOLVE_MAX_TRIES)
     .or(`resolve_attempted_at.is.null,resolve_attempted_at.lt.${retryIso}`)
     .order('resolve_attempts', { ascending: true })
-    .order('created_at', { ascending: true })
+    .order('sort_order', { ascending: true })   // el primer lote resuelve el inicio de la lista
     .limit(limit)
   return data ?? []
 }
@@ -294,6 +305,7 @@ async function pickNextTargetCompany(campaignId) {
     .eq('campaign_id', campaignId)
     .in('status', ['ready', 'unresolved'])
     .order('last_searched_at', { ascending: true, nullsFirst: true })
+    .order('sort_order', { ascending: true })   // primera vuelta = orden de la lista del usuario
     .limit(1)
     .maybeSingle()
   return data ?? null
