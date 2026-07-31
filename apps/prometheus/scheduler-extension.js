@@ -452,12 +452,28 @@ async function trySearchForCampaign(campaign, account) {
   // sella al cerrar el pase, y como el cursor ordena por él (nulls first), la empresa
   // sigue seleccionada mientras barre sus puestos.
   if (target) {
-    await supabase.from('campaign_target_companies')
-      .update({
-        title_idx: tt.nextIdx,
-        ...(tt.passDone ? { last_searched_at: new Date().toISOString() } : {}),
-      })
-      .eq('id', target.id)
+    const upd = { title_idx: tt.nextIdx }
+    if (tt.passDone) {
+      upd.last_searched_at = new Date().toISOString()
+      // Autocuración (31-jul): si tras un pase COMPLETO la empresa no dio NI UN lead,
+      // lo más probable es que el URN apunte a una página DUPLICADA/fantasma de esa
+      // empresa (LinkedIn tiene varias; "mondelez internacional" resolvía a una con 4
+      // empleados alcanzables mientras la real es otra). La devolvemos a la cola de
+      // resolución para que el scorer por seguidores elija de nuevo. resolve_attempts
+      // NO se reinicia → como mucho 3 intentos y luego queda 'unresolved' (búsqueda
+      // por nombre), sin bucle infinito.
+      const { data: row } = await supabase
+        .from('campaign_target_companies')
+        .select('leads_found, resolve_attempts')
+        .eq('id', target.id).maybeSingle()
+      if ((row?.leads_found ?? 0) === 0 && (row?.resolve_attempts ?? 0) < COMPANY_RESOLVE_MAX_TRIES) {
+        upd.status = 'pending'
+        upd.linkedin_urn = null
+        upd.resolve_attempted_at = null
+        console.log(`[SCH-EXT]   ♻️  "${target.name}": pase completo sin un solo lead → re-resolver URN (intento ${(row?.resolve_attempts ?? 0) + 1}/${COMPANY_RESOLVE_MAX_TRIES})`)
+      }
+    }
+    await supabase.from('campaign_target_companies').update(upd).eq('id', target.id)
   }
 
   await supabase.from('campaigns')

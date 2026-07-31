@@ -805,10 +805,17 @@ function buildSearchUrl(payload) {
 function buildSalesNavSearchUrl(payload) {
   const base = 'https://www.linkedin.com/sales/search/people'
   const kw = (payload.keywords || '').trim()
-  const query = kw
-    ? `(spellCorrectionEnabled:true,keywords:${kw})`
-    : '(spellCorrectionEnabled:true)'
-  return `${base}?query=${encodeURIComponent(query)}`
+  const parts = ['spellCorrectionEnabled:true']
+  if (kw) parts.push(`keywords:${kw}`)
+  // v0.10.1 — filtro nativo de empresa en SalesNav. El buscador FREE solo muestra
+  // gente dentro de tu red: en la cuenta Café 57, Mondelēz devolvía 4 personas en
+  // total. SalesNav ve toda la empresa, que es justo lo que necesita el flujo de
+  // "todos los puestos de esta empresa". Los ':' se codifican con encodeURIComponent
+  // (SalesNav los espera así); los paréntesis quedan literales.
+  if (payload.companyUrn) {
+    parts.push(`filters:List((type:CURRENT_COMPANY,values:List((id:urn:li:organization:${payload.companyUrn},selectionType:INCLUDED))))`)
+  }
+  return `${base}?query=${encodeURIComponent(`(${parts.join(',')})`)}`
 }
 
 // Post-Prospecting (v0.9): URL de búsqueda de CONTENIDO (posts), no de personas.

@@ -4729,10 +4729,34 @@ function _normForFilter(s) {
 
 // ── v0.10.0 — resolve_company: nombre de empresa → company URN + slug ────────
 // background.js ya navegó a /search/results/companies/?keywords=<nombre>. Aquí
-// sacamos el primer resultado. El URN numérico es lo que necesita el facet
+// elegimos la MEJOR coincidencia. El URN numérico es lo que necesita el facet
 // currentCompany de people-search (única forma de acotar DE VERDAD por empresa;
 // meter el nombre en el keyword es match difuso).
+//
+// v0.10.1 — NO tomar el primer resultado: LinkedIn tiene páginas DUPLICADAS de la
+// misma empresa (regionales, viejas, creadas por empleados) y el primer resultado
+// suele ser la que coincide literal con el texto buscado, no la real. Caso medido
+// 31-jul: "mondelez internacional" → urn 75967276 (4 empleados alcanzables, toda
+// búsqueda por puesto daba 0) mientras "Mondelez International" → urn 1511 (la
+// canónica). Ahora se puntúa por SEGUIDORES: la duplicada tiene decenas, la real
+// millones.
 const COMPANY_URN_RE = /urn:li:(?:fsd_company|organization|company):(\d+)/
+const FOLLOWERS_RE = /([\d][\d.,\s]*)\s*(mil|k|m|millones)?\s*(?:de\s+)?(?:seguidores|followers)/
+
+// "3,204,559 seguidores" | "3.2 M de seguidores" | "12 mil seguidores" | "1.2K followers"
+// Solo se usa para RANKEAR, así que aproximar está bien.
+function _parseFollowers(txt) {
+  const m = _normForFilter(txt).match(FOLLOWERS_RE)
+  if (!m) return 0
+  const raw = m[1].replace(/\s/g, '')
+  // 1.234.567 / 1,234,567 → separadores de miles; 3,2 / 3.2 → decimal.
+  const n = /^\d{1,3}([.,]\d{3})+$/.test(raw)
+    ? parseFloat(raw.replace(/[.,]/g, ''))
+    : parseFloat(raw.replace(',', '.'))
+  if (!isFinite(n)) return 0
+  const mult = { mil: 1e3, k: 1e3, m: 1e6, millones: 1e6 }[m[2]] ?? 1
+  return n * mult
+}
 
 async function resolveCompanyOnPage(payload = {}) {
   const wanted = _normForFilter(payload.name)
@@ -4740,15 +4764,42 @@ async function resolveCompanyOnPage(payload = {}) {
     return { action: 'resolve_company', status: 'error', error: 'not_on_company_search_page', currentUrl: location.href }
   }
   await waitForSelector(['main', 'div.search-results-container'], 15000)
-  await sleep(1200)  // hidratación del primer resultado
+  await sleep(1200)  // hidratación de los resultados
 
   // Scope a <main>: fuera de ahí hay links a /company/ del chrome de LinkedIn
-  // (anuncios, footer) que secuestrarían el primer resultado.
+  // (anuncios, footer) que secuestrarían los resultados.
   const scope = document.querySelector('main') ?? document
-  const link = Array.from(scope.querySelectorAll('a[href*="/company/"]'))
-    .find(a => /\/company\/[^/?#]+/.test(a.getAttribute('href') ?? '')
-            && (a.textContent ?? '').trim().length > 0)
-  if (!link) {
+  const tokens = wanted.split(/[^a-z0-9]+/).filter(t => t.length > 3)
+
+  const seen = new Set()
+  const candidates = []
+  for (const a of scope.querySelectorAll('a[href*="/company/"]')) {
+    const href = a.getAttribute('href') ?? ''
+    const slug = (href.match(/\/company\/([^/?#]+)/) ?? [])[1]
+    if (!slug || seen.has(slug)) continue
+    const title = _normForFilter(a.textContent ?? '')
+    if (!title) continue
+    seen.add(slug)
+
+    const card = a.closest('[data-chameleon-result-urn]') || a.closest('li')
+      || a.parentElement?.parentElement?.parentElement?.parentElement || null
+    const attr = card?.getAttribute?.('data-chameleon-result-urn') ?? ''
+    const urn = (attr.match(COMPANY_URN_RE) ?? [])[1]
+      ?? (card?.outerHTML?.match(COMPANY_URN_RE) ?? [])[1]
+      ?? null
+    // Guard anti-empresa-equivocada: debe compartir algún token con lo que pedimos.
+    const matched = tokens.length === 0
+      ? title.includes(wanted)
+      : tokens.some(t => title.includes(t) || _normForFilter(slug).includes(t))
+
+    candidates.push({
+      urn, slug, title: title.slice(0, 60), matched,
+      followers: _parseFollowers(card?.innerText ?? ''),
+    })
+    if (candidates.length >= 6) break
+  }
+
+  if (candidates.length === 0) {
     const bodyTxt = _normForFilter(document.body?.innerText ?? '')
     const captcha = ['captcha', 'verify you are human', 'verifica que eres humano', 'security check'].some(s => bodyTxt.includes(s))
     return { action: 'resolve_company', status: captcha ? 'error' : 'ok',
@@ -4756,32 +4807,22 @@ async function resolveCompanyOnPage(payload = {}) {
              urn: null, slug: null, matched: false, currentUrl: location.href }
   }
 
-  const href = link.getAttribute('href') ?? ''
-  const slug = (href.match(/\/company\/([^/?#]+)/) ?? [])[1] ?? null
+  // Prioridad: (1) que matchee el nombre, (2) que tenga URN usable, (3) MÁS seguidores,
+  // (4) URN más bajo = página más antigua = normalmente la corporativa real.
+  const best = candidates.slice().sort((a, b) =>
+    (b.matched - a.matched)
+    || ((b.urn ? 1 : 0) - (a.urn ? 1 : 0))
+    || (b.followers - a.followers)
+    || (parseInt(a.urn ?? '9e15', 10) - parseInt(b.urn ?? '9e15', 10))
+  )[0]
 
-  // Card = ancestro con el urn del resultado; si no, subimos 4 niveles como en people-search.
-  const card = link.closest('[data-chameleon-result-urn]')
-    || link.closest('li')
-    || link.parentElement?.parentElement?.parentElement?.parentElement
-    || null
-
-  let urn = null
-  const attr = card?.getAttribute?.('data-chameleon-result-urn') ?? ''
-  urn = (attr.match(COMPANY_URN_RE) ?? [])[1]
-     ?? (card?.outerHTML?.match(COMPANY_URN_RE) ?? [])[1]
-     ?? (document.documentElement.innerHTML.match(COMPANY_URN_RE) ?? [])[1]
-     ?? null
-
-  // Guard anti-empresa-equivocada: el primer resultado debe compartir su token más
-  // largo con lo que pedimos. Sin esto, "Alcosa" podría bindear a otra empresa y
-  // toda la campaña invitaría a la compañía incorrecta.
-  const title = _normForFilter(link.textContent ?? '')
-  const tokens = wanted.split(/[^a-z0-9]+/).filter(t => t.length > 3)
-  const matched = tokens.length === 0
-    ? title.includes(wanted)
-    : tokens.some(t => title.includes(t) || _normForFilter(slug ?? '').includes(t))
-
-  return { action: 'resolve_company', status: 'ok', urn, slug, matched, resultTitle: title.slice(0, 80) }
+  return {
+    action: 'resolve_company', status: 'ok',
+    urn: best.urn, slug: best.slug, matched: best.matched, resultTitle: best.title,
+    followers: best.followers,
+    // Para diagnosticar cuando una empresa quede pegada en 0 resultados.
+    candidates: candidates.map(c => ({ urn: c.urn, title: c.title, followers: c.followers })),
+  }
 }
 
 // ── Post-Prospecting (v0.9) ──────────────────────────────────────────────────
