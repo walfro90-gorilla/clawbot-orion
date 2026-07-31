@@ -29,7 +29,7 @@ chmod +x "$DEST/install.sh"
 
 # Scripts de mantenimiento fuera del bundle: el operador no los necesita en su carpeta.
 tar -czf "$DEST/orion-extension.tar.gz" -C "$SRC" \
-  --exclude=install.sh --exclude=publish.sh --exclude='public-install.*' .
+  --exclude=sync-local.sh --exclude=publish.sh --exclude='public-install.*' .
 
 echo "✅ publicada $(grep '"version"' "$DEST/manifest.json" | tr -d ' ",') en $DEST"
 echo "   los operadores actualizan con: curl -fsSL http://209.50.63.149/download/install.sh | bash"
