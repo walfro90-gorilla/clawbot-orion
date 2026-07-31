@@ -38,6 +38,22 @@ cookies cuando server-side + browser personal usan la misma cuenta.
 | `popup/popup.html` + `.js` | UI para configurar Orion URL + API key + cuenta |
 | `icons/` | PNGs del logo (placeholders, reemplazar con logo real) |
 
+## ⚠️ Actualizar la extensión (leer antes de "por qué no agarra el cambio")
+
+**Chrome NO carga esta carpeta del repo.** Carga una **copia** (típicamente
+`~/.orion/extension`) que se creó a mano al instalar. `git pull` deja el repo al día
+pero **no toca esa copia**, así que la extensión sigue corriendo el código viejo aunque
+le des a "recargar".
+
+```bash
+./install.sh              # copia el repo → ~/.orion/extension
+./install.sh /otra/ruta   # si chrome://extensions muestra otra ruta en "Cargada desde"
+```
+
+Después, **sí o sí**: `chrome://extensions` → recargar (↻) → refrescar la pestaña de
+LinkedIn. La versión que reporta cada cuenta se ve en `linkedin_accounts.ext_version`;
+si no coincide con `manifest.json`, la actualización no llegó.
+
 ## Setup local (dev)
 
 ### 1. Generar API key para una cuenta

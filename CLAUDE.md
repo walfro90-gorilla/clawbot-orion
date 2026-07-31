@@ -239,6 +239,6 @@ Auth: Supabase Auth + RLS. Roles `god_admin > admin > user`. Proxy de Next prote
 
 1. **`package.json` de prometheus engaña**: `main`/scripts apuntan a código muerto (`worker.js`/`batch.js`/`search.js`). El proceso real es `scheduler-extension.js`.
 2. **`ecosystem.config.cjs` stale** (ver §4) — usa `pm2 resurrect`.
-3. **Fixes de la extensión** no aplican hasta recargarla en `chrome://extensions` por cada cuenta.
+3. **Fixes de la extensión** no aplican hasta recargarla en `chrome://extensions` por cada cuenta. ⚠️ **Y `git pull` NO actualiza la extensión**: Chrome carga una **copia** (`~/.orion/extension`), no la carpeta del repo. Hay que correr `apps/orion-extension/install.sh` y DESPUÉS recargar (lección 29-jul-2026: 3 cuentas se quedaron en v0.9.26 un día entero "recargando" código viejo). Verificación real = `linkedin_accounts.ext_version`.
 4. **`currentCompany`**: la regex `headlineCompany` (`worker.js`) sigue **MUERTA**, pero **(jul-2026) el pass vivo `tryEnrichCompanies` YA puebla `currentCompany`** extrayendo la empresa del headline con el LLM (gate anti-alucinación; `''` = sin empresa → fallback `'tu empresa'`). La regla "no inventes empresa / no uses el título como empresa" (`NO_INVENT_COMPANY_RULE`) sigue vigente en la extracción y en la redacción. Ver §7.
 5. Memoria histórica rica del proyecto vive en `~/.claude/projects/.../memory/` y **no** auto-carga; léela manualmente vía su `MEMORY.md` si necesitas historia.
