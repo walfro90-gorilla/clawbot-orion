@@ -232,7 +232,10 @@ async function getEligiblePendingCount(campaign) {
 const COMPANY_RESOLVE_BATCH  = 12      // empresas por comando resolve_companies
 const COMPANY_RESOLVE_MAX_TRIES = 3
 const COMPANY_RESOLVE_RETRY_H = 24
-const TITLE_GROUP_MAX_CHARS  = 200     // cap del query booleano de LinkedIn
+// Puestos que se barren en una empresa antes de pasar a la siguiente. El cursor de
+// títulos es POR EMPRESA y persiste, así que la próxima vuelta retoma donde se quedó.
+// Subirlo = más profundidad por empresa; bajarlo = recorrer la lista más rápido.
+const COMPANY_TITLES_PER_PASS = 6
 const COMPANY_DRY_STREAK_ESCAPE = 5    // válvula: N búsquedas secas seguidas → 1 title-only
 
 // Sincroniza search_company_names → filas. Inserta las nuevas, borra las que el
@@ -301,7 +304,7 @@ async function pendingResolveCompanies(campaignId, limit) {
 async function pickNextTargetCompany(campaignId) {
   const { data } = await supabase
     .from('campaign_target_companies')
-    .select('id, name, linkedin_urn, slug, status, last_searched_at')
+    .select('id, name, linkedin_urn, slug, status, last_searched_at, title_idx')
     .eq('campaign_id', campaignId)
     .in('status', ['ready', 'unresolved'])
     .order('last_searched_at', { ascending: true, nullsFirst: true })
@@ -311,22 +314,20 @@ async function pickNextTargetCompany(campaignId) {
   return data ?? null
 }
 
-// Grupo booleano de títulos: una visita a la empresa cubre VARIOS puestos objetivo
-// ("Director de Compras" OR "Gerente de Logística" OR ...), que es lo que pide el flujo
-// (revisar los 20-30 puestos de la empresa) en vez de 1 título por búsqueda.
-// Devuelve { query, used } — `used` avanza el cursor de keywords.
-function buildTitleGroup(kws, startIdx) {
-  const parts = []
-  let used = 0
-  for (let i = 0; i < kws.length; i++) {
-    const kw = kws[(startIdx + i) % kws.length]
-    const term = /\s/.test(kw) ? `"${kw}"` : kw
-    const next = parts.concat(term).join(' OR ')
-    if (parts.length && next.length > TITLE_GROUP_MAX_CHARS) break
-    parts.push(term)
-    used++
-  }
-  return { query: parts.join(' OR '), used: Math.max(1, used) }
+// 31-jul: el grupo booleano ("A" OR "B" OR "C") NO funciona en el buscador free —
+// LinkedIn lo trata como texto literal, no como operador: Mondelēz + 3 títulos con OR
+// devolvió "No se han encontrado resultados" con la empresa correcta en el facet.
+// Volvemos a UN puesto por búsqueda (sin comillas, como las búsquedas que sí rendían),
+// y el barrido de los 20-30 puestos se hace VISITA A VISITA sobre la misma empresa:
+// cada empresa lleva su propio cursor de títulos (title_idx) y se queda seleccionada
+// hasta completar COMPANY_TITLES_PER_PASS puestos; luego pasa la siguiente empresa y
+// retoma donde iba en la próxima vuelta.
+function nextTitleForCompany(kws, target) {
+  const idx = (target.title_idx ?? 0) % kws.length
+  const nextIdx = (idx + 1) % kws.length
+  // Fin de pase: completó su tanda de títulos, o dio la vuelta a la lista completa.
+  const passDone = nextIdx === 0 || nextIdx % COMPANY_TITLES_PER_PASS === 0
+  return { keyword: kws[idx], idx, nextIdx, passDone }
 }
 
 async function trySearchForCampaign(campaign, account) {
@@ -425,11 +426,11 @@ async function trySearchForCampaign(campaign, account) {
   const target = (companyMode && !escapeDry) ? await pickNextTargetCompany(campaign.id) : null
   if (escapeDry) console.log(`[SCH-EXT]   🔎 ${campaign.name}: ${dryStreak} búsquedas secas seguidas → 1 title-only de reabastecimiento`)
 
-  // Con empresa: grupo booleano de títulos (varios puestos objetivo en UNA visita).
-  // Sin empresa: 1 keyword rotado, comportamiento de siempre.
-  const group = target ? buildTitleGroup(kws, idx) : null
-  const keyword = target ? group.query : kws[idx]
-  const nextIdx = (idx + (target ? group.used : 1)) % kws.length
+  // Con empresa: UN puesto por búsqueda, desde el cursor propio de esa empresa.
+  // Sin empresa: 1 keyword rotado por la campaña, comportamiento de siempre.
+  const tt = target ? nextTitleForCompany(kws, target) : null
+  const keyword = target ? tt.keyword : kws[idx]
+  const nextIdx = (idx + 1) % kws.length
 
   if (DRY_RUN) {
     console.log(`[SCH-EXT] DRY_RUN search "${campaign.name}" keyword="${keyword}"${target ? ` @${target.name}` : ''}`)
@@ -437,7 +438,7 @@ async function trySearchForCampaign(campaign, account) {
   }
 
   if (target) {
-    console.log(`[SCH-EXT]   🏢 ${campaign.name}: empresa "${target.name}"${target.linkedin_urn ? ` (urn ${target.linkedin_urn})` : ' (sin urn — match por nombre)'} × ${group.used} títulos`)
+    console.log(`[SCH-EXT]   🏢 ${campaign.name}: "${target.name}"${target.linkedin_urn ? ` (urn ${target.linkedin_urn})` : ' (sin urn — match por nombre)'} → puesto ${tt.idx + 1}/${kws.length} "${keyword}"${tt.passDone ? ' (último del pase → siguiente empresa)' : ''}`)
   }
 
   const cmdId = await dispatchSearch(account, campaign, keyword, { targetCompany: target })
@@ -446,10 +447,16 @@ async function trySearchForCampaign(campaign, account) {
   }
 
   // Cursor: stamp AL DESPACHAR (no al ingest) — si la búsqueda falla o vuelve vacía,
-  // el cursor igual avanza a la siguiente empresa en vez de atascarse en una.
+  // el cursor igual avanza en vez de atascarse. El título avanza SIEMPRE (un puesto que
+  // no existe en esa empresa no debe bloquear los demás); `last_searched_at` solo se
+  // sella al cerrar el pase, y como el cursor ordena por él (nulls first), la empresa
+  // sigue seleccionada mientras barre sus puestos.
   if (target) {
     await supabase.from('campaign_target_companies')
-      .update({ last_searched_at: new Date().toISOString() })
+      .update({
+        title_idx: tt.nextIdx,
+        ...(tt.passDone ? { last_searched_at: new Date().toISOString() } : {}),
+      })
       .eq('id', target.id)
   }
 

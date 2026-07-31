@@ -159,7 +159,7 @@ La lista que el usuario edita sigue siendo **`campaigns.search_company_names`** 
 
 Flujo por tick (`trySearchForCampaign` → `lib/extension-dispatch.js` → ext):
 1. **Resolver** (fuera del gap de búsqueda): empresas `status='pending'` → comando `resolve_companies` en lotes de 12; la ext navega `/search/results/companies/?keywords=<nombre>` y saca `urn:li:organization:<id>` + slug. `ready` (con URN) / `unresolved` (3 intentos fallidos → se busca por `"nombre exacto"`).
-2. **Buscar**: 1 empresa por búsqueda con **facet nativo `currentCompany`** + grupo booleano de títulos (`"Director de Compras" OR …`, cap 200 chars) ⇒ varios puestos objetivo por visita.
+2. **Buscar**: 1 empresa + **1 puesto** por búsqueda, con **facet nativo `currentCompany`**. ⚠️ El grupo booleano (`"A" OR "B"`) NO funciona en el buscador free — LinkedIn lo toma como texto literal y devuelve 0 resultados (31-jul: Mondelēz + 3 títulos con OR = "No se han encontrado resultados" con el facet correcto aplicado). El barrido de los 20-30 puestos se hace visita a visita: cada empresa lleva su cursor `title_idx` y se mantiene seleccionada hasta completar `COMPANY_TITLES_PER_PASS` (6) puestos; la siguiente vuelta retoma donde iba.
 3. Con empresa: **sin `geoUrn`**, sin `minEmployees`, y `searchMode` forzado a `free` (la URL de SalesNav es keywords-only y se comía el scoping).
 
 ⚠️ **Requiere ext ≥0.10.0** (`COMPANY_SCOPED_MIN_VERSION`): una ext vieja ignora `companyUrn` y buscaría por título en TODO LinkedIn. Sin la versión el scheduler avisa y degrada a title-only.

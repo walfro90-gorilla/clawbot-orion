@@ -22,6 +22,7 @@ create table if not exists campaign_target_companies (
   last_searched_at     timestamptz,
   leads_found          int  not null default 0,
   sort_order           int  not null default 0,   -- posición en la lista del usuario (29-jul)
+  title_idx            int  not null default 0,   -- cursor de puestos DENTRO de la empresa (31-jul)
   created_at           timestamptz not null default now()
 );
 

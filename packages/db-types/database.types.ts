@@ -601,6 +601,7 @@ export type Database = {
           slug: string | null
           sort_order: number
           status: string
+          title_idx: number
         }
         Insert: {
           campaign_id: string
@@ -615,6 +616,7 @@ export type Database = {
           slug?: string | null
           sort_order?: number
           status?: string
+          title_idx?: number
         }
         Update: {
           campaign_id?: string
@@ -629,6 +631,7 @@ export type Database = {
           slug?: string | null
           sort_order?: number
           status?: string
+          title_idx?: number
         }
         Relationships: [
           {
