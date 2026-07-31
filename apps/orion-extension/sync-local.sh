@@ -7,8 +7,8 @@
 # un día entero con el código nuevo ya en main y "recargando" sin efecto.
 #
 # Uso:
-#   ./install.sh                    # destino por defecto: ~/.orion/extension
-#   ./install.sh /otra/ruta         # la ruta que muestre chrome://extensions
+#   ./sync-local.sh                    # destino por defecto: ~/.orion/extension
+#   ./sync-local.sh /otra/ruta         # la ruta que muestre chrome://extensions
 #                                   # ("Cargada desde:" / "Loaded from:")
 set -euo pipefail
 
@@ -18,12 +18,12 @@ DEST="${1:-$HOME/.orion/extension}"
 if [ ! -d "$DEST" ]; then
   echo "⚠️  $DEST no existe."
   echo "   Mira la ruta real en chrome://extensions (Orion Sync → 'Cargada desde')"
-  echo "   y pásala como argumento: ./install.sh /esa/ruta"
+  echo "   y pásala como argumento: ./sync-local.sh /esa/ruta"
   exit 1
 fi
 
 cp -r "$SRC/." "$DEST/"
-rm -f "$DEST/install.sh"
+rm -f "$DEST/sync-local.sh" "$DEST/publish.sh" "$DEST"/public-install.*
 
 echo "✅ Copiada $(grep '"version"' "$DEST/manifest.json" | tr -d ' ",') → $DEST"
 echo

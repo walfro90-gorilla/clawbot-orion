@@ -40,19 +40,36 @@ cookies cuando server-side + browser personal usan la misma cuenta.
 
 ## ⚠️ Actualizar la extensión (leer antes de "por qué no agarra el cambio")
 
-**Chrome NO carga esta carpeta del repo.** Carga una **copia** (típicamente
-`~/.orion/extension`) que se creó a mano al instalar. `git pull` deja el repo al día
-pero **no toca esa copia**, así que la extensión sigue corriendo el código viejo aunque
-le des a "recargar".
+**Chrome NO carga esta carpeta del repo.** Carga una **copia** (`~/.orion/extension` en
+Mac/Linux, `%LOCALAPPDATA%\Orion\extension` en Windows). `git pull` deja el repo al día
+pero **no toca esa copia** → la extensión sigue corriendo el código viejo aunque le des
+a "recargar".
+
+**Operadores** (Josh, Café 57, Wal) — un comando, se baja del server de prod:
 
 ```bash
-./install.sh              # copia el repo → ~/.orion/extension
-./install.sh /otra/ruta   # si chrome://extensions muestra otra ruta en "Cargada desde"
+curl -fsSL http://209.50.63.149/download/install.sh | bash     # Mac / Linux
+irm http://209.50.63.149/download/install.ps1 | iex            # Windows (PowerShell)
 ```
+
+**Dev** (probar cambios locales sin publicar): `./sync-local.sh` copia esta carpeta a
+`~/.orion/extension`.
 
 Después, **sí o sí**: `chrome://extensions` → recargar (↻) → refrescar la pestaña de
 LinkedIn. La versión que reporta cada cuenta se ve en `linkedin_accounts.ext_version`;
 si no coincide con `manifest.json`, la actualización no llegó.
+
+### Publicar al endpoint /download (servidor)
+
+`publish.sh` copia esta carpeta a `/opt/orion-public` (lo que sirve nginx) y regenera el
+tarball + los instaladores. Lo dispara solo el hook `post-merge` de `/root/clawbot`, así
+que **cada `git pull` en prod republica**. A mano: `./publish.sh`.
+
+| Archivo | Qué es |
+|---|---|
+| `sync-local.sh` | dev: repo → `~/.orion/extension` (sin publicar) |
+| `publish.sh` | servidor: repo → `/opt/orion-public` (tarball + instaladores) |
+| `public-install.sh` / `.ps1` | lo que corre el operador; nginx los sirve como `/download/install.sh` y `.ps1` |
 
 ## Setup local (dev)
 

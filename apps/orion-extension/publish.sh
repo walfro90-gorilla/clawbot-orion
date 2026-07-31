@@ -21,9 +21,15 @@ cp "$SRC/content.js" "$SRC/background.js" "$SRC/manifest.json" "$DEST/"
 cp -r "$SRC/icons" "$DEST/"
 [ -d "$SRC/popup" ] && cp -r "$SRC/popup" "$DEST/"
 
+# Los instaladores que corren los operadores (nginx los sirve como /download/install.sh
+# y /download/install.ps1). Versionados aquí para que no se queden atrás como el tarball.
+cp "$SRC/public-install.sh"  "$DEST/install.sh"
+cp "$SRC/public-install.ps1" "$DEST/install.ps1"
+chmod +x "$DEST/install.sh"
+
 # Scripts de mantenimiento fuera del bundle: el operador no los necesita en su carpeta.
 tar -czf "$DEST/orion-extension.tar.gz" -C "$SRC" \
-  --exclude=install.sh --exclude=publish.sh .
+  --exclude=install.sh --exclude=publish.sh --exclude='public-install.*' .
 
 echo "✅ publicada $(grep '"version"' "$DEST/manifest.json" | tr -d ' ",') en $DEST"
 echo "   los operadores actualizan con: curl -fsSL http://209.50.63.149/download/install.sh | bash"
