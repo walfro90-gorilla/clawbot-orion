@@ -601,9 +601,21 @@ async function tryInvitesForCampaign(campaign, account) {
   // (caso Josh 06-jul). Ahora: rank desc, y dentro del mismo rank se conserva el orden
   // FIFO del SELECT (sort estable) para no romper la equidad ni el cooldown.
   // Se mantiene el pick aleatorio para humanizar, pero sobre el top 3 ya rankeado.
+  // 31-jul: en una campaña con lista de empresas, el lead que VIENE de la lista gana
+  // SIEMPRE al del pool genérico viejo, aunque el viejo sea un CEO. El cliente paga por
+  // que abordemos SU lista; un "President of Builds and Buys" que entró por una búsqueda
+  // por título de hace semanas no puede quitarle el turno al Director de Estafeta.
+  // Dentro de cada grupo manda el peso de responsabilidad. Sin lista de empresas
+  // configurada, fromList es false para todos y el orden queda idéntico al anterior.
+  const listMode = Array.isArray(campaign.search_company_names)
+    && campaign.search_company_names.filter(Boolean).length > 0
   const ranked = whitelisted
-    .map(l => ({ l, rank: seniorityRank(l.profile_data?.headline ?? '') }))
-    .sort((a, b) => b.rank - a.rank)
+    .map(l => ({
+      l,
+      rank: seniorityRank(l.profile_data?.headline ?? ''),
+      fromList: listMode && !!l.profile_data?.targetCompany,
+    }))
+    .sort((a, b) => (Number(b.fromList) - Number(a.fromList)) || (b.rank - a.rank))
   const pool = ranked.slice(0, 3)
   const pick = pool[Math.floor(Math.random() * pool.length)]
   const lead = pick.l
@@ -656,6 +668,7 @@ async function tryInvitesForCampaign(campaign, account) {
       messageLength: message?.length ?? 0,
       capUsage: `${invitesToday + 1}/${cap}`,
       seniorityRank: pick.rank,
+      fromTargetList: pick.fromList,
       company: lead.profile_data?.targetCompany ?? lead.profile_data?.currentCompany ?? null,
     },
   })
