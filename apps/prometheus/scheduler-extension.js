@@ -214,11 +214,20 @@ async function getEligiblePendingCount(campaign) {
   // tick por campaña). Post-mortem 2026-07-03 §5 (P2).
   const { data } = await supabase
     .from('leads')
-    .select('hl:profile_data->>headline')
+    .select('hl:profile_data->>headline, tc:profile_data->>targetCompany')
     .eq('campaign_id', campaign.id)
     .in('status', ['scraped', 'pending'])
+  // 2-ago: en campaña con lista de empresas, el pool VIEJO (búsquedas por título de
+  // antes) no cuenta como abastecimiento. Contarlo hacía que el scheduler se creyera
+  // surtido y no buscara: la cuenta de Josh se quedó en 0 leads de la lista y 19
+  // heredados, así que pasó el día invitando gente fuera de la lista mientras sus 324
+  // empresas esperaban. Ahora "surtido" significa surtido DE LA LISTA; el pool viejo
+  // sigue disponible para invitar, solo que ya no bloquea las búsquedas.
+  const listMode = Array.isArray(campaign.search_company_names)
+    && campaign.search_company_names.filter(Boolean).length > 0
   let n = 0
   for (const l of (data ?? [])) {
+    if (listMode && !l.tc) continue
     if (passesTitleFilters(l.hl ?? '', campaign.title_whitelist, campaign.title_blacklist)) n++
   }
   return n
