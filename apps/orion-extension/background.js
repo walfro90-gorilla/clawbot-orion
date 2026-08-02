@@ -172,6 +172,32 @@ async function broadcastRuntimeConfigRefresh() {
   }
 }
 
+// ── v0.10.2 — refrescar las pestañas de LinkedIn cuando cambia la versión ────
+// El service worker se recarga con el código nuevo al instante, pero el content.js
+// que ya está inyectado en una pestaña abierta sigue siendo el VIEJO. Resultado: la
+// cuenta reporta ext_version nueva (la lee el SW del manifest) mientras ejecuta lógica
+// vieja en la página. Pasó el 2-ago: las 3 cuentas decían 0.10.1 y el resolver seguía
+// devolviendo la página duplicada de la empresa porque content.js era 0.10.0.
+// El paso manual "refresca la pestaña de LinkedIn" se olvida — así que lo hacemos solos,
+// UNA vez por versión (la marca vive en storage; sin ella el SW, que Chrome recicla cada
+// pocos segundos, recargaría las pestañas sin parar).
+async function reloadLinkedInTabsOnVersionChange() {
+  try {
+    const version = chrome.runtime.getManifest().version
+    const { content_version_seen } = await chrome.storage.local.get('content_version_seen')
+    if (content_version_seen === version) return
+    await chrome.storage.local.set({ content_version_seen: version })
+    const tabs = await chrome.tabs.query({ url: ['*://*.linkedin.com/*'] })
+    for (const t of tabs) {
+      try { await chrome.tabs.reload(t.id) } catch { /* pestaña muerta */ }
+    }
+    console.log(`[Orion] v${version}: ${tabs.length} pestañas de LinkedIn recargadas (content.js nuevo)`)
+  } catch (err) {
+    console.warn('[Orion] reloadLinkedInTabsOnVersionChange:', err?.message)
+  }
+}
+reloadLinkedInTabsOnVersionChange()
+
 // ── Update check ────────────────────────────────────────────────────────────
 // Consulta /api/extension/version y guarda info de update disponible en storage.
 // El popup lo muestra como banner.
