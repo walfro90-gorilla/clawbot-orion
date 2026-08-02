@@ -582,6 +582,21 @@ async function executeCommand(commandId, action, payload) {
       return
     }
 
+    // v0.10.4 — recarga remota. Copiar archivos nuevos NO actualiza nada: Chrome no
+    // recarga una extensión descomprimida al cambiar el disco, hay que darle ↻ a mano en
+    // cada máquina. Eso convirtió cada fix en una gestión con tres operadores y dejó
+    // cuentas corriendo código viejo durante días. chrome.runtime.reload() hace justo lo
+    // que el botón: reinicia el service worker con los archivos de disco y, ya en el
+    // arranque nuevo, reloadLinkedInTabsOnVersionChange refresca las pestañas.
+    // Reportamos ANTES de recargar, porque la recarga mata este contexto.
+    if (action === 'reload_extension') {
+      const version = chrome.runtime.getManifest().version
+      reportResult(commandId, action, { action, status: 'ok', versionAntes: version })
+      console.log(`[Orion] reload_extension recibido (v${version}) — recargando en 2s`)
+      setTimeout(() => { try { chrome.runtime.reload() } catch (e) { console.error(e) } }, 2000)
+      return
+    }
+
     let tab
     // send_invite: navegar DIRECTO al SPA route /preload/custom-invite/?vanityName=
     // — LinkedIn abre el modal automáticamente. Evitamos el click problemático

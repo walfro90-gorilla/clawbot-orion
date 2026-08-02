@@ -4821,7 +4821,7 @@ async function resolveCompanyOnPage(payload = {}) {
     // Versión del CONTENT script (no la del manifest, que la reporta el service worker):
     // si estas dos divergen, la pestaña está corriendo código viejo. Ver
     // reloadLinkedInTabsOnVersionChange en background.js.
-    contentVersion: '0.10.3',
+    contentVersion: '0.10.4',
     urn: best.urn, slug: best.slug, matched: best.matched, resultTitle: best.title,
     followers: best.followers,
     // Para diagnosticar cuando una empresa quede pegada en 0 resultados.

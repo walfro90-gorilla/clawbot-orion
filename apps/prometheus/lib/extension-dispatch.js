@@ -15,6 +15,7 @@ import { stampLastAttempt } from './lead-failure.js'
 const ACTION_MIN_VERSION = {
   check_connections: '0.9.15',
   resolve_companies: '0.10.0',
+  reload_extension:  '0.10.4',
 }
 
 // v0.10.0: la búsqueda con facet currentCompany requiere la misma versión. Una ext
@@ -746,6 +747,13 @@ export async function dispatchSearch(account, campaign, keywords, opts = {}) {
 // v0.10.0 — resuelve un LOTE de empresas (nombre → company URN) en un solo comando.
 // La extensión navega una vez por empresa dentro del mismo comando; batchear evita
 // gastar un gap de búsqueda por empresa.
+// v0.10.4 — pide a la extensión que se recargue sola (equivale al ↻ de
+// chrome://extensions). Úsalo DESPUÉS de publicar un bundle nuevo: el operador ya no
+// tiene que tocar nada. Requiere que la máquina tenga ≥0.10.4 instalada.
+export async function dispatchReloadExtension(account) {
+  return dispatchCommand(account.id ?? account, 'reload_extension', {}, { expiresInMinutes: 10 })
+}
+
 export async function dispatchResolveCompanies(account, companies) {
   return dispatchCommand(account.id, 'resolve_companies', {
     companies: companies.map(c => ({ id: c.id, name: c.name })),
