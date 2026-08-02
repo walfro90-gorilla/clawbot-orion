@@ -778,6 +778,13 @@ async function resolveCompanies(commandId, payload) {
         id: c.id, name: c.name,
         urn: r?.urn ?? null, slug: r?.slug ?? null,
         matched: !!r?.matched, error: r?.error ?? null,
+        // v0.10.3 — pasar los campos de diagnóstico del content script. Sin esto el
+        // agregador los tiraba y era imposible saber, desde la DB, si la pestaña corría
+        // el resolver nuevo o por qué eligió una página: el probe del 2-ago salió
+        // "sin followers" y parecía código viejo cuando el problema era este descarte.
+        followers: r?.followers ?? null,
+        contentVersion: r?.contentVersion ?? null,
+        candidates: r?.candidates ?? null,
       })
       console.log(`[Orion] resolve_company "${c.name}" → urn=${r?.urn ?? '—'} slug=${r?.slug ?? '—'}`)
     } catch (err) {
