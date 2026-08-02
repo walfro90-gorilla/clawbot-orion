@@ -4758,6 +4758,29 @@ function _parseFollowers(txt) {
   return n * mult
 }
 
+// v0.10.5 — aísla la tarjeta de UN resultado. Antes se subían 4 niveles a ciegas desde
+// el link y se aterrizaba en el contenedor de TODA la lista: los 6 candidatos leían el
+// URN y los seguidores del primer resultado, así que el scorer comparaba seis copias del
+// mismo dato (medido 2-ago: mondelez, durulte alimentos, aviator spain… todos con
+// urn=75967276 y 76 seguidores). Ahora subimos mientras el ancestro siga conteniendo un
+// solo /company/ distinto — el logo y el título del mismo resultado apuntan al mismo
+// slug, así que cuentan como uno. Es agnóstico al layout: no depende de <li> ni de
+// clases de LinkedIn, que cambian sin avisar.
+function _companyResultCard(anchor) {
+  const slugOf = (el) => (el.getAttribute('href') ?? '').match(/\/company\/([^/?#]+)/)?.[1]
+  let card = anchor
+  let el = anchor.parentElement
+  while (el && el !== document.body) {
+    const slugs = new Set(
+      Array.from(el.querySelectorAll('a[href*="/company/"]')).map(slugOf).filter(Boolean)
+    )
+    if (slugs.size > 1) break   // ya abarca otro resultado → nos quedamos con el anterior
+    card = el
+    el = el.parentElement
+  }
+  return card
+}
+
 async function resolveCompanyOnPage(payload = {}) {
   const wanted = _normForFilter(payload.name)
   if (!/\/search\/results\/companies/.test(location.pathname)) {
@@ -4781,8 +4804,7 @@ async function resolveCompanyOnPage(payload = {}) {
     if (!title) continue
     seen.add(slug)
 
-    const card = a.closest('[data-chameleon-result-urn]') || a.closest('li')
-      || a.parentElement?.parentElement?.parentElement?.parentElement || null
+    const card = _companyResultCard(a)
     const attr = card?.getAttribute?.('data-chameleon-result-urn') ?? ''
     const urn = (attr.match(COMPANY_URN_RE) ?? [])[1]
       ?? (card?.outerHTML?.match(COMPANY_URN_RE) ?? [])[1]
@@ -4821,7 +4843,7 @@ async function resolveCompanyOnPage(payload = {}) {
     // Versión del CONTENT script (no la del manifest, que la reporta el service worker):
     // si estas dos divergen, la pestaña está corriendo código viejo. Ver
     // reloadLinkedInTabsOnVersionChange en background.js.
-    contentVersion: '0.10.4',
+    contentVersion: '0.10.5',
     urn: best.urn, slug: best.slug, matched: best.matched, resultTitle: best.title,
     followers: best.followers,
     // Para diagnosticar cuando una empresa quede pegada en 0 resultados.
