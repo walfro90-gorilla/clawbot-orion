@@ -1218,8 +1218,12 @@ async function ingestResolveCompanies(resolved) {
   for (const r of resolved) {
     if (!r?.id) continue
     if (r.urn && r.matched) {
+      // followers = tamaño de la página elegida. Es el detector de páginas duplicadas:
+      // la corporativa de Mondelēz tiene 4M y la duplicada regional 77. Guardarlo permite
+      // auditar la lista con una query en vez de re-resolver a ciegas.
       await supabase.from('campaign_target_companies')
-        .update({ status: 'ready', linkedin_urn: String(r.urn), slug: r.slug ?? null })
+        .update({ status: 'ready', linkedin_urn: String(r.urn), slug: r.slug ?? null,
+                  followers: Number.isFinite(r.followers) ? Math.round(r.followers) : null })
         .eq('id', r.id)
       ok++
     } else if ((attempts.get(r.id) ?? 0) >= COMPANY_RESOLVE_MAX_TRIES) {

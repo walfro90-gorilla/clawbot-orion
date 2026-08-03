@@ -591,6 +591,7 @@ export type Database = {
         Row: {
           campaign_id: string
           created_at: string
+          followers: number | null
           id: string
           last_searched_at: string | null
           leads_found: number
@@ -606,6 +607,7 @@ export type Database = {
         Insert: {
           campaign_id: string
           created_at?: string
+          followers?: number | null
           id?: string
           last_searched_at?: string | null
           leads_found?: number
@@ -621,6 +623,7 @@ export type Database = {
         Update: {
           campaign_id?: string
           created_at?: string
+          followers?: number | null
           id?: string
           last_searched_at?: string | null
           leads_found?: number
