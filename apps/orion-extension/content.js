@@ -4741,7 +4741,7 @@ function _normForFilter(s) {
 // canónica). Ahora se puntúa por SEGUIDORES: la duplicada tiene decenas, la real
 // millones.
 const COMPANY_URN_RE = /urn:li:(?:fsd_company|organization|company):(\d+)/
-const CONTENT_VERSION = '0.10.8'
+const CONTENT_VERSION = '0.10.9'
 const DISTINCTIVE_HIT = 10   // puntaje de un token distintivo: el umbral de "sí es esta empresa"
 const FOLLOWERS_RE = /([\d][\d.,\s]*)\s*(mil|k|m|millones)?\s*(?:de\s+)?(?:seguidores|followers)/
 
@@ -4882,10 +4882,13 @@ async function resolveCompanyOnPage(payload = {}) {
   // duplicadas regionales (Mondelēz: 3.4M vs 77). Ordenar por parecido de nombre sería
   // peor: "mondelez internacional" (la duplicada, 2 tokens) le ganaría a "mondelez
   // international" (la real, 1 token) para siempre.
-  const valid = candidates.filter(c => c.nameScore >= DISTINCTIVE_HIT)
-  // Si el nombre buscado es TODO relleno genérico ("Grupo Comercial"), no hay token
-  // distintivo que exigir: aceptamos cualquier coincidencia antes que no resolver.
-  const pool = valid.length ? valid : candidates.filter(c => c.nameScore > 0)
+  // v0.10.9 — SIN fallback a coincidencias genéricas. Antes, si ningún candidato traía un
+  // token distintivo, se aceptaba cualquiera que compartiera relleno y ganaba el más
+  // grande: "Grupo Aduanero M.S." terminó atado a arcaargentina (351k seguidores) por la
+  // palabra *grupo*. Atar la empresa equivocada es el peor resultado posible — manda
+  // invitaciones a otra compañía. Si no hay token distintivo, NO se resuelve: la fila
+  // queda 'unresolved' y se busca por nombre exacto, que es honesto y reversible.
+  const pool = candidates.filter(c => c.nameScore >= DISTINCTIVE_HIT)
   if (pool.length === 0) {
     return { action: 'resolve_company', status: 'ok', error: 'no_name_match',
              urn: null, slug: null, matched: false, contentVersion: CONTENT_VERSION,

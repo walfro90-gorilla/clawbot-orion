@@ -597,6 +597,7 @@ export type Database = {
           leads_found: number
           linkedin_urn: string | null
           name: string
+          page_title: string | null
           resolve_attempted_at: string | null
           resolve_attempts: number
           slug: string | null
@@ -613,6 +614,7 @@ export type Database = {
           leads_found?: number
           linkedin_urn?: string | null
           name: string
+          page_title?: string | null
           resolve_attempted_at?: string | null
           resolve_attempts?: number
           slug?: string | null
@@ -629,6 +631,7 @@ export type Database = {
           leads_found?: number
           linkedin_urn?: string | null
           name?: string
+          page_title?: string | null
           resolve_attempted_at?: string | null
           resolve_attempts?: number
           slug?: string | null

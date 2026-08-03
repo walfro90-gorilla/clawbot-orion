@@ -1223,7 +1223,10 @@ async function ingestResolveCompanies(resolved) {
       // auditar la lista con una query en vez de re-resolver a ciegas.
       await supabase.from('campaign_target_companies')
         .update({ status: 'ready', linkedin_urn: String(r.urn), slug: r.slug ?? null,
-                  followers: Number.isFinite(r.followers) ? Math.round(r.followers) : null })
+                  followers: Number.isFinite(r.followers) ? Math.round(r.followers) : null,
+                  // Nombre de la página elegida. Con el nombre de la lista al lado, una
+                  // sola query dice si el resolver ató la empresa correcta.
+                  page_title: r.resultTitle ?? null })
         .eq('id', r.id)
       ok++
     } else if ((attempts.get(r.id) ?? 0) >= COMPANY_RESOLVE_MAX_TRIES) {

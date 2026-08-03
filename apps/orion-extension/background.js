@@ -814,10 +814,11 @@ async function resolveCompanies(commandId, payload) {
   // internacional" (la duplicada de 77 seguidores, 2 tokens) le ganara siempre a
   // "mondelez international" (la real de 3.4M, 1 token) — justo lo que se quiere evitar.
   const DISTINCTIVE_HIT = 10
+  // v0.10.9: un resultado sin token distintivo NO es candidato, por más seguidores que
+  // tenga. El reintento con nombre núcleo solo puede MEJORAR, nunca meter otra empresa.
   const better = (a, b) => {
-    const va = (a?.nameScore ?? 0) >= DISTINCTIVE_HIT
-    const vb = (b?.nameScore ?? 0) >= DISTINCTIVE_HIT
-    if (va !== vb) return va
+    if (!a?.urn || (a?.nameScore ?? 0) < DISTINCTIVE_HIT) return false
+    if (!b?.urn || (b?.nameScore ?? 0) < DISTINCTIVE_HIT) return true
     return (a?.followers ?? 0) > (b?.followers ?? 0)
   }
 
@@ -844,6 +845,7 @@ async function resolveCompanies(commandId, payload) {
         // "sin followers" y parecía código viejo cuando el problema era este descarte.
         followers: r?.followers ?? null,
         nameScore: r?.nameScore ?? null,
+        resultTitle: r?.resultTitle ?? null,
         contentVersion: r?.contentVersion ?? null,
         candidates: r?.candidates ?? null,
       })
