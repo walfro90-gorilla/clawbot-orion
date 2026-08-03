@@ -809,9 +809,17 @@ async function resolveCompanies(commandId, payload) {
       type: 'orion_command', commandId, action: 'resolve_company', payload: { name: originalName },
     }, 4)
   }
-  const better = (a, b) =>
-    (a?.nameScore ?? 0) > (b?.nameScore ?? 0) ||
-    ((a?.nameScore ?? 0) === (b?.nameScore ?? 0) && (a?.followers ?? 0) > (b?.followers ?? 0))
+  // Igual que dentro de la página: el nombre decide SI la página cuenta, y entre las que
+  // cuentan gana la más grande. Comparar por parecido de nombre haría que "mondelez
+  // internacional" (la duplicada de 77 seguidores, 2 tokens) le ganara siempre a
+  // "mondelez international" (la real de 3.4M, 1 token) — justo lo que se quiere evitar.
+  const DISTINCTIVE_HIT = 10
+  const better = (a, b) => {
+    const va = (a?.nameScore ?? 0) >= DISTINCTIVE_HIT
+    const vb = (b?.nameScore ?? 0) >= DISTINCTIVE_HIT
+    if (va !== vb) return va
+    return (a?.followers ?? 0) > (b?.followers ?? 0)
+  }
 
   for (const c of companies) {
     if (!c?.name) continue

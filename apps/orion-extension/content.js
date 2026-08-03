@@ -4741,6 +4741,8 @@ function _normForFilter(s) {
 // canónica). Ahora se puntúa por SEGUIDORES: la duplicada tiene decenas, la real
 // millones.
 const COMPANY_URN_RE = /urn:li:(?:fsd_company|organization|company):(\d+)/
+const CONTENT_VERSION = '0.10.8'
+const DISTINCTIVE_HIT = 10   // puntaje de un token distintivo: el umbral de "sí es esta empresa"
 const FOLLOWERS_RE = /([\d][\d.,\s]*)\s*(mil|k|m|millones)?\s*(?:de\s+)?(?:seguidores|followers)/
 
 // Relleno corporativo: aparece en miles de nombres, así que compartirlo NO significa
@@ -4759,6 +4761,30 @@ function _nameScore(wantedTokens, title, slug) {
     score += GENERIC_NAME_TOKENS.has(t) ? 1 : 10
   }
   return score
+}
+
+// v0.10.8 — el texto del ancla trae nombre + rubro + ciudad + DESCRIPCIÓN comercial, y
+// puntuar sobre todo eso regalaba el match a cualquier proveedor que presuma al cliente:
+// "aviator spain … mars, ferrero, mondelez international, henkel" calificaba como
+// Mondelēz. Nos quedamos con el nombre a secas.
+//
+// LinkedIn repite el nombre al inicio del ancla (copia accesible + visible), así que el
+// nombre es el prefijo más largo que aparece dos veces seguidas. Si el patrón cambia,
+// caemos al slug, que nunca trae descripción.
+function _leadingDoubledName(text) {
+  const max = Math.floor(text.length / 2)
+  for (let k = max; k >= 3; k--) {
+    if (text.slice(0, k) === text.slice(k, 2 * k)) return text.slice(0, k).trim()
+  }
+  return ''
+}
+
+// El slug ES la identidad de la empresa: /company/mondelez-internacional. Viene
+// URL-encoded cuando el nombre trae acentos (mondel%C4%93z).
+function _slugWords(slug) {
+  let s = slug ?? ''
+  try { s = decodeURIComponent(s) } catch { /* slug con % inválido: se usa tal cual */ }
+  return _normForFilter(s.replace(/[-_]+/g, ' '))
 }
 
 // "3,204,559 seguidores" | "3.2 M de seguidores" | "12 mil seguidores" | "1.2K followers"
@@ -4827,19 +4853,18 @@ async function resolveCompanyOnPage(payload = {}) {
     const urn = (attr.match(COMPANY_URN_RE) ?? [])[1]
       ?? (card?.outerHTML?.match(COMPANY_URN_RE) ?? [])[1]
       ?? null
-    // v0.10.6 — el guard de nombre pesa POR TOKEN. Antes bastaba compartir uno
-    // cualquiera, y "durulte alimentos" se ganó la búsqueda de "mondelez internacional"
-    // por la palabra *internacional* (y por tener más seguidores). Los tokens genéricos
-    // valen 1 y los distintivos 10: quien trae el nombre real siempre gana al que solo
-    // comparte relleno corporativo.
-    const nameScore = _nameScore(tokens, title, _normForFilter(slug))
+    // v0.10.6 — el guard de nombre pesa POR TOKEN: genéricos 1, distintivos 10, así que
+    // quien trae el nombre real gana a quien solo comparte relleno corporativo.
+    // v0.10.8 — y se puntúa SOLO sobre el nombre + el slug, nunca sobre la descripción.
+    const slugWords = _slugWords(slug)
+    const nameOnly = _leadingDoubledName(title) || slugWords
+    const nameScore = _nameScore(tokens, nameOnly, slugWords)
 
     candidates.push({
-      urn, slug, title: title.slice(0, 60), nameScore, matched: nameScore > 0,
+      urn, slug, nameScore, matched: nameScore >= DISTINCTIVE_HIT,
+      title: nameOnly.slice(0, 60),
       followers: _parseFollowers(card?.innerText ?? ''),
-      // Diagnóstico: el texto COMPLETO sobre el que se puntúa. Con 60 chars no se veía
-      // por qué "aviator spain" puntuaba como si trajera el nombre buscado.
-      scoredText: title.slice(0, 300),
+      scoredText: nameOnly.slice(0, 120),  // diagnóstico: exactamente lo que se puntuó
     })
     if (candidates.length >= 6) break
   }
@@ -4852,15 +4877,22 @@ async function resolveCompanyOnPage(payload = {}) {
              urn: null, slug: null, matched: false, currentUrl: location.href }
   }
 
-  // Prioridad: (1) parecido de NOMBRE, (2) que tenga URN usable, (3) MÁS seguidores
-  // (entre páginas del mismo nombre, la corporativa contra las duplicadas/regionales),
-  // (4) URN más bajo = página más antigua. Los que no comparten ningún token quedan
-  // fuera: mejor no resolver que apuntar la campaña a otra empresa.
-  const usable = candidates.filter(c => c.nameScore > 0)
-  const pool = usable.length ? usable : candidates
+  // El nombre es un FILTRO, no un ranking: o la página es de esta empresa o no lo es.
+  // Entre las que sí lo son manda el tamaño, que es lo que separa a la corporativa de las
+  // duplicadas regionales (Mondelēz: 3.4M vs 77). Ordenar por parecido de nombre sería
+  // peor: "mondelez internacional" (la duplicada, 2 tokens) le ganaría a "mondelez
+  // international" (la real, 1 token) para siempre.
+  const valid = candidates.filter(c => c.nameScore >= DISTINCTIVE_HIT)
+  // Si el nombre buscado es TODO relleno genérico ("Grupo Comercial"), no hay token
+  // distintivo que exigir: aceptamos cualquier coincidencia antes que no resolver.
+  const pool = valid.length ? valid : candidates.filter(c => c.nameScore > 0)
+  if (pool.length === 0) {
+    return { action: 'resolve_company', status: 'ok', error: 'no_name_match',
+             urn: null, slug: null, matched: false, contentVersion: CONTENT_VERSION,
+             candidates: candidates.map(c => ({ urn: c.urn, title: c.title, followers: c.followers, nameScore: c.nameScore })) }
+  }
   const best = pool.slice().sort((a, b) =>
-    (b.nameScore - a.nameScore)
-    || ((b.urn ? 1 : 0) - (a.urn ? 1 : 0))
+    ((b.urn ? 1 : 0) - (a.urn ? 1 : 0))
     || (b.followers - a.followers)
     || (parseInt(a.urn ?? '9e15', 10) - parseInt(b.urn ?? '9e15', 10))
   )[0]
@@ -4870,7 +4902,7 @@ async function resolveCompanyOnPage(payload = {}) {
     // Versión del CONTENT script (no la del manifest, que la reporta el service worker):
     // si estas dos divergen, la pestaña está corriendo código viejo. Ver
     // reloadLinkedInTabsOnVersionChange en background.js.
-    contentVersion: '0.10.7',
+    contentVersion: CONTENT_VERSION,
     urn: best.urn, slug: best.slug, matched: best.matched, resultTitle: best.title,
     followers: best.followers, nameScore: best.nameScore,
     // Para diagnosticar cuando una empresa quede pegada en 0 resultados.

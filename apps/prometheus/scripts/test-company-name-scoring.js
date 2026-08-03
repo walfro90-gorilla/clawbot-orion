@@ -46,6 +46,40 @@ assert.equal(coreCompanyName('Prida Consorcio Aduanal'), 'prida consorcio aduana
 // Acentos fuera, para que "Mondelēz" y "Mondelez" sean el mismo token.
 assert.equal(coreCompanyName('Mondelēz Internacional'), 'mondelez')
 
+// ── Regresión con datos REALES del probe del 3-ago ──────────────────────────
+// El texto del ancla trae nombre + rubro + ciudad + descripción comercial. Puntuar sobre
+// todo eso le regalaba el match a proveedores que presumen al cliente en su descripción.
+const dbl = (t) => {
+  const max = Math.floor(t.length / 2)
+  for (let k = max; k >= 3; k--) if (t.slice(0, k) === t.slice(k, 2 * k)) return t.slice(0, k).trim()
+  return ''
+}
+const slugWords = (s) => { try { s = decodeURIComponent(s) } catch {} return norm(s.replace(/[-_]+/g, ' ')) }
+
+const reales = [
+  { anchor: 'mondelez internacionalmondelez internacionalcomercio al por menorcuritiba, prseguir77 seguidores', slug: 'mondel%C4%93z-internacional', esperado: 11 },
+  { anchor: 'durulte alimentos durulte alimentos fabricacion de alimentosmontevideoseguir…multinacionales mondelez', slug: 'durulte-alimentos', esperado: 0 },
+  { anchor: 'aviator spainaviator spainimportacion y exportacionbarcelonaseguir…mars, ferrero, mondelez international, henkel', slug: 'aviator-spain', esperado: 0 },
+  { anchor: 'branding merchandising branding merchandising publicidadbuenos airesseguir…unilever, mondelez argentina', slug: 'branding-merchandising', esperado: 0 },
+]
+for (const c of reales) {
+  const sw = slugWords(c.slug)
+  const nameOnly = dbl(norm(c.anchor)) || sw
+  assert.equal(nameScore(t, nameOnly, sw), c.esperado, `${c.slug} debía puntuar ${c.esperado}`)
+}
+// El nombre filtra; entre las válidas decide el tamaño. Si ordenara por parecido de
+// nombre, la duplicada "mondelez internacional" (2 tokens, 77 seguidores) le ganaría
+// para siempre a la real "mondelez international" (1 token, 3.4M).
+const duplicada = { score: 11, followers: 77 }
+const corporativa = { score: 10, followers: 3400000 }
+const DISTINCTIVE_HIT = 10
+const gana = (a, b) => {
+  const va = a.score >= DISTINCTIVE_HIT, vb = b.score >= DISTINCTIVE_HIT
+  if (va !== vb) return va
+  return a.followers > b.followers
+}
+assert.ok(gana(corporativa, duplicada), 'la corporativa gana a la duplicada regional')
+
 // Entre páginas del MISMO nombre decide el tamaño (corporativa vs duplicada regional).
 const molexTok = tokensOf('MOLEX')
 const real = { score: nameScore(molexTok, 'molex fabricacion de productos', 'molex'), followers: 346000 }
