@@ -4837,6 +4837,9 @@ async function resolveCompanyOnPage(payload = {}) {
     candidates.push({
       urn, slug, title: title.slice(0, 60), nameScore, matched: nameScore > 0,
       followers: _parseFollowers(card?.innerText ?? ''),
+      // Diagnóstico: el texto COMPLETO sobre el que se puntúa. Con 60 chars no se veía
+      // por qué "aviator spain" puntuaba como si trajera el nombre buscado.
+      scoredText: title.slice(0, 300),
     })
     if (candidates.length >= 6) break
   }
@@ -4867,11 +4870,11 @@ async function resolveCompanyOnPage(payload = {}) {
     // Versión del CONTENT script (no la del manifest, que la reporta el service worker):
     // si estas dos divergen, la pestaña está corriendo código viejo. Ver
     // reloadLinkedInTabsOnVersionChange en background.js.
-    contentVersion: '0.10.6',
+    contentVersion: '0.10.7',
     urn: best.urn, slug: best.slug, matched: best.matched, resultTitle: best.title,
     followers: best.followers, nameScore: best.nameScore,
     // Para diagnosticar cuando una empresa quede pegada en 0 resultados.
-    candidates: candidates.map(c => ({ urn: c.urn, title: c.title, followers: c.followers, nameScore: c.nameScore })),
+    candidates: candidates.map(c => ({ urn: c.urn, title: c.title, followers: c.followers, nameScore: c.nameScore, scoredText: c.scoredText })),
   }
 }
 

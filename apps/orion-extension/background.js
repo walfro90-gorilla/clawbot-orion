@@ -835,6 +835,7 @@ async function resolveCompanies(commandId, payload) {
         // el resolver nuevo o por qué eligió una página: el probe del 2-ago salió
         // "sin followers" y parecía código viejo cuando el problema era este descarte.
         followers: r?.followers ?? null,
+        nameScore: r?.nameScore ?? null,
         contentVersion: r?.contentVersion ?? null,
         candidates: r?.candidates ?? null,
       })
