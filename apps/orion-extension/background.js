@@ -778,17 +778,54 @@ function locationsToGeoUrns(locs) {
 // Una empresa = 1 navegación a /search/results/companies/ + 1 extract en content.js.
 // Batchear evita gastar un comando (y un gap de search) por empresa: una lista de 180
 // empresas se resuelve en ~9 ticks en vez de ~76 días.
+// v0.10.6 — "nombre núcleo": el nombre sin relleno corporativo. La lista del cliente
+// trae los nombres como los dice la gente ("mondelez internacional") y LinkedIn indexa
+// la página real con otro ("Mondelez International"), así que la búsqueda literal solo
+// encuentra duplicadas regionales de 77 seguidores. Buscar "mondelez" a secas sí trae la
+// corporativa. Solo se reintenta si el nombre núcleo DIFIERE del original.
+const GENERIC_NAME_TOKENS = new Set([
+  'internacional', 'international', 'mexico', 'mexicana', 'mexicano', 'latam',
+  'grupo', 'group', 'holding', 'holdings', 'company', 'corporativo', 'corporation',
+  'servicios', 'services', 'solutions', 'soluciones', 'industrias', 'industries',
+  'comercial', 'global', 'sapi', 'srl', 'inc', 'ltd', 'llc', 'sade', 'de', 'cv',
+])
+const SMALL_PAGE_FOLLOWERS = 1000  // por debajo de esto, sospechamos página duplicada
+
+function coreCompanyName(name) {
+  const norm = String(name ?? '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+  const kept = norm.split(/[^a-z0-9]+/).filter(t => t.length > 2 && !GENERIC_NAME_TOKENS.has(t))
+  return kept.join(' ')
+}
+
 async function resolveCompanies(commandId, payload) {
   const companies = Array.isArray(payload.companies) ? payload.companies : []
   const resolved = []
+  const searchUrlFor = (q) =>
+    `https://www.linkedin.com/search/results/companies/?keywords=${encodeURIComponent(q)}&origin=GLOBAL_SEARCH_HEADER`
+  // El scoring del content script SIEMPRE usa el nombre original: solo cambia la query.
+  const askContent = async (query, originalName) => {
+    const tab = await navigateTabAndWait(searchUrlFor(query), 20000)
+    return await sendMessageWithRetry(tab.id, {
+      type: 'orion_command', commandId, action: 'resolve_company', payload: { name: originalName },
+    }, 4)
+  }
+  const better = (a, b) =>
+    (a?.nameScore ?? 0) > (b?.nameScore ?? 0) ||
+    ((a?.nameScore ?? 0) === (b?.nameScore ?? 0) && (a?.followers ?? 0) > (b?.followers ?? 0))
+
   for (const c of companies) {
     if (!c?.name) continue
-    const url = `https://www.linkedin.com/search/results/companies/?keywords=${encodeURIComponent(c.name)}&origin=GLOBAL_SEARCH_HEADER`
     try {
-      const tab = await navigateTabAndWait(url, 20000)
-      const r = await sendMessageWithRetry(tab.id, {
-        type: 'orion_command', commandId, action: 'resolve_company', payload: { name: c.name },
-      }, 4)
+      let r = await askContent(c.name, c.name)
+      const core = coreCompanyName(c.name)
+      if (core && core !== c.name.trim().toLowerCase() && (r?.followers ?? 0) < SMALL_PAGE_FOLLOWERS) {
+        await sleep(1500)
+        const r2 = await askContent(core, c.name)
+        if (better(r2, r)) {
+          console.log(`[Orion] "${c.name}": nombre núcleo "${core}" encontró mejor página (${r2?.followers} seguidores vs ${r?.followers})`)
+          r = r2
+        }
+      }
       resolved.push({
         id: c.id, name: c.name,
         urn: r?.urn ?? null, slug: r?.slug ?? null,

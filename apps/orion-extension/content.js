@@ -4743,6 +4743,24 @@ function _normForFilter(s) {
 const COMPANY_URN_RE = /urn:li:(?:fsd_company|organization|company):(\d+)/
 const FOLLOWERS_RE = /([\d][\d.,\s]*)\s*(mil|k|m|millones)?\s*(?:de\s+)?(?:seguidores|followers)/
 
+// Relleno corporativo: aparece en miles de nombres, así que compartirlo NO significa
+// que sea la empresa. Ver _nameScore.
+const GENERIC_NAME_TOKENS = new Set([
+  'internacional', 'international', 'mexico', 'mexicana', 'mexicano', 'latam',
+  'grupo', 'group', 'holding', 'holdings', 'company', 'corporativo', 'corporation',
+  'servicios', 'services', 'solutions', 'soluciones', 'industrias', 'industries',
+  'comercial', 'global', 'sapi', 'srl', 'inc', 'ltd', 'llc', 'sade', 'de', 'cv',
+])
+
+function _nameScore(wantedTokens, title, slug) {
+  let score = 0
+  for (const t of wantedTokens) {
+    if (!title.includes(t) && !slug.includes(t)) continue
+    score += GENERIC_NAME_TOKENS.has(t) ? 1 : 10
+  }
+  return score
+}
+
 // "3,204,559 seguidores" | "3.2 M de seguidores" | "12 mil seguidores" | "1.2K followers"
 // Solo se usa para RANKEAR, así que aproximar está bien.
 function _parseFollowers(txt) {
@@ -4809,13 +4827,15 @@ async function resolveCompanyOnPage(payload = {}) {
     const urn = (attr.match(COMPANY_URN_RE) ?? [])[1]
       ?? (card?.outerHTML?.match(COMPANY_URN_RE) ?? [])[1]
       ?? null
-    // Guard anti-empresa-equivocada: debe compartir algún token con lo que pedimos.
-    const matched = tokens.length === 0
-      ? title.includes(wanted)
-      : tokens.some(t => title.includes(t) || _normForFilter(slug).includes(t))
+    // v0.10.6 — el guard de nombre pesa POR TOKEN. Antes bastaba compartir uno
+    // cualquiera, y "durulte alimentos" se ganó la búsqueda de "mondelez internacional"
+    // por la palabra *internacional* (y por tener más seguidores). Los tokens genéricos
+    // valen 1 y los distintivos 10: quien trae el nombre real siempre gana al que solo
+    // comparte relleno corporativo.
+    const nameScore = _nameScore(tokens, title, _normForFilter(slug))
 
     candidates.push({
-      urn, slug, title: title.slice(0, 60), matched,
+      urn, slug, title: title.slice(0, 60), nameScore, matched: nameScore > 0,
       followers: _parseFollowers(card?.innerText ?? ''),
     })
     if (candidates.length >= 6) break
@@ -4829,10 +4849,14 @@ async function resolveCompanyOnPage(payload = {}) {
              urn: null, slug: null, matched: false, currentUrl: location.href }
   }
 
-  // Prioridad: (1) que matchee el nombre, (2) que tenga URN usable, (3) MÁS seguidores,
-  // (4) URN más bajo = página más antigua = normalmente la corporativa real.
-  const best = candidates.slice().sort((a, b) =>
-    (b.matched - a.matched)
+  // Prioridad: (1) parecido de NOMBRE, (2) que tenga URN usable, (3) MÁS seguidores
+  // (entre páginas del mismo nombre, la corporativa contra las duplicadas/regionales),
+  // (4) URN más bajo = página más antigua. Los que no comparten ningún token quedan
+  // fuera: mejor no resolver que apuntar la campaña a otra empresa.
+  const usable = candidates.filter(c => c.nameScore > 0)
+  const pool = usable.length ? usable : candidates
+  const best = pool.slice().sort((a, b) =>
+    (b.nameScore - a.nameScore)
     || ((b.urn ? 1 : 0) - (a.urn ? 1 : 0))
     || (b.followers - a.followers)
     || (parseInt(a.urn ?? '9e15', 10) - parseInt(b.urn ?? '9e15', 10))
@@ -4843,11 +4867,11 @@ async function resolveCompanyOnPage(payload = {}) {
     // Versión del CONTENT script (no la del manifest, que la reporta el service worker):
     // si estas dos divergen, la pestaña está corriendo código viejo. Ver
     // reloadLinkedInTabsOnVersionChange en background.js.
-    contentVersion: '0.10.5',
+    contentVersion: '0.10.6',
     urn: best.urn, slug: best.slug, matched: best.matched, resultTitle: best.title,
-    followers: best.followers,
+    followers: best.followers, nameScore: best.nameScore,
     // Para diagnosticar cuando una empresa quede pegada en 0 resultados.
-    candidates: candidates.map(c => ({ urn: c.urn, title: c.title, followers: c.followers })),
+    candidates: candidates.map(c => ({ urn: c.urn, title: c.title, followers: c.followers, nameScore: c.nameScore })),
   }
 }
 
