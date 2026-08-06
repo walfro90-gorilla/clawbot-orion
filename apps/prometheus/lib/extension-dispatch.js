@@ -715,16 +715,13 @@ export async function dispatchSearch(account, campaign, keywords, opts = {}) {
 
   return dispatchCommand(account.id, 'search', {
     campaignId:       campaign.id,
-    // Fase 1 (SalesNav): el modo viaja en el payload. La extensión aún lo IGNORA (busca free);
-    // en fase 2, buildSearchUrl ramifica a /sales/search/people/ cuando es 'sales_navigator'.
-    // v0.10.0: con empresa forzamos el buscador FREE. La URL de SalesNav que construimos hoy
-    // es keywords-only (sin filtros nativos) → no sabe de currentCompany y se comería el
-    // scoping por empresa (caso real: la cuenta de Josh, search_mode='sales_navigator').
-    // El free con facet es MÁS targeted que ese SalesNav v1, y SalesNav no restringe la
-    // búsqueda free de su propia cuenta.
-    // ponytail: si algún día hace falta el alcance nativo de SalesNav, el upgrade es añadir
-    // filters:List((type:CURRENT_COMPANY,...)) a buildSalesNavSearchUrl y quitar este forzado.
-    searchMode:       tc ? 'free' : (account.search_mode ?? 'free'),
+    // v0.10.10 (3-ago): SalesNav TAMBIÉN en modo empresa. buildSalesNavSearchUrl arma el
+    // filtro nativo CURRENT_COMPANY desde payload.companyUrn (ext ≥0.10.1); probado en
+    // vivo en la cuenta de Josh (cmd 8392b757): el filtro aplica y el scraper extrae.
+    // Ventaja SalesNav: ve TODA la empresa, no solo tu red (el free con facet mostraba
+    // 4 personas de Mondelēz; SalesNav ve la plantilla completa).
+    // Sin URN resuelto NO hay filtro nativo → seguimos en free con "nombre exacto".
+    searchMode:       (tc && !tc.linkedin_urn) ? 'free' : (account.search_mode ?? 'free'),
     keywords:         finalKeywords,
     companyUrn:       tc?.linkedin_urn ?? null,   // facet currentCompany (v0.10.0)
     targetCompanyId:  tc?.id ?? null,             // para que el bridge marque el cursor + etiquete leads

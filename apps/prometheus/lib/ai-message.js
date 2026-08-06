@@ -175,6 +175,28 @@ export function calUrlWithLeadId(calUrl, leadId) {
 // como si fuera el nombre de la empresa. La regex que lo evitaba vive en worker.js (MUERTO).
 const NO_INVENT_COMPANY_RULE = '🏢 EMPRESA: NUNCA inventes ni asumas el nombre de una empresa. Si el perfil NO incluye una línea "Empresa:" explícita, NO menciones ninguna empresa. NUNCA uses el cargo, título o rol de la persona (ej. "Director de Operaciones", "Gerente de Logística") como si fuera el nombre de su empresa — es un error grave.'
 
+// (3-ago-2026) Políglota: el idioma lo marca el CONTACTO, no la campaña. Regla única
+// inyectada en los 3 caminos vivos con LLM (invite/FM/FU-LLM). El FU verbatim no pasa
+// por LLM y conserva el idioma del template — a propósito.
+const LANGUAGE_RULE = [
+  '🌐 IDIOMA (obligatorio):',
+  '- Si hay HISTORIAL con mensajes del contacto, responde en el idioma de su ÚLTIMO mensaje (inglés→inglés, portugués→portugués, chino→chino, etc.), aunque el resto de este prompt esté en español.',
+  '- Si NO hay historial (primer mensaje), infiere el idioma del lead por su perfil: headline en inglés, o ubicación en EE.UU./Canadá/UK → escribe en INGLÉS. Headline en portugués o ubicación en Brasil → portugués.',
+  '- En caso de duda, español.',
+  '- Escribe el idioma con nivel nativo profesional; no mezcles idiomas en un mismo mensaje.',
+].join('\n')
+
+// (3-ago-2026) Cuando el contacto NO es fit (nos quiere vender él, no es la empresa
+// objetivo, o dice que no le interesa), la peor respuesta es la plantilla genérica de
+// venta. Regla solo para replies (fm_reply_*): reconocer la situación real y actuar.
+const WRONG_FIT_RULE = [
+  '⚠️ SI EL CONTACTO NO ES FIT — detecta estas situaciones ANTES de redactar:',
+  '- Es un PROVEEDOR que nos quiere vender su producto/servicio (invirtió el rol): agradece con calidez, dile con honestidad que por ahora no buscamos ese servicio, y cierra cordial SIN agendar reunión y SIN pitchear de vuelta.',
+  '- Dice que no es la persona/empresa adecuada o que nos equivocamos: reconócelo con naturalidad ("gracias por aclararlo"), pide referencia a la persona correcta SOLO si el tono lo permite, y cierra cordial.',
+  '- Responde algo que NO entiendes o fuera de contexto: haz UNA pregunta breve y genuina para aclarar — NUNCA respondas con un pitch genérico que ignore lo que dijo.',
+  'En todos los casos: responde a LO QUE DIJO, no a lo que te gustaría que hubiera dicho. Si te falta información, pregunta; jamás la inventes.',
+].join('\n')
+
 // Modo relación ("vender sin vender") para el FM/auto-reply. Sustituye las reglas
 // hardcodeadas fm_reply_* que empujan a cita. Se activa cuando la campaña define
 // followup_tone_directive (mismo gate que el FU path). El lead pide la reunión; nunca al revés.
@@ -268,6 +290,9 @@ export function buildSystemPrompt({ campaignPrompt, personaBlock, brainBlock, ty
   sections.push('', 'FORMATO DE RESPUESTA: SOLO el mensaje a enviar, texto plano. Sin comillas envolventes, sin prefijos tipo "Respuesta:", sin firma.')
   sections.push('', '🚫 PROHIBIDO: corchetes [ ], llaves { } o cualquier placeholder/instrucción de relleno (ej. "[menciona algo de su perfil]", "[Nombre]", "[empresa]"). Si te falta un dato del lead, OMÍTELO de forma natural — escribe la frase completa sin ese dato. El mensaje debe quedar 100% listo para enviarse tal cual, sin nada por rellenar.')
   sections.push('', NO_INVENT_COMPANY_RULE)
+  sections.push('', LANGUAGE_RULE)
+  // Solo en replies: en invite/FU no hay mensaje del contacto que malinterpretar.
+  if (String(type).startsWith('fm_reply')) sections.push('', WRONG_FIT_RULE)
   return sections.join('\n')
 }
 
@@ -610,6 +635,10 @@ export async function personalizeFollowupMessage(campaign, lead, template, fuSte
   }
   systemSections.push('', 'FORMATO: SOLO el mensaje personalizado, texto plano. Sin comillas, sin prefijos, sin firma.')
   systemSections.push('🚫 PROHIBIDO corchetes [ ], llaves { } o placeholders de relleno ("[menciona algo]", "[Nombre]"). Si te falta un dato, OMÍTELO naturalmente. El mensaje debe quedar listo para enviar tal cual.')
+  // Políglota (3-ago): el FU-LLM se TRADUCE al idioma del lead si su perfil lo indica
+  // (la intención del template manda; el idioma lo pone el destinatario).
+  systemSections.push('', LANGUAGE_RULE)
+  systemSections.push('Si el idioma del lead difiere del idioma del template, TRADUCE el mensaje personalizado al idioma del lead conservando intención, calidez y estructura.')
 
   const systemPrompt = systemSections.join('\n')
 

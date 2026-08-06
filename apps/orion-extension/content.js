@@ -4741,7 +4741,7 @@ function _normForFilter(s) {
 // canónica). Ahora se puntúa por SEGUIDORES: la duplicada tiene decenas, la real
 // millones.
 const COMPANY_URN_RE = /urn:li:(?:fsd_company|organization|company):(\d+)/
-const CONTENT_VERSION = '0.10.9'
+const CONTENT_VERSION = '0.10.10'
 const DISTINCTIVE_HIT = 10   // puntaje de un token distintivo: el umbral de "sí es esta empresa"
 const FOLLOWERS_RE = /([\d][\d.,\s]*)\s*(mil|k|m|millones)?\s*(?:de\s+)?(?:seguidores|followers)/
 
@@ -4799,7 +4799,12 @@ function _parseFollowers(txt) {
     : parseFloat(raw.replace(',', '.'))
   if (!isFinite(n)) return 0
   const mult = { mil: 1e3, k: 1e3, m: 1e6, millones: 1e6 }[m[2]] ?? 1
-  return n * mult
+  const v = n * mult
+  // Sanity (3-ago): un parse malo produjo 200,919,000 ("200.919" ya en unidades + "mil"
+  // suelto en el texto) y esa inflación ganó el ranking por tamaño. Ninguna página de
+  // empresa real pasa de ~40M (Google/Amazon ~30-36M). Si sale absurdo, mejor "no sé"
+  // (0) que un número que corrompe la elección.
+  return v > 50_000_000 ? 0 : v
 }
 
 // v0.10.5 — aísla la tarjeta de UN resultado. Antes se subían 4 niveles a ciegas desde

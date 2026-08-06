@@ -153,7 +153,9 @@ pending → invite_sent → connected → follow_up_sent (followup_step 1..N) �
 
 **Super DEAD — contacto que nos eliminó** (`leads.disconnected_at`, jul-2026): si un lead que estuvo **genuinamente conectado** (FU enviado / nos respondió / etapa post-conexión) vuelve a dar `not_first_degree`/`not_messageable`, significa que **el contacto nos ELIMINÓ de su red** → `markDisconnectedSuperDead` (`extension-bridge.js`): `status=dead` + `dead_reason=disconnected_by_contact` + `disconnected_at` + `automation_paused=true`. **NUNCA re-invitar/re-mensajear** (anti-ban). Distinto del revert a `invite_sent` que se aplica solo a un **falso-positivo** de accept-detection (lead sin evidencia de conexión real). `wasGenuinelyConnected()` decide. Cobertura reactiva = ruta compose (el guard InMail dispara antes de enviar); la ruta thread (FU multi-paso) requiere el check de grado en la extensión (pendiente).
 
-### 5.1 Búsqueda por empresa (v0.10.0, jul-2026)
+### 5.1 Búsqueda por empresa (v0.10.x, jul/ago-2026)
+
+> 🔒 **FLUJO CONGELADO — ground truth completo en [`docs/company-scoped-flujo.md`](docs/company-scoped-flujo.md).** Costó 15 bugs encadenados dejarlo funcional (3-ago-2026). Un hook de `.claude/hooks/protect-stable.sh` pide confirmación explícita antes de editar sus archivos. Antes de tocar: leer ese doc + `npm run check -w apps/prometheus`.
 
 La lista que el usuario edita sigue siendo **`campaigns.search_company_names`** (Centro de Control → Búsqueda). `campaign_target_companies` NO tiene UI: el scheduler sincroniza filas desde ese array (TTL 30 min) y las usa como **cursor** (`last_searched_at nulls first` ⇒ una vuelta completa a la lista antes de repetir empresa) y como **caché del company URN**.
 
