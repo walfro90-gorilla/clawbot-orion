@@ -665,8 +665,11 @@ async function executeCommand(commandId, action, payload) {
     // Chrome dedicado del VPS no hay usuario que molestar, y una tab enfocada
     // mientras "escribimos" es MÁS humana. Best-effort: si falla, el chunking sigue
     // como defensa secundaria.
-    // ponytail: TEST TEMPORAL 06-ago-2026 — desactivado a propósito para hard-test
-    // "sin foco" con cuenta Wal. REVERTIR con: git checkout apps/orion-extension/background.js
+    // ponytail: MONITOREO 06-ago-2026 — desactivado en las 3 cuentas para confirmar
+    // en producción que Chrome ya no throttlea sin este hack (2/2 hard-tests limpios
+    // en Wal: inmediato + 6min minimizado, sin typing_complete_timeout). Vigilar
+    // /dashboard/quarantine y phase_insights por typing_complete_timeout nuevo.
+    // Si aparece: revertir con `git revert` de este commit + recargar extensión.
     // try {
     //   await chrome.tabs.update(tab.id, { active: true })
     //   if (tab.windowId != null) {
