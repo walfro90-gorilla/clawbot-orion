@@ -80,7 +80,7 @@ Tres caídas de producción en un día (DB Supabase wedged por inanición de com
 
 ## Estado de versiones (referencia rápida)
 
-- **Extensión Orion Sync**: `v0.10.0` (manifest) — búsqueda company-scoped (facet `currentCompany` + `resolve_companies`) sobre popup FIFO/badges + búsqueda dual Free/SalesNav.
+- **Extensión Orion Sync**: `v0.10.10` (manifest) — company-scoped endurecido (resolver por nombre+tamaño con `followers`/`page_title`, recarga remota `reload_extension`, `contentVersion` en resultados, SalesNav CURRENT_COMPANY). ⚠️ verificar versión real con `linkedin_accounts.ext_version` — el disco de cada máquina puede ir atrás.
 - **Motor de follow-ups**: v0.8 (dinámico, `campaign_followups`).
 - **Orion**: Next 16.2.3 · React 19.
 - **Arquitectura**: Smart Hybrid (extensión + bridge WS). Playwright/Voyager = muerta.
