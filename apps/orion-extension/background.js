@@ -665,14 +665,16 @@ async function executeCommand(commandId, action, payload) {
     // Chrome dedicado del VPS no hay usuario que molestar, y una tab enfocada
     // mientras "escribimos" es MÁS humana. Best-effort: si falla, el chunking sigue
     // como defensa secundaria.
-    try {
-      await chrome.tabs.update(tab.id, { active: true })
-      if (tab.windowId != null) {
-        await chrome.windows.update(tab.windowId, { focused: true })
-      }
-    } catch (e) {
-      console.warn(`[Orion] anti-throttle focus falló (sigo igual): ${e?.message}`)
-    }
+    // ponytail: TEST TEMPORAL 06-ago-2026 — desactivado a propósito para hard-test
+    // "sin foco" con cuenta Wal. REVERTIR con: git checkout apps/orion-extension/background.js
+    // try {
+    //   await chrome.tabs.update(tab.id, { active: true })
+    //   if (tab.windowId != null) {
+    //     await chrome.windows.update(tab.windowId, { focused: true })
+    //   }
+    // } catch (e) {
+    //   console.warn(`[Orion] anti-throttle focus falló (sigo igual): ${e?.message}`)
+    // }
 
     console.log(`[Orion] Sending to tab id=${tab.id} url=${tab.url} status=${tab.status}`)
     // Tracking para el indicador visual "tab casada"

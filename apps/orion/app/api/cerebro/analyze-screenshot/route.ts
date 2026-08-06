@@ -86,7 +86,10 @@ export async function POST(req: NextRequest) {
     const resp = await Promise.race([
       ai.models.generateContent({
         model: "gemini-2.5-flash",
-        config: { systemInstruction: ANALYSIS_SYSTEM, temperature: 0.3, maxOutputTokens: 1600, responseMimeType: "application/json" },
+        // thinkingBudget 0 OBLIGATORIO: gemini-2.5-flash trae thinking por default y el
+        // razonamiento interno se come maxOutputTokens → resp.text vacío → "no JSON".
+        // (Mismo bug que ya pagó capture-failure; el patrón original lo lleva.)
+        config: { systemInstruction: ANALYSIS_SYSTEM, temperature: 0.3, maxOutputTokens: 2400, responseMimeType: "application/json", thinkingConfig: { thinkingBudget: 0 } },
         contents: [{ role: "user", parts: [
           { text: userPrompt },
           { inlineData: { mimeType, data: imageBase64 } },
@@ -96,6 +99,9 @@ export async function POST(req: NextRequest) {
     ]) as { text?: string }
 
     const txt = (resp.text ?? "").trim().replace(/^```json\s*/i, "").replace(/```$/, "").trim()
+    if (!txt) {
+      return NextResponse.json({ error: "El modelo devolvió respuesta vacía — reintenta (si persiste, la imagen puede ser demasiado grande o compleja)" }, { status: 502 })
+    }
     let parsed: {
       error?: string
       transcript?: string
