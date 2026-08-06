@@ -52,7 +52,10 @@ export async function POST(req: NextRequest) {
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   const admin = createAdminClient()
   const { data: profile } = await admin.from("profiles").select("role").eq("id", user.id).single()
-  if ((ROLE_LEVEL[profile?.role ?? ""] ?? 0) < 3) {
+  // (3-ago) Nivel 2+ (user) también puede ANALIZAR: el analizador no escribe nada —
+  // solo produce un borrador que igual pasa por el POST de playbook (donde el rol user
+  // queda forzado a propuesta inactiva en campaña propia).
+  if ((ROLE_LEVEL[profile?.role ?? ""] ?? 0) < 2) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 })
   }
 

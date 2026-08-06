@@ -32,12 +32,15 @@ export default async function CerebroPage() {
 
   // ── Scope campaigns for restricted users ──────────────────────────────────
   let campaignIds: string[] | null = null
+  let myCampaigns: { id: string; name: string }[] = []
   if (isRestricted && me.linkedin_account_id) {
     const { data: camps } = await admin
       .from("campaigns")
-      .select("id")
+      .select("id, name")
       .eq("linkedin_account_id", me.linkedin_account_id)
-    campaignIds = (camps ?? []).map((c: { id: string }) => c.id)
+      .order("name")
+    myCampaigns = (camps ?? []) as { id: string; name: string }[]
+    campaignIds = myCampaigns.map(c => c.id)
   }
 
   // Campañas para el selector de ámbito del form del Cerebro (global vs por campaña).
@@ -86,11 +89,18 @@ export default async function CerebroPage() {
     }
   }
 
-  // 5. Playbook entries
-  const playbookQ = admin
+  // 5. Playbook entries — (3-ago) multi-tenant: un rol user solo ve las globales + las
+  // de SUS campañas (el playbook es conocimiento de venta; el de un cliente no se
+  // muestra a otro).
+  let playbookQ = admin
     .from("ai_playbook")
     .select("*")
     .order("created_at", { ascending: false })
+  if (campaignIds !== null) {
+    playbookQ = (campaignIds.length > 0
+      ? playbookQ.or(`campaign_id.is.null,campaign_id.in.(${campaignIds.join(",")})`)
+      : playbookQ.is("campaign_id", null)) as typeof playbookQ
+  }
 
   const [
     { count: convAiCount },
@@ -194,7 +204,13 @@ export default async function CerebroPage() {
             Playbook de ejemplos
             <span className="text-xs font-normal normal-case text-gray-600 ml-2">({playbook.length})</span>
           </h2>
-          {isAdmin && <CerebroPlaybookForm campaigns={(campaignList ?? []) as { id: string; name: string }[]} />}
+          {isAdmin ? (
+            <CerebroPlaybookForm campaigns={(campaignList ?? []) as { id: string; name: string }[]} />
+          ) : myCampaigns.length > 0 ? (
+            // (3-ago) Modo propuesta: el operador aporta ejemplos de SUS campañas; nacen
+            // inactivos y un admin los activa tras revisar (server-side lo fuerza igual).
+            <CerebroPlaybookForm campaigns={myCampaigns} proposalMode />
+          ) : null}
         </div>
 
         {/* Table */}

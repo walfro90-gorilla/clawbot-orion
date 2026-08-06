@@ -32,10 +32,12 @@ const INITIAL: FormState = {
   campaign_id: "",
 }
 
-export function CerebroPlaybookForm({ campaigns = [] }: { campaigns?: { id: string; name: string }[] }) {
+export function CerebroPlaybookForm({ campaigns = [], proposalMode = false }: { campaigns?: { id: string; name: string }[]; proposalMode?: boolean }) {
   const router = useRouter()
   const [open, setOpen] = useState(false)
-  const [form, setForm] = useState<FormState>(INITIAL)
+  // Modo propuesta: sin ámbito global → arranca en la primera campaña propia.
+  const initial: FormState = proposalMode ? { ...INITIAL, campaign_id: campaigns[0]?.id ?? "" } : INITIAL
+  const [form, setForm] = useState<FormState>(initial)
   const [errors, setErrors] = useState<Partial<Record<keyof FormState, string>>>({})
   const [submitting, setSubmitting] = useState(false)
   const [serverError, setServerError] = useState<string | null>(null)
@@ -117,6 +119,7 @@ export function CerebroPlaybookForm({ campaigns = [] }: { campaigns?: { id: stri
     if (!form.title.trim()) next.title = "El título es obligatorio"
     if (!form.example_message.trim()) next.example_message = "El mensaje de ejemplo es obligatorio"
     if (form.kind !== "principle" && form.applies_to_turns.length === 0) next.applies_to_turns = "Selecciona al menos un turno"
+    if (proposalMode && !form.campaign_id) next.campaign_id = "Elige una de tus campañas"
     setErrors(next)
     return Object.keys(next).length === 0
   }
@@ -154,7 +157,7 @@ export function CerebroPlaybookForm({ campaigns = [] }: { campaigns?: { id: stri
         return
       }
 
-      setForm(INITIAL)
+      setForm(initial)
       setErrors({})
       setOpen(false)
       router.refresh()
@@ -171,7 +174,7 @@ export function CerebroPlaybookForm({ campaigns = [] }: { campaigns?: { id: stri
         onClick={() => { setOpen(true); setTimeout(() => titleRef.current?.focus(), 50) }}
         className="bg-blue-600 hover:bg-blue-500 text-white rounded-lg px-4 py-2 text-sm transition-colors"
       >
-        + Nuevo ejemplo
+        {proposalMode ? "+ Proponer ejemplo" : "+ Nuevo ejemplo"}
       </button>
     )
   }
@@ -179,9 +182,9 @@ export function CerebroPlaybookForm({ campaigns = [] }: { campaigns?: { id: stri
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-4" onPaste={handlePaste}>
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-gray-50">Nuevo ejemplo de playbook</h3>
+        <h3 className="text-sm font-semibold text-gray-50">{proposalMode ? "Proponer ejemplo de playbook" : "Nuevo ejemplo de playbook"}</h3>
         <button
-          onClick={() => { setOpen(false); setForm(INITIAL); setErrors({}); setShot(null); setAnalysis(null); setShotError(null) }}
+          onClick={() => { setOpen(false); setForm(initial); setErrors({}); setShot(null); setAnalysis(null); setShotError(null) }}
           className="text-gray-500 hover:text-gray-300 text-xs transition-colors"
         >
           Cancelar
@@ -253,6 +256,11 @@ export function CerebroPlaybookForm({ campaigns = [] }: { campaigns?: { id: stri
       </div>
 
       <form onSubmit={handleSubmit} className="space-y-4">
+        {proposalMode && (
+          <p className="text-amber-300/90 text-xs bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2">
+            📋 Tu ejemplo quedará <strong>pendiente de revisión</strong>: un admin lo activará antes de que la IA lo use. Aplica solo a tus campañas.
+          </p>
+        )}
         {/* Kind + scope */}
         <div className="grid grid-cols-2 gap-3">
           <div>
@@ -274,11 +282,13 @@ export function CerebroPlaybookForm({ campaigns = [] }: { campaigns?: { id: stri
               onChange={e => setForm(f => ({ ...f, campaign_id: e.target.value }))}
               className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
-              <option value="">🌐 Global (todas las campañas)</option>
+              {/* Modo propuesta: sin ámbito global — solo campañas propias */}
+              {!proposalMode && <option value="">🌐 Global (todas las campañas)</option>}
               {campaigns.map(c => (
                 <option key={c.id} value={c.id}>{c.name}</option>
               ))}
             </select>
+            {errors.campaign_id && <p className="text-red-400 text-xs mt-1">{errors.campaign_id}</p>}
           </div>
         </div>
 
@@ -400,7 +410,7 @@ export function CerebroPlaybookForm({ campaigns = [] }: { campaigns?: { id: stri
           </button>
           <button
             type="button"
-            onClick={() => { setOpen(false); setForm(INITIAL); setErrors({}) }}
+            onClick={() => { setOpen(false); setForm(initial); setErrors({}) }}
             className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-sm transition-colors"
           >
             Cancelar

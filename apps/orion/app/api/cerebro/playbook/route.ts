@@ -34,10 +34,21 @@ export async function GET() {
   return NextResponse.json({ data })
 }
 
-// POST /api/cerebro/playbook — create new entry, admin only
+// POST /api/cerebro/playbook — admins crean entradas ACTIVAS (ámbito libre).
+// (3-ago) Modo propuesta: rol `user` con cuenta ligada también puede crear, pero la
+// entrada nace INACTIVA y solo en una campaña SUYA — un admin la revisa y la activa
+// con el toggle. El gate de calidad del Cerebro sigue siendo del admin.
 export async function POST(req: NextRequest) {
-  const { user, admin, error } = await requireAdmin()
-  if (error) return error
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+
+  const admin = createAdminClient()
+  const { data: profile } = await admin
+    .from("profiles").select("role, linkedin_account_id").eq("id", user.id).single()
+  const level = ROLE_LEVEL[profile?.role ?? ""] ?? 0
+  if (level < 2) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+  const isProposal = level < 3   // user → propuesta; admin/god_admin → entrada directa
 
   const body = await req.json()
   const {
@@ -75,9 +86,26 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "applies_to_turns must be a non-empty array" }, { status: 400 })
   }
 
+  // Propuesta de rol user: campaña OBLIGATORIA y tiene que ser SUYA (nada global).
+  if (isProposal) {
+    if (!campaign_id?.trim()) {
+      return NextResponse.json({ error: "Como usuario debes elegir una de tus campañas (sin ámbito global)" }, { status: 400 })
+    }
+    if (!profile?.linkedin_account_id) {
+      return NextResponse.json({ error: "Tu usuario no tiene cuenta LinkedIn ligada" }, { status: 403 })
+    }
+    const { data: own } = await admin
+      .from("campaigns").select("id")
+      .eq("id", campaign_id).eq("linkedin_account_id", profile.linkedin_account_id)
+      .maybeSingle()
+    if (!own) return NextResponse.json({ error: "Esa campaña no pertenece a tu cuenta" }, { status: 403 })
+  }
+
   const { data, error: dbErr } = await admin!
     .from("ai_playbook")
     .insert({
+      // Propuesta nace inactiva → un admin la activa tras revisarla. Admin nace activa.
+      is_active: !isProposal,
       title: title.trim(),
       description: description?.trim() ?? null,
       tags: Array.isArray(tags) ? tags : [],
