@@ -41,6 +41,68 @@ export function CerebroPlaybookForm({ campaigns = [] }: { campaigns?: { id: stri
   const [serverError, setServerError] = useState<string | null>(null)
   const titleRef = useRef<HTMLInputElement>(null)
 
+  // ── Análisis de screenshot (3-ago-2026) ────────────────────────────────────
+  // Sube/pega una captura de una conversación real → Gemini Vision la transcribe,
+  // diagnostica la situación y PRECARGA el form con un borrador de entrada. El humano
+  // revisa/edita y guarda por el flujo normal — nada entra al playbook sin review.
+  const [shot, setShot] = useState<{ b64: string; mime: string; preview: string } | null>(null)
+  const [shotHint, setShotHint] = useState("")
+  const [analyzing, setAnalyzing] = useState(false)
+  const [analysis, setAnalysis] = useState<{ transcript: string; diagnosis: string } | null>(null)
+  const [shotError, setShotError] = useState<string | null>(null)
+
+  function loadImageFile(file: File | null | undefined) {
+    if (!file || !/^image\/(png|jpe?g|webp)$/.test(file.type)) {
+      setShotError("Formato no soportado — usa PNG, JPG o WebP.")
+      return
+    }
+    const reader = new FileReader()
+    reader.onload = () => {
+      const dataUrl = String(reader.result)
+      const b64 = dataUrl.split(",")[1] ?? ""
+      setShot({ b64, mime: file.type, preview: dataUrl })
+      setShotError(null)
+      setAnalysis(null)
+    }
+    reader.readAsDataURL(file)
+  }
+
+  function handlePaste(e: React.ClipboardEvent) {
+    const item = Array.from(e.clipboardData.items).find(i => i.type.startsWith("image/"))
+    if (item) { e.preventDefault(); loadImageFile(item.getAsFile()) }
+  }
+
+  async function analyzeShot() {
+    if (!shot) return
+    setAnalyzing(true)
+    setShotError(null)
+    try {
+      const res = await fetch("/api/cerebro/analyze-screenshot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imageBase64: shot.b64, mimeType: shot.mime, hint: shotHint.trim() || undefined }),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) { setShotError(json.error ?? "Error al analizar"); return }
+      // Precargar el form con el borrador — el humano edita antes de guardar
+      setForm(f => ({
+        ...f,
+        kind: json.draft.kind,
+        title: json.draft.title,
+        description: json.draft.description,
+        situation: json.draft.situation,
+        tags: (json.draft.tags ?? []).join(", "),
+        applies_to_turns: json.draft.applies_to_turns ?? [0, 1, 2, 3],
+        example_message: json.draft.example_message,
+      }))
+      setAnalysis({ transcript: json.transcript, diagnosis: json.diagnosis })
+    } catch {
+      setShotError("Error de red al analizar. Intenta de nuevo.")
+    } finally {
+      setAnalyzing(false)
+    }
+  }
+
   function toggleTurn(turn: number) {
     setForm(f => ({
       ...f,
@@ -115,15 +177,79 @@ export function CerebroPlaybookForm({ campaigns = [] }: { campaigns?: { id: stri
   }
 
   return (
-    <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-4">
+    <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-4" onPaste={handlePaste}>
       <div className="flex items-center justify-between">
         <h3 className="text-sm font-semibold text-gray-50">Nuevo ejemplo de playbook</h3>
         <button
-          onClick={() => { setOpen(false); setForm(INITIAL); setErrors({}) }}
+          onClick={() => { setOpen(false); setForm(INITIAL); setErrors({}); setShot(null); setAnalysis(null); setShotError(null) }}
           className="text-gray-500 hover:text-gray-300 text-xs transition-colors"
         >
           Cancelar
         </button>
+      </div>
+
+      {/* ── Analizar screenshot de una conversación ─────────────────────────── */}
+      <div
+        className="bg-purple-950/30 border border-purple-500/20 rounded-lg p-4 space-y-3"
+        onDragOver={e => e.preventDefault()}
+        onDrop={e => { e.preventDefault(); loadImageFile(e.dataTransfer.files?.[0]) }}
+      >
+        <div className="flex items-center gap-2">
+          <span>📸</span>
+          <h4 className="text-xs font-semibold text-purple-300">
+            Empezar desde un screenshot — pega (Ctrl+V), arrastra o elige una captura de la conversación
+          </h4>
+        </div>
+        <div className="flex flex-wrap items-start gap-3">
+          <label className="cursor-pointer bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 rounded-lg px-3 py-2 text-xs transition-colors">
+            Elegir imagen…
+            <input type="file" accept="image/png,image/jpeg,image/webp" className="hidden"
+              onChange={e => loadImageFile(e.target.files?.[0])} />
+          </label>
+          {shot && (
+            /* eslint-disable-next-line @next/next/no-img-element */
+            <img src={shot.preview} alt="captura a analizar" className="h-24 rounded-lg border border-gray-700 object-contain" />
+          )}
+          {shot && (
+            <div className="flex-1 min-w-55 space-y-2">
+              <input
+                type="text"
+                value={shotHint}
+                onChange={e => setShotHint(e.target.value)}
+                placeholder="Contexto opcional: ej. 'el lead es un proveedor que nos quiere vender'"
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-50 text-xs placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-purple-500"
+              />
+              <button
+                type="button"
+                onClick={analyzeShot}
+                disabled={analyzing}
+                className="bg-purple-600 hover:bg-purple-500 text-white rounded-lg px-4 py-2 text-xs transition-colors disabled:opacity-50"
+              >
+                {analyzing ? "Analizando…" : "🧠 Analizar y precargar el formulario"}
+              </button>
+            </div>
+          )}
+        </div>
+        {shotError && (
+          <p className="text-red-400 text-xs bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2">{shotError}</p>
+        )}
+        {analysis && (
+          <div className="space-y-2 text-xs">
+            <div className="bg-gray-900/70 border border-gray-800 rounded-lg p-3">
+              <p className="text-purple-300 font-semibold mb-1">Diagnóstico</p>
+              <p className="text-gray-300 leading-relaxed">{analysis.diagnosis}</p>
+            </div>
+            {analysis.transcript && (
+              <details className="bg-gray-900/70 border border-gray-800 rounded-lg p-3">
+                <summary className="text-gray-400 cursor-pointer">Transcript extraído</summary>
+                <pre className="text-gray-400 whitespace-pre-wrap mt-2 text-[11px] leading-relaxed">{analysis.transcript}</pre>
+              </details>
+            )}
+            <p className="text-amber-300/80">
+              ⚠️ Borrador precargado abajo — revísalo y ajústalo antes de guardar. Nada entra al Cerebro sin tu OK.
+            </p>
+          </div>
+        )}
       </div>
 
       <form onSubmit={handleSubmit} className="space-y-4">
