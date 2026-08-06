@@ -60,6 +60,12 @@ async function createAccount(formData: FormData) {
     daily_connection_limit:  parseInt(formData.get("daily_connection_limit") as string) || 20,
     status:                  "rate_limited",      // Inactive until cookie is captured
     user_id:                 user!.id,
+    // (3-ago) Cuenta NUEVA arranca en warmup frío con la rampa corriendo desde HOY.
+    // Antes warmup_started_at solo se estampaba al primer EDIT: la rampa por edad
+    // (effectiveWarmupCap) no corría y el cap real dependía de que alguien editara.
+    // cold → cap efectivo 3-5/día los primeros días, suba lo que suba el form arriba.
+    warmup_status:           "cold",
+    warmup_started_at:       new Date().toISOString(),
   })
 
   redirect("/dashboard/accounts")
