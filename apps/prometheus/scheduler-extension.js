@@ -560,6 +560,25 @@ async function tryInvitesForCampaign(campaign, account) {
     return { skipped: true, reason: 'batch_gap_not_met', minsSince: Math.floor(minsSince), gapMin }
   }
 
+  // (09-ago) PISO DE INVITE POR-CUENTA. El gap de arriba es POR-CAMPAÑA; con una cuenta que
+  // tiene 2+ campañas activas, ambas pueden pasar su gap y disparar en el MISMO tick → 2
+  // invites con segundos de diferencia (medido: Wal Tech+Transporte a 4s = patrón de bot).
+  // LinkedIn limita por VOLUMEN y por PATRÓN; ningún humano manda 2 solicitudes en 4s.
+  // Este piso mira el invite MÁS RECIENTE de CUALQUIER campaña de la cuenta y bloquea si
+  // fue hace <ACCOUNT_INVITE_FLOOR_MIN; el invitado se reintenta en el próximo tick. Como
+  // el piso (~6min) es mucho menor que el gap por-campaña (25-45min), solo muerde en la
+  // colisión de mismo-tick — no afecta la cadencia normal de una campaña sola.
+  const ACCOUNT_INVITE_FLOOR_MIN = 6
+  const { data: acctCamps } = await supabase
+    .from('campaigns')
+    .select('last_batch_at')
+    .eq('linkedin_account_id', account.id)
+    .not('last_batch_at', 'is', null)
+  const lastAcctInvite = (acctCamps ?? []).map(c => c.last_batch_at).filter(Boolean).sort().pop()
+  if (lastAcctInvite && minutesSince(lastAcctInvite) < ACCOUNT_INVITE_FLOOR_MIN) {
+    return { skipped: true, reason: 'account_invite_floor_not_met', minsSince: Math.floor(minutesSince(lastAcctInvite)), floorMin: ACCOUNT_INVITE_FLOOR_MIN }
+  }
+
   const today = await getDailyActivityToday(account.id, account.timezone)
   // BUG FIX: el cap de invites debe contar SOLO invites, no invites+mensajes. Antes
   // sumaba messages_sent → las respuestas/FU (que tienen su PROPIO cap MAX_DAILY_MESSAGES)
