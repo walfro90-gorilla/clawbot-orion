@@ -167,7 +167,7 @@ Flujo por tick (`trySearchForCampaign` → `lib/extension-dispatch.js` → ext):
 
 ⚠️ **Requiere ext ≥0.10.0** (`COMPANY_SCOPED_MIN_VERSION`): una ext vieja ignora `companyUrn` y buscaría por título en TODO LinkedIn. Sin la versión el scheduler avisa y degrada a title-only.
 
-⚠️ **La válvula anti-sequía ya NO borra la lista de empresas.** Lo hacía en drought crítico, y como el modo empresa rinde pocos ejecutivos el drought era permanente → empresa borrada siempre → bucle que anulaba la feature (15 de 17 búsquedas medidas salieron title-only). Hoy el escape es acotado: solo tras `dry_search_streak ≥ 5` se hace UNA búsqueda title-only de reabastecimiento.
+⚠️ **En company-scoped NUNCA se hace title-only.** La válvula anti-sequía tuvo dos versiones malas: (1) borraba la lista de empresas en drought → bucle que anulaba la feature; (2) tras `dry_search_streak ≥ 5` hacía UNA búsqueda title-only de reabastecimiento. Esa title-only tiraba el filtro de empresa (→ empresas fuera de la lista) y en SalesNav ignoraba la geo (→ otros países): Josh recibió un founder de India (competidor). **10-ago-2026: escape ELIMINADO.** `companyMode` siempre busca una empresa de la lista; si todas están recién buscadas, el cursor repite la más vieja. Mejor menos leads de la lista que basura fuera de parámetros.
 
 Pendiente (Fase 2): invitar por **peso de responsabilidad** dentro de la empresa (hoy `tryInvitesForCampaign` toma random del top-5 del pool filtrado por whitelist, sin ranking de seniority ni agrupar por empresa).
 
