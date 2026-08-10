@@ -245,7 +245,6 @@ const COMPANY_RESOLVE_RETRY_H = 24
 // títulos es POR EMPRESA y persiste, así que la próxima vuelta retoma donde se quedó.
 // Subirlo = más profundidad por empresa; bajarlo = recorrer la lista más rápido.
 const COMPANY_TITLES_PER_PASS = 6
-const COMPANY_DRY_STREAK_ESCAPE = 5    // válvula: N búsquedas secas seguidas → 1 title-only
 
 // Sincroniza search_company_names → filas. Inserta las nuevas, borra las que el
 // usuario quitó de la lista. Idempotente (unique index por campaign+lower(name)).
@@ -425,15 +424,17 @@ async function trySearchForCampaign(campaign, account) {
   const curIdx = campaign.last_search_keyword_idx ?? 0
   const idx = curIdx % kws.length
 
-  // v0.10.0: la válvula anti-sequía YA NO borra la lista de empresas. Antes:
-  // `starving = criticalDrought && companies.length > 0` → la búsqueda por empresa rinde
-  // pocos ejecutivos ⇒ drought permanente ⇒ empresa borrada SIEMPRE (15 de 17 búsquedas
-  // medidas) ⇒ nunca salía del drought. Bucle que se auto-alimentaba y anulaba la feature.
-  // Escape nuevo, acotado: solo si N búsquedas SEGUIDAS vinieron secas se hace UNA
-  // title-only de reabastecimiento (dry_search_streak se resetea al primer lead nuevo).
-  const escapeDry = companyMode && dryStreak >= COMPANY_DRY_STREAK_ESCAPE
-  const target = (companyMode && !escapeDry) ? await pickNextTargetCompany(campaign.id) : null
-  if (escapeDry) console.log(`[SCH-EXT]   🔎 ${campaign.name}: ${dryStreak} búsquedas secas seguidas → 1 title-only de reabastecimiento`)
+  // v0.10.0: la válvula anti-sequía YA NO borra la lista de empresas (era un bucle que
+  // anulaba la feature). Tenía un escape: tras dry_search_streak≥5, UNA búsqueda title-only
+  // de reabastecimiento.
+  // (10-ago-2026) ESCAPE title-only DESACTIVADO en company-scoped. La búsqueda title-only
+  // TIRA el filtro de empresa → surfacea perfiles de empresas FUERA de la lista, y en
+  // SalesNav (buildSalesNavSearchUrl ignora la geo) de OTROS PAÍSES. Josh reportó un founder
+  // de India (competidor, "hace lo mismo que nosotros") que entró así (lead 'disqualified'
+  // pero visible en su navegador + gasta búsquedas). El cliente quiere SOLO su lista: mejor
+  // menos leads de su lista que basura fuera de parámetros. companyMode SIEMPRE busca una
+  // empresa de la lista; si todas están recién buscadas, el cursor toma la más vieja.
+  const target = companyMode ? await pickNextTargetCompany(campaign.id) : null
 
   // Con empresa: UN puesto por búsqueda, desde el cursor propio de esa empresa.
   // Sin empresa: 1 keyword rotado por la campaña, comportamiento de siempre.
