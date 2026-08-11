@@ -665,19 +665,27 @@ async function executeCommand(commandId, action, payload) {
     // Chrome dedicado del VPS no hay usuario que molestar, y una tab enfocada
     // mientras "escribimos" es MÁS humana. Best-effort: si falla, el chunking sigue
     // como defensa secundaria.
-    // ponytail: MONITOREO 06-ago-2026 — desactivado en las 3 cuentas para confirmar
-    // en producción que Chrome ya no throttlea sin este hack (2/2 hard-tests limpios
-    // en Wal: inmediato + 6min minimizado, sin typing_complete_timeout). Vigilar
-    // /dashboard/quarantine y phase_insights por typing_complete_timeout nuevo.
-    // Si aparece: revertir con `git revert` de este commit + recargar extensión.
-    // try {
-    //   await chrome.tabs.update(tab.id, { active: true })
-    //   if (tab.windowId != null) {
-    //     await chrome.windows.update(tab.windowId, { focused: true })
-    //   }
-    // } catch (e) {
-    //   console.warn(`[Orion] anti-throttle focus falló (sigo igual): ${e?.message}`)
-    // }
+    // (06-ago) Desactivado en las 3 cuentas tras validar en Wal (free) que el typing va bien
+    // sin foco. (11-ago) RE-ACTIVADO SOLO PARA search/search_posts: fue una REGRESIÓN para
+    // SalesNav. El scrape de SalesNav es una página PESADA con un scroll-loop lleno de
+    // sleep(); con la pestaña en segundo plano Chrome throttlea los timers (1/min tras 5min
+    // oculta) → el scrape se estira y pasa de 120s → exec_hard_timeout. Correlación en Josh
+    // (SalesNav): 0 timeouts con el hack ON (≤6-ago, dur ~20s), 11→75% con OFF (7-11 ago);
+    // prueba directa 11-ago: Prida (61 seguidores, scrape trivial) timeouteó a 160s con la
+    // pestaña de fondo. El free-mode (Wal/Café) NO lo sufre: es ligero (~20-40s), termina bajo
+    // 120s aun throttled. Se mantiene OFF para invite/FU/inbox (frecuentes, validados sin foco,
+    // y son los que más molestan robando el foco durante el typing). Search es infrecuente
+    // (~pocos/hora) → el robo de foco es mínimo y sí necesita la pestaña activa para renderizar.
+    if (action === 'search' || action === 'search_posts') {
+      try {
+        await chrome.tabs.update(tab.id, { active: true })
+        if (tab.windowId != null) {
+          await chrome.windows.update(tab.windowId, { focused: true })
+        }
+      } catch (e) {
+        console.warn(`[Orion] anti-throttle focus (search) falló (sigo igual): ${e?.message}`)
+      }
+    }
 
     console.log(`[Orion] Sending to tab id=${tab.id} url=${tab.url} status=${tab.status}`)
     // Tracking para el indicador visual "tab casada"
