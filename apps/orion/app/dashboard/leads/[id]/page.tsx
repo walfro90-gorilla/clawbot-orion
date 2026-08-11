@@ -89,6 +89,17 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
           {Object.keys(profile).length === 0 && (
             <p className="text-gray-500 text-sm">Sin datos de perfil guardados.</p>
           )}
+          {(() => {
+            const ci = lead.contact_info as unknown as { email?: string; phones?: string[]; websites?: string[] } | null
+            if (!ci?.email && !ci?.phones?.length && !ci?.websites?.length) return null
+            return (
+              <dl className="space-y-2 text-sm pt-2 border-t border-gray-800">
+                {ci.email && <Row label="Email" value={ci.email} />}
+                {ci.phones && ci.phones.length > 0 && <Row label="Teléfono" value={ci.phones.join(", ")} />}
+                {ci.websites && ci.websites.length > 0 && <Row label="Web" value={ci.websites.join(", ")} />}
+              </dl>
+            )
+          })()}
         </div>
       </div>
 

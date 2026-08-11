@@ -22,7 +22,7 @@ import {
   hasInFlightCommand, wasMessageRecentlySent,
   passesTitleFilters, seniorityRank,
   dispatchSearch, dispatchInvite, dispatchCheckInbox, dispatchCheckSentInvites, dispatchCheckConnections, dispatchFollowup,
-  dispatchCommand, dispatchResolveCompanies, COMPANY_SCOPED_MIN_VERSION, meetsVersion,
+  dispatchCommand, dispatchResolveCompanies, COMPANY_SCOPED_MIN_VERSION, CONTACT_INFO_MIN_VERSION, meetsVersion,
   checkCampaignActiveGates,
   dispatchPostSearch, dispatchCommentOnPost, checkPostCampaignActiveGates,
   getDailyCommentsToday, getEffectiveCommentCap,
@@ -33,6 +33,7 @@ import { uploadGeneratedImage } from './lib/gemini-image.js'
 import { isSystemLinkedInAccount } from './lib/system-accounts.js'
 import { isGroupConversationName } from './lib/group-conversation.js'
 import { sweepQuarantineTimeout } from './lib/lead-failure.js'
+import { maybeSendDailyDigest } from './lib/daily-digest.js'
 
 dotenv.config()
 
@@ -1677,6 +1678,57 @@ async function maybeDispatchDeepSweep(account) {
   }
 }
 
+// ── Contact-info scrape (digest diario) ──────────────────────────────────────
+// Visita el overlay /overlay/contact-info/ de leads YA conectados (1er grado) para
+// capturar email/teléfono. Prioridad MÁS BAJA del loop per-account: solo corre si
+// el tick no despachó nada más para la cuenta (la extensión serializa 1 comando).
+// Anti-ban: 1 comando/tick, cap diario (default 20, override contact_info_daily_cap),
+// dentro de inbox hours (gate del loop). Orden connected_at DESC → los accepts de
+// ayer quedan scrapeados antes del digest de mañana; el backlog histórico drena solo.
+// Un intento por lead: el bridge escribe contact_info (ok O {error}) → sale de la
+// cola. Comando expirado (ext ausente) no escribe → retry natural.
+async function tryContactInfoScrape(account) {
+  if (DRY_RUN) return { skipped: true, reason: 'dry_run' }
+  if (!meetsVersion(account.ext_version, CONTACT_INFO_MIN_VERSION)) {
+    return { skipped: true, reason: 'ext_version' }  // silencioso: dispatchCommand ya alerta si se fuerza
+  }
+  try {
+    // guard in-flight (mismo patrón que deep sweep)
+    const { count: inFlight } = await supabase.from('extension_commands')
+      .select('id', { count: 'exact', head: true })
+      .eq('account_id', account.id).eq('action', 'get_contact_info')
+      .in('status', ['pending', 'dispatched']).gt('expires_at', new Date().toISOString())
+    if (inFlight > 0) return { skipped: true, reason: 'in_flight' }
+
+    // cap diario — ventana rodante de 24h (más simple que medianoche tz y equivalente como throttle)
+    const cap = await readRuntimeNumber('contact_info_daily_cap', 20, account.id)
+    const { count: today } = await supabase.from('extension_commands')
+      .select('id', { count: 'exact', head: true })
+      .eq('account_id', account.id).eq('action', 'get_contact_info')
+      .gt('created_at', new Date(Date.now() - 86_400_000).toISOString())
+    if ((today ?? 0) >= cap) return { skipped: true, reason: 'daily_cap' }
+
+    // elegible: lead conectado de esta cuenta sin contact_info (NULL = nunca visitado)
+    const { data: lead } = await supabase.from('leads')
+      .select('id, full_name, linkedin_url, campaigns!inner(linkedin_account_id)')
+      .eq('campaigns.linkedin_account_id', account.id)
+      .is('contact_info', null).not('connected_at', 'is', null)
+      .not('linkedin_url', 'is', null)
+      .order('connected_at', { ascending: false })
+      .limit(1).maybeSingle()
+    if (!lead) return { skipped: true, reason: 'no_candidates' }
+
+    const cmdId = await dispatchCommand(account.id, 'get_contact_info',
+      { profileUrl: lead.linkedin_url, leadId: lead.id },
+      { relatedLeadId: lead.id, expiresInMinutes: 10 })
+    if (!cmdId) return { skipped: true, reason: 'dispatch_failed' }
+    return { dispatched: true, leadName: lead.full_name }
+  } catch (e) {
+    console.warn(`[SCH-EXT]   contact-info scrape falló para ${account.label}: ${e.message}`)
+    return { skipped: true, reason: e.message }
+  }
+}
+
 async function tryInboxForAccount(account) {
   if (account.inbox_paused) {
     return { skipped: true, reason: 'inbox_paused' }
@@ -2368,6 +2420,16 @@ async function tick() {
     console.error(`[SCH-EXT] tryEnrichCompanies threw:`, err.message)
   }
 
+  // Digest diario de conexiones (lib/daily-digest.js) — también ANTES del early-return:
+  // no depende de la extensión y debe salir aunque nadie esté conectado (catch-up).
+  try {
+    const digRes = await maybeSendDailyDigest()
+    if (digRes?.sent) console.log(`[SCH-EXT] 📧 digest enviado: ${digRes.total} conexiones → ${digRes.recipients} destinatarios`)
+    else if (digRes?.reason?.startsWith('send_failed')) console.warn(`[SCH-EXT] 📧 digest: ${digRes.reason} (reintenta próximo tick)`)
+  } catch (err) {
+    console.error(`[SCH-EXT] maybeSendDailyDigest threw:`, err.message)
+  }
+
   if (connectedIds.size === 0) {
     console.log(`[SCH-EXT] Nadie conectado — skip tick`)
     await logJob({ jobType: 'tick', status: 'skipped', skipReason: 'no_extensions_connected' })
@@ -2628,6 +2690,14 @@ async function tick() {
     const inboxRes = await tryInboxForAccount(account)
     if (inboxRes.dispatched) {
       console.log(`[SCH-EXT]   ✅ inbox dispatched for ${account.label}`)
+      continue
+    }
+
+    // Contact-info scrape (digest): SOLO si nada más se despachó para esta cuenta
+    // en este tick (deep sweep / sent invites / connections / inbox hicieron continue).
+    const ciRes = await tryContactInfoScrape(account)
+    if (ciRes.dispatched) {
+      console.log(`[SCH-EXT]   📇 get_contact_info dispatched for ${account.label} (${ciRes.leadName})`)
     }
   }
 

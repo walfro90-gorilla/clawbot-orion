@@ -1397,6 +1397,8 @@ export type Database = {
           campaign_id: string | null
           connected_at: string | null
           consecutive_failures: number
+          contact_info: Json | null
+          contact_info_at: string | null
           cooldown_until: string | null
           created_at: string | null
           dead_reason: string | null
@@ -1441,6 +1443,8 @@ export type Database = {
           campaign_id?: string | null
           connected_at?: string | null
           consecutive_failures?: number
+          contact_info?: Json | null
+          contact_info_at?: string | null
           cooldown_until?: string | null
           created_at?: string | null
           dead_reason?: string | null
@@ -1485,6 +1489,8 @@ export type Database = {
           campaign_id?: string | null
           connected_at?: string | null
           consecutive_failures?: number
+          contact_info?: Json | null
+          contact_info_at?: string | null
           cooldown_until?: string | null
           created_at?: string | null
           dead_reason?: string | null
@@ -3208,6 +3214,7 @@ export type Database = {
           campaign_id: string | null
           campaign_name: string | null
           consecutive_failures: number | null
+          contact_info: Json | null
           cooldown_until: string | null
           created_at: string | null
           disqualification_reason: string | null
@@ -3565,6 +3572,8 @@ export type Database = {
           campaign_id: string | null
           connected_at: string | null
           consecutive_failures: number
+          contact_info: Json | null
+          contact_info_at: string | null
           cooldown_until: string | null
           created_at: string | null
           dead_reason: string | null

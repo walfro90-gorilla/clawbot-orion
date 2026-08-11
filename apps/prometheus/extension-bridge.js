@@ -865,6 +865,18 @@ async function handleCommandResult(msg) {
     }
   }
 
+  // get_contact_info ingest (v0.10.12) — email/tel del overlay → leads.contact_info.
+  // Resultado TERMINAL (ok O error de la extensión): siempre escribe contact_info para
+  // sacar al lead de la cola del scrape (NULL = pendiente). Comando expirado (la ext
+  // no estaba) NO pasa por aquí → retry natural.
+  if (action === 'get_contact_info') {
+    try {
+      await ingestContactInfo(commandId, result, isError)
+    } catch (err) {
+      console.error(`[bridge] ingest get_contact_info failed:`, err.message)
+    }
+  }
+
   // publish_post ingest (v0.9.2) — marca el generated_post como publicado o failed
   if (action === 'publish_post') {
     try {
@@ -879,6 +891,43 @@ async function handleCommandResult(msg) {
     } catch (err) {
       console.error(`[bridge] ingest publish_post failed:`, err.message)
     }
+  }
+}
+
+// ── Ingest: get_contact_info → leads.contact_info (digest diario) ────────────
+async function ingestContactInfo(commandId, result, isError) {
+  const { data: cmd } = await supabase
+    .from('extension_commands')
+    .select('related_lead_id')
+    .eq('id', commandId)
+    .single()
+  if (!cmd?.related_lead_id) {
+    console.warn(`[bridge] get_contact_info ${commandId.slice(0, 8)} sin related_lead_id — skip`)
+    return
+  }
+  let contactInfo
+  if (isError || result?.status === 'error') {
+    contactInfo = { error: String(result?.error ?? 'scrape_failed').slice(0, 80) }
+  } else {
+    // Solo campos con valor; todo vacío → {} (centinela "visitado, sin datos")
+    contactInfo = {}
+    if (result?.email) contactInfo.email = String(result.email).slice(0, 200)
+    const phones = Array.isArray(result?.phones) ? result.phones.filter(Boolean).map(p => String(p).slice(0, 40)).slice(0, 5) : []
+    if (phones.length) contactInfo.phones = phones
+    const websites = Array.isArray(result?.websites) ? result.websites.filter(Boolean).map(w => String(w).slice(0, 200)).slice(0, 5) : []
+    if (websites.length) contactInfo.websites = websites
+    if (result?.birthday) contactInfo.birthday = String(result.birthday).slice(0, 60)
+  }
+  const { error } = await supabase.from('leads').update({
+    contact_info: contactInfo,
+    contact_info_at: new Date().toISOString(),
+  }).eq('id', cmd.related_lead_id)
+  if (error) {
+    console.error(`[bridge] contact_info update failed:`, error.message)
+  } else {
+    const got = [contactInfo.email && 'email', contactInfo.phones && 'tel', contactInfo.websites && 'web']
+      .filter(Boolean).join('+') || (contactInfo.error ? `error:${contactInfo.error}` : 'sin datos')
+    console.log(`[bridge] 📇 contact_info lead ${cmd.related_lead_id.slice(0, 8)} → ${got}`)
   }
 }
 

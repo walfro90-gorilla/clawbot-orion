@@ -1438,6 +1438,8 @@ async function executeAction(action, payload) {
       return await checkSentInvites(payload)
     case 'check_connections':
       return await checkConnections(payload)
+    case 'get_contact_info':
+      return await scrapeContactInfo(payload)
     case 'send_invite':
       return await sendInvite(payload)
     case 'send_followup':
@@ -5852,6 +5854,97 @@ async function checkConnections(payload = {}) {
     connections, count: connections.length,
     scrapedAt: new Date().toISOString(),
   }
+}
+
+// ── get_contact_info — scrape del overlay /in/<vanity>/overlay/contact-info/ ──
+// (0.10.13) Email/teléfono/webs de una conexión de 1er grado para el digest diario.
+// background.js ya navegó al overlay (o al perfil como fallback). Extracción por
+// TIPO de dato (mailto:/tel:/headers de sección), NO por clases ofuscadas.
+// Resultado SIEMPRE status:'ok' salvo fallo duro: un perfil sin overlay o sin datos
+// devuelve campos vacíos → el bridge guarda {} (centinela "visitado, sin datos").
+async function scrapeContactInfo(payload = {}) {
+  console.log(`[Orion content] scrapeContactInfo currentUrl=${location.href}`)
+
+  const findModal = () => {
+    const m = document.querySelector('[role="dialog"], .artdeco-modal')
+    return (m && (m.innerText ?? '').trim().length > 0) ? m : null
+  }
+
+  // 1) Esperar el modal (la navegación SPA al overlay lo monta solo)
+  let modal = null
+  for (let i = 0; i < 20 && !modal; i++) {  // ~10s
+    modal = findModal()
+    if (!modal) await sleep(500)
+  }
+
+  // 2) Fallback: estamos en el perfil sin overlay → clickear el link de contact-info
+  if (!modal) {
+    const link = document.querySelector('a[href*="overlay/contact-info"]')
+    if (link) {
+      link.click()
+      for (let i = 0; i < 16 && !modal; i++) {  // ~8s
+        modal = findModal()
+        if (!modal) await sleep(500)
+      }
+    }
+  }
+  if (!modal) {
+    // Sin overlay accesible: reporta ok-vacío (visitado, sin datos) para no reintentar en loop
+    return { action: 'get_contact_info', status: 'ok', leadId: payload.leadId, email: null, phones: [], websites: [], birthday: null, note: 'overlay_not_found' }
+  }
+  await sleep(800)  // dejar terminar el render del contenido del modal
+
+  const dedup = arr => [...new Set(arr.filter(Boolean))].slice(0, 5)
+
+  // 3a) Emails: por href mailto:
+  const emails = dedup([...modal.querySelectorAll('a[href^="mailto:"]')]
+    .map(a => decodeURIComponent(a.getAttribute('href').slice(7).split('?')[0]).trim().toLowerCase()))
+
+  // 3b) Teléfonos: href tel: + secciones cuyo header hable de teléfono (LinkedIn suele
+  //     mostrarlos como texto plano, sin link)
+  const phones = [...modal.querySelectorAll('a[href^="tel:"]')]
+    .map(a => decodeURIComponent(a.getAttribute('href').slice(4)).trim())
+  const PHONE_RE = /[+(]?\d[\d\s().-]{6,}\d/g
+  for (const section of modal.querySelectorAll('section')) {
+    const header = section.querySelector('h3, h2')?.innerText ?? ''
+    if (/tel[eé]fono|phone|m[oó]vil|mobile/i.test(header)) {
+      phones.push(...((section.innerText.match(PHONE_RE)) ?? []).map(s => s.trim()))
+    }
+  }
+
+  // 3c) Websites: links http del modal fuera de linkedin.com
+  const websites = dedup([...modal.querySelectorAll('a[href^="http"]')]
+    .map(a => a.getAttribute('href'))
+    .filter(h => { try { return !new URL(h).hostname.endsWith('linkedin.com') } catch { return false } }))
+
+  // 3d) Cumpleaños
+  let birthday = null
+  for (const section of modal.querySelectorAll('section')) {
+    const header = section.querySelector('h3, h2')?.innerText ?? ''
+    if (/cumplea|birthday/i.test(header)) {
+      birthday = (section.innerText.replace(header, '').trim().split('\n')[0] || null)
+      break
+    }
+  }
+
+  // 4) Red final: si secciones/links no dieron nada, regex sobre el texto completo del modal
+  let email = emails[0] ?? null
+  if (!email) {
+    const m = (modal.innerText.match(/[\w.+-]+@[\w-]+\.[\w.]{2,}/) ?? [])[0]
+    if (m) email = m.toLowerCase()
+  }
+
+  const result = {
+    action: 'get_contact_info',
+    status: 'ok',
+    leadId: payload.leadId,
+    email,
+    phones: dedup(phones),
+    websites,
+    birthday,
+  }
+  console.log(`[Orion content] contact-info: email=${email ?? '—'} phones=${result.phones.length} webs=${websites.length}`)
+  return result
 }
 
 // ── 3.5 — check_sent_invites — scrape /mynetwork/invitation-manager/sent/ ────

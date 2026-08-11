@@ -234,7 +234,7 @@ Auth: Supabase Auth + RLS. Roles `god_admin > admin > user`. Proxy de Next prote
 
 ## 9. Variables de entorno (no en el repo)
 
-- **prometheus**: `apps/prometheus/.env` → `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `GEMINI_API_KEY`, **`GROQ_API_KEY`** (LLM primario). Ops del watchdog (opcionales): `OPS_WEBHOOK_URL` (alertas Slack/Telegram/ntfy), `OPS_HEARTBEAT_URL` (dead-man's-switch Healthchecks.io). Tuning: `LLM_PROVIDERS`, `GROQ_MODEL`, `EXTENSION_POLL_INTERVAL_MS`, `CONFIG_CACHE_TTL_MS`.
+- **prometheus**: `apps/prometheus/.env` → `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `GEMINI_API_KEY`, **`GROQ_API_KEY`** (LLM primario). Ops del watchdog (opcionales): `OPS_WEBHOOK_URL` (alertas Slack/Telegram/ntfy), `OPS_HEARTBEAT_URL` (dead-man's-switch Healthchecks.io). Digest diario (11-ago): `RESEND_API_KEY` + `DIGEST_FROM` (remitente `Nombre <email@dominio-verificado-en-Resend>`; sin key el digest es no-op con alerta). Tuning: `LLM_PROVIDERS`, `GROQ_MODEL`, `EXTENSION_POLL_INTERVAL_MS`, `CONFIG_CACHE_TTL_MS`.
 - **orion**: `apps/orion/.env.local` → vars de Supabase + auth.
 
 ---

@@ -26,12 +26,43 @@ async function saveSettings(formData: FormData) {
   redirect("/dashboard/settings?saved=1")
 }
 
+async function saveDigestConfig(formData: FormData) {
+  "use server"
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) redirect("/login")
+
+  const admin = createAdminClient()
+  const { data: profile } = await admin.from("profiles").select("role, email").eq("id", user.id).single()
+  if (profile?.role !== "admin" && profile?.role !== "god_admin") redirect("/dashboard/settings")
+
+  const enabled = formData.get("digest_enabled") === "on"
+  const sendHourRaw = parseInt((formData.get("digest_send_hour") as string) ?? "")
+  const send_hour = Number.isFinite(sendHourRaw) ? Math.min(23, Math.max(0, sendHourRaw)) : 7
+  const recipients = ((formData.get("digest_recipients") as string) ?? "")
+    .split(/[\n,;]+/).map(s => s.trim()).filter(Boolean)
+  const invalid = recipients.filter(r => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(r))
+  if (invalid.length > 0) redirect("/dashboard/settings?digest_error=1")
+
+  // Conservar tz existente; el estado (daily_digest_state) NUNCA se toca desde aquí.
+  const { data: current } = await admin.from("runtime_config").select("value").eq("key", "daily_digest").maybeSingle()
+  const tz = (current?.value as { tz?: string } | null)?.tz ?? "America/Mexico_City"
+
+  // ⚠️ runtime_config.updated_by es NOT NULL sin default — mandarlo siempre.
+  const { error } = await admin.from("runtime_config").upsert(
+    { key: "daily_digest", value: { enabled, recipients, send_hour, tz }, updated_by: `orion:${profile?.email ?? user.id}` },
+    { onConflict: "key" },
+  )
+  if (error) console.error("[settings] saveDigestConfig error:", error.message)
+  redirect("/dashboard/settings?digest_saved=1")
+}
+
 export default async function SettingsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ saved?: string }>
+  searchParams: Promise<{ saved?: string; digest_saved?: string; digest_error?: string }>
 }) {
-  const { saved } = await searchParams
+  const { saved, digest_saved, digest_error } = await searchParams
   const supabase  = await createClient()
   const admin     = createAdminClient()
 
@@ -70,6 +101,18 @@ export default async function SettingsPage({
     : cookieDays >= 60   ? { label: `${cookieDays}d — CRÍTICO`, cls: "text-red-400" }
     : cookieDays >= 30   ? { label: `${cookieDays}d — Advertencia`, cls: "text-yellow-400" }
     : { label: `${cookieDays}d — OK`, cls: "text-green-400" }
+
+  // Digest diario (solo admins): config + estado de solo-lectura
+  const isAdmin = profile?.role === "admin" || profile?.role === "god_admin"
+  let digestCfg: { enabled?: boolean; recipients?: string[]; send_hour?: number; tz?: string } = {}
+  let digestState: { last_sent_date?: string } = {}
+  if (isAdmin) {
+    const { data: rc } = await admin.from("runtime_config").select("key, value").in("key", ["daily_digest", "daily_digest_state"])
+    for (const row of rc ?? []) {
+      if (row.key === "daily_digest") digestCfg = (row.value as typeof digestCfg) ?? {}
+      if (row.key === "daily_digest_state") digestState = (row.value as typeof digestState) ?? {}
+    }
+  }
 
   const warmupMeta: Record<string, { icon: string; label: string }> = {
     cold:    { icon: "❄️", label: "Fría (nueva)" },
@@ -220,6 +263,63 @@ export default async function SettingsPage({
         <div className="bg-gray-900 border border-gray-700 rounded-xl p-8 text-center">
           <p className="text-gray-400 text-sm">No tienes ninguna cuenta LinkedIn asignada.</p>
           <p className="text-gray-500 text-xs mt-1">Contacta a un administrador para que asigne tu cuenta.</p>
+        </div>
+      )}
+
+      {/* Digest diario de conexiones (solo admins) */}
+      {isAdmin && (
+        <div className="bg-gray-900 border border-gray-700 rounded-xl p-6 space-y-4">
+          <div>
+            <h2 className="text-gray-50 font-semibold text-lg">📧 Digest diario de conexiones</h2>
+            <p className="text-gray-500 text-xs mt-0.5">
+              Cada mañana se envía un email con los contactos que aceptaron la invitación el día
+              anterior (nombre, empresa, cargo, email, teléfono), agrupados por cuenta y campaña.
+              {digestState.last_sent_date && <> Último envío: <span className="text-gray-400">{digestState.last_sent_date}</span>.</>}
+            </p>
+          </div>
+
+          {digest_saved && (
+            <div className="px-4 py-3 bg-green-500/10 border border-green-500/30 rounded-xl text-green-400 text-sm">
+              ✓ Configuración del digest guardada
+            </div>
+          )}
+          {digest_error && (
+            <div className="px-4 py-3 bg-red-500/10 border border-red-500/30 rounded-xl text-red-400 text-sm">
+              ✗ Hay emails inválidos en la lista — revisa y guarda de nuevo
+            </div>
+          )}
+
+          <DirtyAwareForm action={saveDigestConfig} className="space-y-4">
+            <label className="flex items-center gap-2.5 text-sm text-gray-300">
+              <input
+                type="checkbox" name="digest_enabled" defaultChecked={digestCfg.enabled ?? false}
+                className="w-4 h-4 rounded bg-gray-800 border-gray-600"
+              />
+              Enviar digest diario
+            </label>
+
+            <div>
+              <label className="block text-xs text-gray-400 mb-1">Destinatarios (uno por línea o separados por coma)</label>
+              <textarea
+                name="digest_recipients" rows={3}
+                defaultValue={(digestCfg.recipients ?? []).join("\n")}
+                placeholder={"ventas@tuempresa.com\ndireccion@tuempresa.com"}
+                className="w-full px-3 py-2.5 bg-gray-800 border border-gray-700 rounded-lg text-gray-50 placeholder-gray-600 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+
+            <div className="max-w-[180px]">
+              <label className="block text-xs text-gray-400 mb-1">Hora de envío (0-23, {digestCfg.tz ?? "America/Mexico_City"})</label>
+              <input
+                type="number" name="digest_send_hour" min={0} max={23}
+                defaultValue={digestCfg.send_hour ?? 7}
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <p className="text-gray-600 text-xs">
+              El envío ocurre en el primer ciclo del scheduler después de esa hora (máx. ~5 min de retraso).
+            </p>
+          </DirtyAwareForm>
         </div>
       )}
     </div>

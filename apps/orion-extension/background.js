@@ -652,6 +652,16 @@ async function executeCommand(commandId, action, payload) {
       tab = await navigateTabAndWait('https://www.linkedin.com/mynetwork/invitation-manager/sent/', 15000)
     } else if (action === 'check_connections') {
       tab = await navigateTabAndWait('https://www.linkedin.com/mynetwork/invite-connect/connections/', 15000)
+    } else if (action === 'get_contact_info' && payload?.profileUrl) {
+      // v0.10.13: overlay de contact-info del perfil (1er grado) — email/tel para
+      // el digest diario. Carga ligera: NO va en el branch del anti-throttle focus.
+      const vanity = extractVanityFromUrl(payload.profileUrl)
+      if (vanity) {
+        tab = await navigateTabAndWait(`https://www.linkedin.com/in/${vanity}/overlay/contact-info/`, 15000)
+      } else {
+        // Fallback: perfil normal; content.js clickea el link de contact-info.
+        tab = await navigateTabAndWait(payload.profileUrl, 15000)
+      }
     } else if (action === 'publish_post') {
       tab = await navigateTabAndWait('https://www.linkedin.com/feed/', 12000)
     } else {
