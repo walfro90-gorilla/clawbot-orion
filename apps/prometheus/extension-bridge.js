@@ -1120,6 +1120,55 @@ async function bumpDrySearchStreak(campaignId, netNew) {
   }
 }
 
+// (10-ago-2026) Filtro de GEO en el ingest. La búsqueda company-scoped tira el geoUrn de
+// la URL a propósito (chocaba con el facet y daba 0 resultados), pero eso surfacea empleados
+// EXTRANJEROS de empresas multinacionales de la lista (Café: hunter douglas / MOLEX →
+// Brasil, Alemania, India). Este chokepoint server-side descarta al insertar los leads
+// cuya ubicación cae FUERA de la geo de la campaña — cubre free Y SalesNav de un solo lugar,
+// sin tocar los scrapers frágiles del DOM.
+const _stripGeo = s => String(s ?? '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim()
+
+// Países RECONOCIBLES → código canónico (para que "united states"≡"estados unidos", etc.).
+// Nombres en español (las cuentas es-MX reciben ubicaciones en español) + alias en inglés
+// como red. Cubre LATAM+España (geos de las campañas), EE.UU., y los países que se colaron
+// (Brasil, Alemania, India, Suiza, Italia, Francia, Países Bajos, Portugal, China…). No es
+// exhaustiva: con reconocer el país del perfil basta para decidir; si no reconoce ninguno,
+// conserva el lead. Las claves multi-palabra van ANTES para no perderlas.
+const COUNTRY_CANON = {
+  'estados unidos':'us','united states':'us','usa':'us',
+  'republica dominicana':'do','costa rica':'cr','el salvador':'sv','puerto rico':'pr',
+  'paises bajos':'nl','holanda':'nl','netherlands':'nl',
+  'reino unido':'uk','inglaterra':'uk','united kingdom':'uk','gran bretana':'uk',
+  'arabia saudita':'sa','emiratos arabes':'ae','nueva zelanda':'nz','corea del sur':'kr','corea':'kr',
+  'mexico':'mx','colombia':'co','espana':'es','spain':'es','chile':'cl','peru':'pe','panama':'pa',
+  'argentina':'ar','uruguay':'uy','paraguay':'py','bolivia':'bo','ecuador':'ec','venezuela':'ve',
+  'guatemala':'gt','honduras':'hn','nicaragua':'ni','cuba':'cu',
+  'brasil':'br','brazil':'br','canada':'ca','alemania':'de','germany':'de','francia':'fr','france':'fr',
+  'italia':'it','italy':'it','portugal':'pt','irlanda':'ie','belgica':'be','suiza':'ch','switzerland':'ch',
+  'austria':'at','polonia':'pl','suecia':'se','noruega':'no','dinamarca':'dk','finlandia':'fi',
+  'rusia':'ru','turquia':'tr','india':'in','china':'cn','japon':'jp','singapur':'sg','israel':'il',
+  'australia':'au','sudafrica':'za','egipto':'eg','nigeria':'ng','marruecos':'ma',
+}
+const COUNTRY_KEYS = Object.keys(COUNTRY_CANON).sort((a, b) => b.length - a.length) // multi-palabra primero
+
+// true si la ubicación del perfil cae dentro de la geo de la campaña.
+//   - sin geo configurada → true (la campaña no filtra por país)
+//   - ubicación vacía → true (beneficio de la duda; el facet ya garantiza la empresa)
+//   - ubicación que NO nombra ningún país conocido (solo ciudad/región, ej. "Área
+//     metropolitana de San Luis Potosí") → true (beneficio de la duda — NO asumir extranjero)
+//   - ubicación que nombra país(es): true solo si ALGUNO está en la geo objetivo
+// Modelo conservador: descarta SOLO cuando la ubicación nombra explícitamente un país fuera
+// de la lista. Prefiere colar un domestic ambiguo que tirar un lead válido.
+export function matchesCampaignGeo(profileLoc, geoRaw) {
+  const geoCanon = new Set(String(geoRaw ?? '').split(',').map(s => COUNTRY_CANON[_stripGeo(s)]).filter(Boolean))
+  if (geoCanon.size === 0) return true
+  const loc = _stripGeo(profileLoc)
+  if (!loc) return true
+  const mentioned = COUNTRY_KEYS.filter(k => loc.includes(k)).map(k => COUNTRY_CANON[k])
+  if (mentioned.length === 0) return true            // solo ciudad/región → conservar
+  return mentioned.some(c => geoCanon.has(c))        // nombra país → keep si alguno es de la geo
+}
+
 async function ingestSearch(commandId, result) {
   const { data: cmd } = await supabase
     .from('extension_commands')
@@ -1142,9 +1191,24 @@ async function ingestSearch(commandId, result) {
   // darle a la IA una empresa inventada (NO_INVENT_COMPANY_RULE).
   const companyIsCertain = !!cmd.payload?.companyUrn && !!targetCompanyName
 
-  const profiles = result.profiles ?? []
-  if (profiles.length === 0) {
+  const rawProfiles = result.profiles ?? []
+  if (rawProfiles.length === 0) {
     console.log(`[bridge] search ${commandId.slice(0,8)}: 0 perfiles${targetCompanyName ? ` (@${targetCompanyName})` : ''}`)
+    await bumpDrySearchStreak(campaignId, 0)
+    return
+  }
+
+  // (10-ago) FILTRO DE GEO: descarta empleados fuera del país de la campaña (multinacionales
+  // de la lista surfacean gente de Brasil/Alemania/etc. porque company-scoped tira el geoUrn).
+  const { data: camp } = await supabase.from('campaigns').select('search_location').eq('id', campaignId).maybeSingle()
+  const geoRaw = camp?.search_location ?? ''
+  let droppedGeo = 0
+  const profiles = rawProfiles.filter(p => {
+    if (matchesCampaignGeo(p.location, geoRaw)) return true
+    droppedGeo++; return false
+  })
+  if (droppedGeo > 0) console.log(`[bridge] search ${commandId.slice(0,8)}: 🌎 ${droppedGeo} perfiles FUERA de geo "${geoRaw}" descartados${targetCompanyName ? ` (@${targetCompanyName})` : ''}`)
+  if (profiles.length === 0) {
     await bumpDrySearchStreak(campaignId, 0)
     return
   }
