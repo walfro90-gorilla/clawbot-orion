@@ -51,7 +51,7 @@ export function buildDigestHtml(groups, { dateLabel, total }) {
   for (const [label, byCampaign] of groups) {
     body += `<h2 style="font-size:16px;margin:24px 0 4px">👤 ${esc(label)}</h2>`
     for (const [camp, rows] of byCampaign) {
-      body += `<p style="margin:8px 0 4px;font-size:13px;color:#6b7280">Campaña: <strong>${esc(camp)}</strong> — ${rows.length} conexión${rows.length === 1 ? '' : 'es'}</p>`
+      body += `<p style="margin:8px 0 4px;font-size:13px;color:#6b7280">Campaña: <strong>${esc(camp)}</strong> — ${rows.length} ${rows.length === 1 ? 'conexión' : 'conexiones'}</p>`
       body += `<table style="border-collapse:collapse;width:100%;max-width:760px"><tr>`
         + `<th style="${TH}">Nombre</th><th style="${TH}">Empresa</th><th style="${TH}">Cargo</th>`
         + `<th style="${TH}">Email</th><th style="${TH}">Teléfono</th></tr>`

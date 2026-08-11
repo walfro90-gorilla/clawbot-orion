@@ -79,7 +79,7 @@ export async function maybeSendDailyDigest() {
 
   const res = await sendEmail({
     to: recipients,
-    subject: `🤝 ClawBot — ${total} conexión${total === 1 ? '' : 'es'} nueva${total === 1 ? '' : 's'} · ${today}`,
+    subject: `🤝 ClawBot — ${total} ${total === 1 ? 'conexión nueva' : 'conexiones nuevas'} · ${today}`,
     html: buildDigestHtml(groupRows(rows), { dateLabel, total }),
   })
   if (!res.ok) {
