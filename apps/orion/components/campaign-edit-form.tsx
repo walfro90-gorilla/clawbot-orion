@@ -59,6 +59,7 @@ const LABELS: Record<string, string> = {
   followup_tone_directive:"Tono de seguimientos",
   followup_steps_json:   "Secuencia de seguimientos",
   auto_dead_after_days:  "Días hasta marcar Perdido",
+  digest_recipients:     "Emails del digest diario",
   fm1_example_reply:     "Ejemplo FM1 (rapport)",
   fm2_example_reply:     "Ejemplo FM2 (profundidad)",
   fm3_example_reply:     "Ejemplo FM3 (cierre)",
