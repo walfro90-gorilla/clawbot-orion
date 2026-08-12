@@ -80,6 +80,8 @@ export const FIELDS: ConfigField[] = [
     options: [{value:"manual",label:"Manual"},{value:"semi_auto",label:"Semi-auto"},{value:"auto",label:"Auto"}] },
   { key: "auto_reply_delay_min", store: "campaign", type: "int", tab: "seguimientos", label: "Delay auto-reply mín (min)", bounds: { hardMin: 0, warnBelow: 5 } },
   { key: "auto_reply_delay_max", store: "campaign", type: "int", tab: "seguimientos", label: "Delay auto-reply máx (min)", bounds: { hardMin: 0 } },
+  { key: "digest_recipients", store: "campaign", type: "list", tab: "seguimientos", label: "📧 Emails del digest diario",
+    hint: "Reciben cada mañana los contactos nuevos de ESTA campaña con su email/teléfono. Se suma al digest global. Separados por coma." },
 
   // ── IA / Voz ───────────────────────────────────────────────────────────────
   { key: "ai_tone", store: "campaign", type: "enum", tab: "ia", label: "Tono",

@@ -60,6 +60,15 @@ html = buildDigestHtml(groupRows([mkRow('Wal', 'Café', {
 assert.ok(!html.includes('<script>'))
 assert.ok(html.includes('a &amp; b'))
 
+// Digest POR-CAMPAÑA: 1 sola campaña → un grupo, un nombre de campaña renderizado
+const oneCamp = groupRows([mkRow('Wal', 'Fintech'), mkRow('Wal', 'Fintech')])
+assert.equal(oneCamp.size, 1)
+assert.equal(oneCamp.get('Wal').size, 1)
+assert.equal(oneCamp.get('Wal').get('Fintech').length, 2)
+html = buildDigestHtml(oneCamp, { dateLabel: 'x', total: 2 })
+assert.ok(html.includes('Fintech'))
+assert.ok(!html.includes('Sin conexiones nuevas'))
+
 // startOfYesterdayIso: instante válido, entre 24h y 49h atrás (medianoche local de ayer)
 const since = new Date(startOfYesterdayIso('America/Mexico_City')).getTime()
 const ageH = (Date.now() - since) / 3_600_000

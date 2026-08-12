@@ -7,6 +7,7 @@ import { validateAccountConfig } from "@/lib/config-validation"
 import { PRESETS } from "@/lib/config-presets"
 import { FollowupSequenceEditor, type FollowupStep } from "@/components/followup-sequence-editor"
 import { DirtyAwareForm } from "@/components/dirty-aware-form"
+import { parseDigestRecipients } from "@/lib/digest-recipients"
 
 export const dynamic = "force-dynamic"
 
@@ -14,6 +15,7 @@ const inp = "w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text
 
 // ── Parseo de formData según el tipo del campo ──────────────────────────────
 function parseField(f: ConfigField, fd: FormData): any {
+  if (f.key === "digest_recipients") return parseDigestRecipients(fd.get(f.key) as string)
   if (f.type === "bool") return fd.get(f.key) === "true"
   if (f.type === "days") return (fd.getAll(f.key) as string[])
   const raw = fd.get(f.key)

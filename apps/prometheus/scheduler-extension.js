@@ -33,7 +33,7 @@ import { uploadGeneratedImage } from './lib/gemini-image.js'
 import { isSystemLinkedInAccount } from './lib/system-accounts.js'
 import { isGroupConversationName } from './lib/group-conversation.js'
 import { sweepQuarantineTimeout } from './lib/lead-failure.js'
-import { maybeSendDailyDigest } from './lib/daily-digest.js'
+import { maybeSendDailyDigest, maybeSendCampaignDigests } from './lib/daily-digest.js'
 
 dotenv.config()
 
@@ -2428,6 +2428,15 @@ async function tick() {
     else if (digRes?.reason?.startsWith('send_failed')) console.warn(`[SCH-EXT] 📧 digest: ${digRes.reason} (reintenta próximo tick)`)
   } catch (err) {
     console.error(`[SCH-EXT] maybeSendDailyDigest threw:`, err.message)
+  }
+
+  // Digests POR-CAMPAÑA (lib/daily-digest.js) — independientes del global; se activan por
+  // campaigns.digest_recipients. También antes del early-return (catch-up sin extensión).
+  try {
+    const campRes = await maybeSendCampaignDigests()
+    if (campRes?.sent) console.log(`[SCH-EXT] 📇 digests por-campaña enviados: ${campRes.sent}/${campRes.processed} (skip ${campRes.skipped})`)
+  } catch (err) {
+    console.error(`[SCH-EXT] maybeSendCampaignDigests threw:`, err.message)
   }
 
   if (connectedIds.size === 0) {

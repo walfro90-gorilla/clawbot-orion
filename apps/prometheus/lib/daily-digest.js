@@ -34,15 +34,21 @@ const DEFAULT_TZ = 'America/Mexico_City'
 // salió; sin esto, cada tick reenviaría hasta el restart).
 let _lastSentDateMem = null
 
-export async function fetchDigestRows(sinceIso) {
-  const { data, error } = await supabase
+// Guard en memoria per-campaña (mismo motivo que _lastSentDateMem): si el upsert del
+// estado per-campaña falla, no re-enviar al cliente el mismo digest cada tick hasta el
+// restart. { [campaignId]: 'YYYY-MM-DD' }
+const _sentCampaignsMem = {}
+
+export async function fetchDigestRows(sinceIso, campaignId = null) {
+  let q = supabase
     .from('leads')
     .select(`
       id, full_name, linkedin_url, profile_data, contact_info, connected_at,
       campaigns!inner ( name, linkedin_accounts!inner ( label ) )
     `)
     .gt('connected_at', sinceIso)
-    .order('connected_at', { ascending: true })
+  if (campaignId) q = q.eq('campaign_id', campaignId)
+  const { data, error } = await q.order('connected_at', { ascending: true })
   if (error) throw new Error(`fetchDigestRows: ${error.message}`)
   return data ?? []
 }
@@ -98,4 +104,87 @@ export async function maybeSendDailyDigest() {
     notifyOps('digest_state_failed', `digest enviado pero estado no persistido: ${upErr.message}`).catch(() => {})
   }
   return { sent: true, total, recipients: recipients.length }
+}
+
+// ── Digest POR-CAMPAÑA ────────────────────────────────────────────────────────
+// Independiente del switch global: se activa por tener campaigns.digest_recipients
+// no vacío (NO exige daily_digest.enabled). Reusa send_hour/tz del global.
+// Estado en un row SEPARADO (daily_digest_state_campaigns) para no pisar el global:
+//   { [campaignId]: { last_sent_date: 'YYYY-MM-DD', high_water: ISO|null } }
+// Un array vacío desde send_hour = 1 intento/día (marca last_sent_date, no envía);
+// así los accepts que lleguen hoy después de la hora entran en el digest de mañana.
+export async function maybeSendCampaignDigests() {
+  const cfg = await readConfigRow('daily_digest')
+  const tz = cfg?.tz || DEFAULT_TZ
+  const sendHour = Number.isFinite(+cfg?.send_hour) ? +cfg.send_hour : DEFAULT_SEND_HOUR
+  if (mxTime(tz).mxHour < sendHour) return { processed: 0, sent: 0, skipped: 0 }
+  const today = mxDateStr(tz)
+
+  const { data: campaigns, error } = await supabase
+    .from('campaigns')
+    .select('id, name, digest_recipients')
+    .not('digest_recipients', 'is', null)
+  if (error) throw new Error(`maybeSendCampaignDigests: ${error.message}`)
+
+  const targets = (campaigns ?? [])
+    .filter(c => Array.isArray(c.digest_recipients) && c.digest_recipients.filter(Boolean).length > 0)
+  if (targets.length === 0) return { processed: 0, sent: 0, skipped: 0 }
+
+  const state = (await readConfigRow('daily_digest_state_campaigns')) ?? {}
+  let sent = 0, skipped = 0, dirty = false
+
+  for (const camp of targets) {
+    try {
+      const cs = state[camp.id]
+      if (cs?.last_sent_date === today || _sentCampaignsMem[camp.id] === today) { skipped++; continue }  // ya enviado hoy
+
+      const since = cs?.high_water ?? startOfYesterdayIso(tz)
+      const rows = await fetchDigestRows(since, camp.id)
+      const total = rows.length
+
+      if (total === 0) {
+        // No spamear con emails vacíos; marca el intento (máx 1/día), high_water sin cambiar.
+        state[camp.id] = { last_sent_date: today, high_water: cs?.high_water ?? null }
+        _sentCampaignsMem[camp.id] = today
+        dirty = true
+        skipped++
+        continue
+      }
+
+      const recipients = camp.digest_recipients.filter(Boolean)
+      const dateLabel = new Intl.DateTimeFormat('es-MX', {
+        timeZone: tz, weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
+      }).format(new Date())
+      const res = await sendEmail({
+        to: recipients,
+        subject: `📇 ClawBot · ${camp.name} — ${total} ${total === 1 ? 'contacto nuevo' : 'contactos nuevos'} · ${today}`,
+        html: buildDigestHtml(groupRows(rows), { dateLabel, total }),
+      })
+      if (!res.ok) {
+        // Estado NO avanza → retry el próximo tick. Alerta deduped, no tumba las demás.
+        notifyOps('campaign_digest_send_failed', `digest de campaña "${camp.name}" falló: ${res.error}`, { extra: { campaignId: camp.id, total } }).catch(() => {})
+        skipped++
+        continue
+      }
+      state[camp.id] = { last_sent_date: today, high_water: rows[rows.length - 1].connected_at }
+      _sentCampaignsMem[camp.id] = today
+      dirty = true
+      sent++
+    } catch (err) {
+      notifyOps('campaign_digest_send_failed', `digest de campaña "${camp.name}" excepción: ${err?.message ?? err}`, { extra: { campaignId: camp.id } }).catch(() => {})
+      skipped++
+    }
+  }
+
+  if (dirty) {
+    // ⚠️ updated_by NOT NULL sin default — mandar SIEMPRE y checar error (igual que el global).
+    const { error: upErr } = await supabase.from('runtime_config')
+      .upsert({ key: 'daily_digest_state_campaigns', value: state, updated_by: 'scheduler:campaign_digest' }, { onConflict: 'key' })
+    if (upErr) {
+      console.error(`[digest] estado per-campaña NO persistido (${upErr.message}) — reintenta el próximo tick`)
+      notifyOps('campaign_digest_state_failed', `digest per-campaña enviado pero estado no persistido: ${upErr.message}`).catch(() => {})
+    }
+  }
+
+  return { processed: targets.length, sent, skipped }
 }

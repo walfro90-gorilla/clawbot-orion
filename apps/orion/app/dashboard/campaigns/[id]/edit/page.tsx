@@ -4,6 +4,7 @@ import DeleteCampaignBtn from "@/components/delete-campaign-btn"
 import { CampaignTabs } from "@/components/campaign-tabs"
 import { CampaignEditForm } from "@/components/campaign-edit-form"
 import { FollowupSequenceEditor, type FollowupStep } from "@/components/followup-sequence-editor"
+import { parseDigestRecipients } from "@/lib/digest-recipients"
 
 // ── Server Actions ─────────────────────────────────────────────────────────────
 
@@ -53,6 +54,7 @@ async function saveCampaign(formData: FormData): Promise<{ error: string } | voi
     // v0.8 FU dinámico: los mensajes/delays por paso viven ahora en campaign_followups (abajo).
     followup_tone_directive:     (formData.get("followup_tone_directive") as string) || null,
     auto_dead_after_days:        Number(formData.get("auto_dead_after_days") || 21),
+    digest_recipients:           parseDigestRecipients(formData.get("digest_recipients") as string),
     fm1_example_reply:           (formData.get("fm1_example_reply") as string) || null,
     fm2_example_reply:           (formData.get("fm2_example_reply") as string) || null,
     fm3_example_reply:           (formData.get("fm3_example_reply") as string) || null,
@@ -594,6 +596,13 @@ NUNCA uses el cargo/título como si fuera el nombre de una empresa.`}
                     defaultValue={(c as any).auto_dead_after_days ?? 21} className={inp} />
                 </Field>
               </div>
+
+              <Field label="📧 Emails del digest diario"
+                hint="Reciben cada mañana los contactos nuevos de ESTA campaña con su email/teléfono. Se suma al digest global. Uno por línea o separados por coma.">
+                <textarea name="digest_recipients" rows={2}
+                  defaultValue={(c.digest_recipients ?? []).join("\n")}
+                  placeholder={"ventas@ebooms.com\njosh@ebooms.com"} className={inp} />
+              </Field>
 
               <div className="flex items-end pb-1">
                 <label className="flex items-center gap-2 cursor-pointer">

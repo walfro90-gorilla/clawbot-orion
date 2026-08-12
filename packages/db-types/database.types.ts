@@ -676,6 +676,7 @@ export type Database = {
           batch_paused: boolean
           created_at: string | null
           daily_invite_target: number
+          digest_recipients: string[] | null
           dry_search_streak: number
           fm1_example_reply: string | null
           fm2_example_reply: string | null
@@ -741,6 +742,7 @@ export type Database = {
           batch_paused?: boolean
           created_at?: string | null
           daily_invite_target?: number
+          digest_recipients?: string[] | null
           dry_search_streak?: number
           fm1_example_reply?: string | null
           fm2_example_reply?: string | null
@@ -806,6 +808,7 @@ export type Database = {
           batch_paused?: boolean
           created_at?: string | null
           daily_invite_target?: number
+          digest_recipients?: string[] | null
           dry_search_streak?: number
           fm1_example_reply?: string | null
           fm2_example_reply?: string | null
