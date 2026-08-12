@@ -5880,15 +5880,28 @@ async function scrapeContactInfo(payload = {}) {
     return false
   }
   const findContactRoot = () => {
-    // dialogs primero (el overlay normal), luego secciones de página (variante full-page)
+    // dialogs primero (algunas variantes montan modal)
     const dialogs = [...document.querySelectorAll('[role="dialog"], .artdeco-modal')]
     const hit = dialogs.find(looksLikeContact)
     if (hit) return hit
-    // full-page: sección de la página cuyo heading es de contacto
-    for (const h of document.querySelectorAll('main h1, main h2, main h3')) {
-      if (CONTACT_HEAD_RE.test(h.innerText ?? '')) {
-        return h.closest('section, div[class*="artdeco-card"], main') || h.parentElement
+    // full-page (0.10.14): el hard-load a /overlay/contact-info/ NO monta modal —
+    // renderiza la tarjeta de contacto en la página. El email/tel vive en un mailto/tel;
+    // subo desde ahí hasta el contenedor que tiene el heading de contacto y es acotado
+    // (<2000 chars ⇒ la tarjeta, no toda la página ni el feed).
+    const anchor = document.querySelector('a[href^="mailto:"], a[href^="tel:"]')
+    if (anchor) {
+      let el = anchor
+      for (let i = 0; i < 8 && el; i++) {
+        const txt = el.innerText ?? ''
+        if (CONTACT_HEAD_RE.test(txt) && txt.length < 2000) return el
+        el = el.parentElement
       }
+      return anchor.closest('section') || anchor.parentElement  // al menos el email
+    }
+    // sin mailto/tel: contenedor del heading de contacto (cualquier nivel)
+    for (const h of document.querySelectorAll('h1, h2, h3, h4')) {
+      const t = (h.innerText ?? '').trim()
+      if (CONTACT_HEAD_RE.test(t) && t.length < 40) return h.closest('section') || h.parentElement
     }
     return null
   }
