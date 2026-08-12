@@ -16,7 +16,7 @@ const ACTION_MIN_VERSION = {
   check_connections: '0.9.15',
   resolve_companies: '0.10.0',
   reload_extension:  '0.10.4',
-  get_contact_info:  '0.10.13',
+  get_contact_info:  '0.10.14',
 }
 
 // v0.10.0: la búsqueda con facet currentCompany requiere la misma versión. Una ext
@@ -27,7 +27,7 @@ export const COMPANY_SCOPED_MIN_VERSION = '0.10.0'
 // v0.10.13: scraping del overlay de contact-info (email/tel de conexiones 1er grado)
 // para el digest diario. El scheduler pre-checa esta versión para skippear en
 // silencio (sin generar la alerta extension_outdated en cada tick).
-export const CONTACT_INFO_MIN_VERSION = '0.10.13'
+export const CONTACT_INFO_MIN_VERSION = '0.10.14'
 
 // Compara semver simple (a.b.c). Versión desconocida (null) = demasiado vieja → fail-closed.
 export function meetsVersion(have, min) {

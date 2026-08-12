@@ -5863,63 +5863,106 @@ async function checkConnections(payload = {}) {
 // Resultado SIEMPRE status:'ok' salvo fallo duro: un perfil sin overlay o sin datos
 // devuelve campos vacíos → el bridge guarda {} (centinela "visitado, sin datos").
 async function scrapeContactInfo(payload = {}) {
-  console.log(`[Orion content] scrapeContactInfo currentUrl=${location.href}`)
+  const debug = payload.debug === true
+  console.log(`[Orion content] scrapeContactInfo currentUrl=${location.href} debug=${debug}`)
 
-  const findModal = () => {
-    const m = document.querySelector('[role="dialog"], .artdeco-modal')
-    return (m && (m.innerText ?? '').trim().length > 0) ? m : null
+  // (0.10.14) Detección SCOPED del contenedor de contact-info, no "cualquier dialog":
+  // LinkedIn tiene otros dialogs (mensajería, prompts) que matcheaban y salían vacíos.
+  // Un contenedor es contact-info si tiene mailto/tel, un heading de contacto, o el link overlay.
+  const CONTACT_HEAD_RE = /informaci[oó]n de contacto|contact info/i
+  const looksLikeContact = (el) => {
+    if (!el) return false
+    if (el.querySelector('a[href^="mailto:"], a[href^="tel:"]')) return true
+    if (el.querySelector('a[href*="overlay/contact-info"]')) return true
+    for (const h of el.querySelectorAll('h1, h2, h3')) {
+      if (CONTACT_HEAD_RE.test(h.innerText ?? '')) return true
+    }
+    return false
+  }
+  const findContactRoot = () => {
+    // dialogs primero (el overlay normal), luego secciones de página (variante full-page)
+    const dialogs = [...document.querySelectorAll('[role="dialog"], .artdeco-modal')]
+    const hit = dialogs.find(looksLikeContact)
+    if (hit) return hit
+    // full-page: sección de la página cuyo heading es de contacto
+    for (const h of document.querySelectorAll('main h1, main h2, main h3')) {
+      if (CONTACT_HEAD_RE.test(h.innerText ?? '')) {
+        return h.closest('section, div[class*="artdeco-card"], main') || h.parentElement
+      }
+    }
+    return null
   }
 
-  // 1) Esperar el modal (la navegación SPA al overlay lo monta solo)
-  let modal = null
-  for (let i = 0; i < 20 && !modal; i++) {  // ~10s
-    modal = findModal()
-    if (!modal) await sleep(500)
+  // 1) Poll ~16s: en máquinas lentas (Wal/Café) el overlay SPA tarda en hidratar tras
+  //    el hard-load — 10s no alcanzaba (80% overlay_not_found). 32×500ms.
+  let root = null
+  for (let i = 0; i < 32 && !root; i++) {
+    root = findContactRoot()
+    if (!root) await sleep(500)
   }
 
-  // 2) Fallback: estamos en el perfil sin overlay → clickear el link de contact-info
-  if (!modal) {
-    const link = document.querySelector('a[href*="overlay/contact-info"]')
-    if (link) {
-      link.click()
-      for (let i = 0; i < 16 && !modal; i++) {  // ~8s
-        modal = findModal()
-        if (!modal) await sleep(500)
+  // 2) Fallback: aterrizamos en el perfil sin overlay abierto → click al opener y re-poll
+  if (!root) {
+    const opener = document.querySelector(
+      'a[href*="overlay/contact-info"], a#top-card-text-details-contact-info, ' +
+      'button[aria-label*="ontact info"], button[aria-label*="nformación de contacto"]'
+    )
+    if (opener) {
+      opener.click()
+      for (let i = 0; i < 20 && !root; i++) {
+        root = findContactRoot()
+        if (!root) await sleep(500)
       }
     }
   }
-  if (!modal) {
-    // Sin overlay accesible: reporta ok-vacío (visitado, sin datos) para no reintentar en loop
-    return { action: 'get_contact_info', status: 'ok', leadId: payload.leadId, email: null, phones: [], websites: [], birthday: null, note: 'overlay_not_found' }
+
+  const debugBlob = () => {
+    if (!debug) return {}
+    const anyDialog = document.querySelector('[role="dialog"], .artdeco-modal')
+    const target = root || anyDialog
+    return { _debug: {
+      url: location.href,
+      dialogs: document.querySelectorAll('[role="dialog"], .artdeco-modal').length,
+      rootMatched: !!root,
+      openerFound: !!document.querySelector('a[href*="overlay/contact-info"], button[aria-label*="ontact"]'),
+      pageMailto: document.querySelectorAll('a[href^="mailto:"]').length,
+      pageTel: document.querySelectorAll('a[href^="tel:"]').length,
+      headings: target ? [...target.querySelectorAll('h1,h2,h3')].map(h => (h.innerText || '').trim().slice(0, 50)).filter(Boolean).slice(0, 15) : [],
+      html: target ? (target.outerHTML || '').slice(0, 9000) : (document.body.innerText || '').slice(0, 1500),
+    } }
   }
-  await sleep(800)  // dejar terminar el render del contenido del modal
+
+  if (!root) {
+    return { action: 'get_contact_info', status: 'ok', leadId: payload.leadId, email: null, phones: [], websites: [], birthday: null, note: 'overlay_not_found', ...debugBlob() }
+  }
+  await sleep(800)  // dejar terminar el render del contenido
 
   const dedup = arr => [...new Set(arr.filter(Boolean))].slice(0, 5)
 
   // 3a) Emails: por href mailto:
-  const emails = dedup([...modal.querySelectorAll('a[href^="mailto:"]')]
+  const emails = dedup([...root.querySelectorAll('a[href^="mailto:"]')]
     .map(a => decodeURIComponent(a.getAttribute('href').slice(7).split('?')[0]).trim().toLowerCase()))
 
   // 3b) Teléfonos: href tel: + secciones cuyo header hable de teléfono (LinkedIn suele
   //     mostrarlos como texto plano, sin link)
-  const phones = [...modal.querySelectorAll('a[href^="tel:"]')]
+  const phones = [...root.querySelectorAll('a[href^="tel:"]')]
     .map(a => decodeURIComponent(a.getAttribute('href').slice(4)).trim())
   const PHONE_RE = /[+(]?\d[\d\s().-]{6,}\d/g
-  for (const section of modal.querySelectorAll('section')) {
+  for (const section of root.querySelectorAll('section')) {
     const header = section.querySelector('h3, h2')?.innerText ?? ''
     if (/tel[eé]fono|phone|m[oó]vil|mobile/i.test(header)) {
       phones.push(...((section.innerText.match(PHONE_RE)) ?? []).map(s => s.trim()))
     }
   }
 
-  // 3c) Websites: links http del modal fuera de linkedin.com
-  const websites = dedup([...modal.querySelectorAll('a[href^="http"]')]
+  // 3c) Websites: links http del contenedor fuera de linkedin.com
+  const websites = dedup([...root.querySelectorAll('a[href^="http"]')]
     .map(a => a.getAttribute('href'))
     .filter(h => { try { return !new URL(h).hostname.endsWith('linkedin.com') } catch { return false } }))
 
   // 3d) Cumpleaños
   let birthday = null
-  for (const section of modal.querySelectorAll('section')) {
+  for (const section of root.querySelectorAll('section')) {
     const header = section.querySelector('h3, h2')?.innerText ?? ''
     if (/cumplea|birthday/i.test(header)) {
       birthday = (section.innerText.replace(header, '').trim().split('\n')[0] || null)
@@ -5927,10 +5970,10 @@ async function scrapeContactInfo(payload = {}) {
     }
   }
 
-  // 4) Red final: si secciones/links no dieron nada, regex sobre el texto completo del modal
+  // 4) Red final: si secciones/links no dieron nada, regex sobre el texto completo
   let email = emails[0] ?? null
   if (!email) {
-    const m = (modal.innerText.match(/[\w.+-]+@[\w-]+\.[\w.]{2,}/) ?? [])[0]
+    const m = (root.innerText.match(/[\w.+-]+@[\w-]+\.[\w.]{2,}/) ?? [])[0]
     if (m) email = m.toLowerCase()
   }
 
@@ -5942,6 +5985,7 @@ async function scrapeContactInfo(payload = {}) {
     phones: dedup(phones),
     websites,
     birthday,
+    ...debugBlob(),
   }
   console.log(`[Orion content] contact-info: email=${email ?? '—'} phones=${result.phones.length} webs=${websites.length}`)
   return result
