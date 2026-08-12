@@ -5866,51 +5866,43 @@ async function scrapeContactInfo(payload = {}) {
   const debug = payload.debug === true
   console.log(`[Orion content] scrapeContactInfo currentUrl=${location.href} debug=${debug}`)
 
-  // (0.10.14) Detección SCOPED del contenedor de contact-info, no "cualquier dialog":
-  // LinkedIn tiene otros dialogs (mensajería, prompts) que matcheaban y salían vacíos.
-  // Un contenedor es contact-info si tiene mailto/tel, un heading de contacto, o el link overlay.
+  // Contenedor de contact-info. El hard-load a /overlay/contact-info/ NO monta
+  // [role=dialog] (dialogs:0) y las clases van OFUSCADAS (`_7fac4bf7`), así que no
+  // sirve buscar por dialog/clase. (0.10.15 falló: sin exigir "heading + datos juntos",
+  // el heading renderiza antes que el mailto y matcheaba solo el <header> del título,
+  // sin el email.) Regla: el contenedor bueno es el ancestro (partiendo del heading o
+  // del mailto) que tiene A LA VEZ el heading de contacto Y datos (mailto/tel/email-text).
+  // El poll exige strict=true ⇒ espera a que el email renderice. strict=false = degradado.
   const CONTACT_HEAD_RE = /informaci[oó]n de contacto|contact info/i
-  const looksLikeContact = (el) => {
-    if (!el) return false
-    if (el.querySelector('a[href^="mailto:"], a[href^="tel:"]')) return true
-    if (el.querySelector('a[href*="overlay/contact-info"]')) return true
-    for (const h of el.querySelectorAll('h1, h2, h3')) {
-      if (CONTACT_HEAD_RE.test(h.innerText ?? '')) return true
-    }
-    return false
-  }
-  const findContactRoot = () => {
-    // dialogs primero (algunas variantes montan modal)
-    const dialogs = [...document.querySelectorAll('[role="dialog"], .artdeco-modal')]
-    const hit = dialogs.find(looksLikeContact)
-    if (hit) return hit
-    // full-page (0.10.14): el hard-load a /overlay/contact-info/ NO monta modal —
-    // renderiza la tarjeta de contacto en la página. El email/tel vive en un mailto/tel;
-    // subo desde ahí hasta el contenedor que tiene el heading de contacto y es acotado
-    // (<2000 chars ⇒ la tarjeta, no toda la página ni el feed).
+  const EMAIL_RE = /[\w.+-]+@[\w-]+\.\w{2,}/
+  const findContactRoot = (strict = true) => {
     const anchor = document.querySelector('a[href^="mailto:"], a[href^="tel:"]')
-    if (anchor) {
-      let el = anchor
-      for (let i = 0; i < 8 && el; i++) {
-        const txt = el.innerText ?? ''
-        if (CONTACT_HEAD_RE.test(txt) && txt.length < 2000) return el
-        el = el.parentElement
-      }
-      return anchor.closest('section') || anchor.parentElement  // al menos el email
-    }
-    // sin mailto/tel: contenedor del heading de contacto (cualquier nivel)
+    let head = null
     for (const h of document.querySelectorAll('h1, h2, h3, h4')) {
       const t = (h.innerText ?? '').trim()
-      if (CONTACT_HEAD_RE.test(t) && t.length < 40) return h.closest('section') || h.parentElement
+      if (CONTACT_HEAD_RE.test(t) && t.length < 40) { head = h; break }
     }
-    return null
+    const base = head || anchor
+    if (!base) return null
+    let el = base
+    for (let i = 0; i < 10 && el; i++) {
+      const txt = el.innerText ?? ''
+      const hasData = !!el.querySelector('a[href^="mailto:"], a[href^="tel:"]') || EMAIL_RE.test(txt)
+      if (CONTACT_HEAD_RE.test(txt) && hasData) return el  // heading + datos → contenedor completo
+      el = el.parentElement
+    }
+    if (strict) return null  // en poll: no aceptar contenedor a medio render
+    // degradado post-timeout: lo que haya
+    if (anchor) return anchor.closest('section') || anchor.parentElement?.parentElement || anchor.parentElement
+    return head ? (head.closest('section') || head.parentElement) : null
   }
 
-  // 1) Poll ~16s: en máquinas lentas (Wal/Café) el overlay SPA tarda en hidratar tras
-  //    el hard-load — 10s no alcanzaba (80% overlay_not_found). 32×500ms.
+  // 1) Poll ~16s por el contenedor COMPLETO (heading + datos ya renderizados). En
+  //    máquinas lentas (Wal/Café) el email aparece después del heading; exigir ambos
+  //    evita cerrar antes de tiempo sobre el <header> del título sin datos.
   let root = null
   for (let i = 0; i < 32 && !root; i++) {
-    root = findContactRoot()
+    root = findContactRoot(true)
     if (!root) await sleep(500)
   }
 
@@ -5923,11 +5915,14 @@ async function scrapeContactInfo(payload = {}) {
     if (opener) {
       opener.click()
       for (let i = 0; i < 20 && !root; i++) {
-        root = findContactRoot()
+        root = findContactRoot(true)
         if (!root) await sleep(500)
       }
     }
   }
+
+  // 3) Degradado: si nunca juntó heading+datos, toma lo que haya (mejor que nada)
+  if (!root) root = findContactRoot(false)
 
   const debugBlob = () => {
     if (!debug) return {}
