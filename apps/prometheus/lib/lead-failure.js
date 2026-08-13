@@ -85,6 +85,7 @@ const NON_FAULT_ERRORS = new Set([
   'profile_not_found',
   'lead_not_messageable',
   'linkedin_security_check',  // v0.7.16 — banner detectado, lead no falló
+  'weekly_invite_limit',      // v0.10.17 — límite semanal de la CUENTA, lead sano
 ])
 
 export function isNonFaultError(errCode) {

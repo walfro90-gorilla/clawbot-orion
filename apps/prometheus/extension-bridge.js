@@ -522,6 +522,36 @@ async function handleCommandResult(msg) {
     }
   }
 
+  // v0.10.17 — Límite semanal de invitaciones (detección post-click en content.js:
+  // el modal de límite queda abierto tras "Enviar"). Pausa SOLO invites 24h
+  // (invites_paused_until → getEffectiveDailyCap retorna 0); FU/inbox/search siguen.
+  // Auto-probe: al expirar, el próximo invite re-detecta si el límite persiste y renueva.
+  if (result?.error === 'weekly_invite_limit') {
+    try {
+      const { data: cmdRow } = await supabase
+        .from('extension_commands').select('account_id').eq('id', commandId).single()
+      const acctId = cmdRow?.account_id
+      if (acctId) {
+        const until = new Date(Date.now() + 24 * 3_600_000).toISOString()
+        const { error: upErr } = await supabase.from('linkedin_accounts')
+          .update({ invites_paused_until: until }).eq('id', acctId)
+        if (upErr) console.error(`[bridge] weekly_invite_limit pause failed: ${upErr.message}`)
+        const { error: alErr } = await supabase.from('account_alerts').insert({
+          linkedin_account_id: acctId,
+          alert_type: 'weekly_invite_limit',
+          severity: 'warning',
+          message: `LinkedIn: límite semanal de invitaciones. Invites pausados 24h hasta ${until} (FU/inbox siguen activos).`,
+          details: { commandId },
+          auto_paused: true,
+        })
+        if (alErr) console.error(`[bridge] weekly_invite_limit alert insert failed: ${alErr.message}`)
+        console.warn(`[bridge] 🚫 weekly_invite_limit account=${acctId.slice(0, 8)} → invites pausados hasta ${until}`)
+      }
+    } catch (err) {
+      console.error(`[bridge] weekly_invite_limit handler failed:`, err.message)
+    }
+  }
+
   // Ingestion: si fue exitoso y la acción tiene ingest definido, procesamos
   if (!isError && action === 'check_inbox' && result?.conversations) {
     try {

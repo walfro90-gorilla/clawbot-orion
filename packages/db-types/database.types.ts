@@ -1656,6 +1656,7 @@ export type Database = {
           inbound_reply_mode: string | null
           inbox_gap_min: number
           inbox_paused: boolean
+          invites_paused_until: string | null
           label: string | null
           last_connections_check_at: string | null
           last_inbox_check_at: string | null
@@ -1698,6 +1699,7 @@ export type Database = {
           inbound_reply_mode?: string | null
           inbox_gap_min?: number
           inbox_paused?: boolean
+          invites_paused_until?: string | null
           label?: string | null
           last_connections_check_at?: string | null
           last_inbox_check_at?: string | null
@@ -1740,6 +1742,7 @@ export type Database = {
           inbound_reply_mode?: string | null
           inbox_gap_min?: number
           inbox_paused?: boolean
+          invites_paused_until?: string | null
           label?: string | null
           last_connections_check_at?: string | null
           last_inbox_check_at?: string | null

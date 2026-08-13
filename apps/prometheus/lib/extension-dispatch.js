@@ -158,6 +158,9 @@ export function effectiveWarmupCap(account) {
  * - warmup legacy (status: cold/warming/warm/hot) como fallback
  */
 export function getEffectiveDailyCap(account, campaign) {
+  // v0.10.17: pausa de invites por límite semanal LinkedIn (la setea el bridge al
+  // recibir weekly_invite_limit). Solo afecta invites — FU/inbox no pasan por aquí.
+  if (account.invites_paused_until && new Date(account.invites_paused_until) > new Date()) return 0
   const ramp = effectiveWarmupCap(account)
   const legacy = WARMUP_LEGACY[account.warmup_status ?? 'cold'] ?? 5
   const warmupDefault = ramp ?? legacy

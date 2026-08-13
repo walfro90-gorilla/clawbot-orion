@@ -2291,16 +2291,12 @@ async function sendInvite(payload = {}) {
   }
   await humanClick(sendBtn)
 
-  // 12. Esperar confirmación (toast aparece OR modal cierra)
-  const confirmed = await waitForSendConfirmation(8000)
-
-  return {
+  // 12. Esperar confirmación (toast aparece OR modal cierra) + scan de límite semanal
+  return await verifyInviteSent({
     action: 'send_invite',
-    status: confirmed ? 'sent' : 'sent_unconfirmed',
     textareaUsed,
     capturedThreadIds,
-    sentAt: new Date().toISOString(),
-  }
+  })
 }
 
 // ── PATH A: send_invite cuando background navegó a /preload/custom-invite/ ──
@@ -2367,15 +2363,14 @@ async function sendInviteFromCustomInvite(payload) {
     }
     console.log('[Orion content] Clicking "Enviar sin nota"')
     await humanClick(sendNoNoteBtn)
-    await sleep(2500)
+    await sleep(2000)
     // REMOVED 2026-05-29: setTimeout location.href causaba modal "Leave site?" cuando
     // un siguiente command (FU/auto-reply) empezaba a typear durante la navegación.
     // LinkedIn detectaba texto sin guardar y mostraba el modal. Sin el auto-nav,
     // la tab queda en /preload/custom-invite/ pero next command navega correctamente.
-    return {
-      action: 'send_invite', status: 'sent',
-      textareaUsed: false, withNote: false, path: 'spa_route_no_note',
-    }
+    return await verifyInviteSent({
+      action: 'send_invite', textareaUsed: false, withNote: false, path: 'spa_route_no_note',
+    })
   }
 
   // ── PATH A.2: CON NOTA — flow original ───────────────────────────────────
@@ -2449,14 +2444,12 @@ async function sendInviteFromCustomInvite(payload) {
   // un siguiente command empezaba a typear durante la navegación a /mynetwork/.
   // Lo dejamos sin auto-nav — el next command llegará y navegará donde necesite.
 
-  return {
+  return await verifyInviteSent({
     action: 'send_invite',
-    status: 'sent',
     textareaUsed: true,
     messageLength: message.length,
     path: 'spa_route',
-    sentAt: new Date().toISOString(),
-  }
+  })
 }
 
 function findAddNoteButtonInPreloadModal() {
@@ -2816,6 +2809,28 @@ async function waitForSendConfirmation(timeoutMs = 8000) {
     await sleep(400)
   }
   return false
+}
+
+// v0.10.17 — LinkedIn rechaza el send SIN error visible cuando la cuenta alcanzó el
+// límite semanal de invitaciones: el modal de límite queda abierto tras el click.
+// Antes se retornaba 'sent' a ciegas (sleep + return) → 5 días de invites fantasma
+// (Josh 8-13 ago 2026): falsos accepts, FUs a no-conexiones, quota quemada en loop.
+function detectInviteLimitModal() {
+  const m = document.querySelector('[role="dialog"], .artdeco-modal')
+  if (!m || m.offsetParent === null) return false
+  return /l[íi]mite (semanal )?de invitaciones|(weekly )?invitation limit|has enviado muchas invitaciones|you['’]?ve sent many invitations|out of invitations|sin invitaciones disponibles/i
+    .test(m.textContent ?? '')
+}
+
+// Post-click verify compartido por las 3 rutas de send_invite.
+// error 'weekly_invite_limit' → el bridge pausa SOLO invites 24h (account-level).
+async function verifyInviteSent(base) {
+  const confirmed = await waitForSendConfirmation(8000)
+  if (confirmed) return { ...base, status: 'sent', sentAt: new Date().toISOString() }
+  if (detectInviteLimitModal()) {
+    return { ...base, status: 'error', error: 'weekly_invite_limit', modalDebug: dumpModalContent() }
+  }
+  return { ...base, status: 'sent_unconfirmed', sentAt: new Date().toISOString(), modalDebug: dumpModalContent() }
 }
 
 // ── humanClick + humanType ───────────────────────────────────────────────────

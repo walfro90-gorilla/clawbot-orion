@@ -2471,7 +2471,7 @@ async function tick() {
       gemini_system_prompt, target_audience, ai_tone, ai_sender_persona, ai_company_context,
       linkedin_account_id,
       linkedin_accounts (
-        id, label, status, daily_connection_limit,
+        id, label, status, daily_connection_limit, invites_paused_until,
         warmup_status, warmup_started_at,
         inbox_gap_min, inbox_paused, last_inbox_check_at,
         sent_invites_gap_min, last_sent_invites_check_at, last_connections_check_at,
