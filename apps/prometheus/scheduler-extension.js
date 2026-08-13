@@ -22,7 +22,7 @@ import {
   hasInFlightCommand, wasMessageRecentlySent,
   passesTitleFilters, seniorityRank,
   dispatchSearch, dispatchInvite, dispatchCheckInbox, dispatchCheckSentInvites, dispatchCheckConnections, dispatchFollowup,
-  dispatchCommand, dispatchResolveCompanies, COMPANY_SCOPED_MIN_VERSION, CONTACT_INFO_MIN_VERSION, meetsVersion,
+  dispatchCommand, dispatchResolveCompanies, COMPANY_SCOPED_MIN_VERSION, CONTACT_INFO_MIN_VERSION, WITHDRAW_INVITES_MIN_VERSION, meetsVersion,
   checkCampaignActiveGates,
   dispatchPostSearch, dispatchCommentOnPost, checkPostCampaignActiveGates,
   getDailyCommentsToday, getEffectiveCommentCap,
@@ -1729,6 +1729,40 @@ async function tryContactInfoScrape(account) {
   }
 }
 
+// ── Retiro de invitaciones viejas (v0.10.18) ─────────────────────────────────
+// Higiene anti-límite-semanal: un backlog grande de pending (Josh: 492 el 13-ago-2026)
+// endurece los límites de invitación de LinkedIn. 1 corrida/día por cuenta (gap 22h),
+// cap WITHDRAW_MAX_PER_RUN por corrida, última prioridad del loop per-account.
+// El bridge marca los retirados dead(invite_withdrawn) — LinkedIn bloquea re-invitar
+// al mismo perfil ~3 semanas tras retirar, NUNCA regresarlos a scraped.
+const WITHDRAW_MIN_AGE_DAYS = 30
+const WITHDRAW_MAX_PER_RUN = 15
+
+async function tryWithdrawOldInvites(account) {
+  if (DRY_RUN) return { skipped: true, reason: 'dry_run' }
+  if (!meetsVersion(account.ext_version, WITHDRAW_INVITES_MIN_VERSION)) {
+    return { skipped: true, reason: 'ext_version' }  // silencioso, igual que contact-info
+  }
+  try {
+    // 1 corrida/día: última withdraw_invites (cualquier status) hace <22h → skip
+    const { data: last } = await supabase.from('extension_commands')
+      .select('created_at')
+      .eq('account_id', account.id).eq('action', 'withdraw_invites')
+      .order('created_at', { ascending: false }).limit(1).maybeSingle()
+    if (last && Date.now() - new Date(last.created_at).getTime() < 22 * 3_600_000) {
+      return { skipped: true, reason: 'daily_gap' }
+    }
+    const cmdId = await dispatchCommand(account.id, 'withdraw_invites',
+      { minAgeDays: WITHDRAW_MIN_AGE_DAYS, maxWithdraw: WITHDRAW_MAX_PER_RUN },
+      { expiresInMinutes: 30 })
+    if (!cmdId) return { skipped: true, reason: 'dispatch_failed' }
+    return { dispatched: true }
+  } catch (e) {
+    console.warn(`[SCH-EXT]   withdraw_invites falló para ${account.label}: ${e.message}`)
+    return { skipped: true, reason: e.message }
+  }
+}
+
 async function tryInboxForAccount(account) {
   if (account.inbox_paused) {
     return { skipped: true, reason: 'inbox_paused' }
@@ -2707,6 +2741,14 @@ async function tick() {
     const ciRes = await tryContactInfoScrape(account)
     if (ciRes.dispatched) {
       console.log(`[SCH-EXT]   📇 get_contact_info dispatched for ${account.label} (${ciRes.leadName})`)
+      continue
+    }
+
+    // Retiro de invitaciones viejas (v0.10.18): higiene anti-límite-semanal, última
+    // prioridad del loop, 1 corrida/día por cuenta.
+    const wRes = await tryWithdrawOldInvites(account)
+    if (wRes.dispatched) {
+      console.log(`[SCH-EXT]   🧹 withdraw_invites dispatched for ${account.label} (≥${WITHDRAW_MIN_AGE_DAYS}d, cap ${WITHDRAW_MAX_PER_RUN})`)
     }
   }
 

@@ -648,7 +648,7 @@ async function executeCommand(commandId, action, payload) {
       } else {
         tab = await navigateTabAndWait('https://www.linkedin.com/messaging/', 15000)
       }
-    } else if (action === 'check_sent_invites') {
+    } else if (action === 'check_sent_invites' || action === 'withdraw_invites') {
       tab = await navigateTabAndWait('https://www.linkedin.com/mynetwork/invitation-manager/sent/', 15000)
     } else if (action === 'check_connections') {
       tab = await navigateTabAndWait('https://www.linkedin.com/mynetwork/invite-connect/connections/', 15000)

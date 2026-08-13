@@ -130,6 +130,7 @@ function actionShort(a) {
     send_followup: 'enviando mensaje', send_invite: 'invitando',
     check_inbox: 'leyendo inbox', check_sent_invites: 'verificando',
     check_connections: 'verificando conexiones',
+    withdraw_invites: 'retirando invitaciones',
     search: 'buscando leads',
   })[a] ?? 'trabajando'
 }
@@ -1436,6 +1437,8 @@ async function executeAction(action, payload) {
       return await checkInbox(payload)
     case 'check_sent_invites':
       return await checkSentInvites(payload)
+    case 'withdraw_invites':
+      return await withdrawInvites(payload)
     case 'check_connections':
       return await checkConnections(payload)
     case 'get_contact_info':
@@ -6152,6 +6155,180 @@ async function checkSentInvites(payload = {}) {
       },
       bodySnippet: bodyTxt.slice(0, 400),
     }
+  }
+  return out
+}
+
+// ── 3.6 — withdraw_invites — retira invitaciones enviadas viejas (v0.10.18) ──
+//
+// Higiene anti-límite-semanal: un backlog grande de pending (Josh: 492 el 13-ago-2026)
+// endurece los límites de invitación de LinkedIn. Retira las de ≥minAgeDays (frías,
+// ya no van a aceptar), cap maxWithdraw por corrida con pacing humano.
+// ⚠️ LinkedIn bloquea RE-invitar al mismo perfil ~3 semanas tras retirar — el bridge
+// marca el lead dead(invite_withdrawn); NUNCA lo regreses a scraped.
+
+function parseInviteAgeDays(text) {
+  const t = (text || '').toLowerCase()
+  let m = t.match(/hace\s+(\d+)\s+(d[íi]a|semana|mes|año)/)
+  if (!m) m = t.match(/(\d+)\s+(day|week|month|year)s?\s+ago/)
+  if (m) {
+    const n = parseInt(m[1], 10)
+    const u = m[2]
+    if (/^d/.test(u)) return n
+    if (/^(semana|week)/.test(u)) return n * 7
+    if (/^(mes|month)/.test(u)) return n * 30
+    return n * 365
+  }
+  if (/hace\s+una?\s+semana|a week ago/.test(t)) return 7
+  if (/hace\s+un\s+mes|a month ago/.test(t)) return 30
+  if (/hace\s+un\s+año|a year ago/.test(t)) return 365
+  if (/hace\s+un\s+d[íi]a|a day ago|ayer|yesterday/.test(t)) return 1
+  return null
+}
+
+// Card = ancestro del anchor /in/ que sigue conteniendo UN solo perfil.
+// Devuelve candidatos con edad ≥minAgeDays y botón Retirar visible.
+function collectWithdrawCandidates(minAgeDays) {
+  const main = document.querySelector('main') || document.body
+  const out = []
+  const seen = new Set()
+  let oldestSeenDays = null
+  for (const link of main.querySelectorAll('a[href*="/in/"]')) {
+    const href = link.getAttribute('href') || ''
+    const full = href.startsWith('http') ? href : `https://www.linkedin.com${href}`
+    const url = full.split('?')[0].replace(/\/$/, '') + '/'
+    if (!url.includes('/in/') || seen.has(url)) continue
+    seen.add(url)
+    // subir mientras el nodo contenga solo ESTE perfil (no tocar el card vecino)
+    let node = link.parentElement, card = null
+    for (let up = 0; up < 8 && node && node !== main; up++) {
+      if (node.querySelectorAll('a[href*="/in/"]').length > 1) break
+      card = node
+      node = node.parentElement
+    }
+    if (!card) continue
+    const btn = Array.from(card.querySelectorAll('button, [role="button"]'))
+      .find(b => b.offsetParent !== null && /retirar|withdraw/i.test((b.textContent || '').trim()))
+    const age = parseInviteAgeDays(card.innerText)
+    if (age !== null && (oldestSeenDays === null || age > oldestSeenDays)) oldestSeenDays = age
+    if (!btn || age === null || age < minAgeDays) continue
+    let name = (link.textContent || '').trim() || (link.getAttribute('aria-label') || '').trim()
+    if (name.length > 80) name = name.slice(0, 80)
+    out.push({ profileUrl: url, name, ageDays: age, btn })
+  }
+  return { candidates: out, oldestSeenDays, anchorsSeen: seen.size }
+}
+
+// Cargar la lista lo más profundo posible: scroll window + contenedor interno
+// scrolleable (SDUI a veces scrollea un div) + click "Mostrar más". La paginación
+// de /sent/ es un gap conocido (~10 de N) — el resultado incluye telemetría para
+// diagnosticar el mecanismo real desde el bridge.
+async function loadAllSentInvites() {
+  const mainEl = document.querySelector('main') || document.body
+  const moreRe = /mostrar m[áa]s|ver m[áa]s|cargar m[áa]s|m[áa]s resultados|show more|load more|see more/i
+  const debug = { loadMoreClicked: 0, iterations: 0, innerScroller: false, finalAnchors: 0 }
+  const scroller = Array.from(mainEl.querySelectorAll('div'))
+    .find(d => d.scrollHeight > d.clientHeight + 200 && d.clientHeight > 300) ?? null
+  if (scroller) debug.innerScroller = true
+  let prevN = -1, stable = 0
+  for (let i = 0; i < 60 && stable < 3; i++) {
+    debug.iterations = i + 1
+    window.scrollTo(0, document.body.scrollHeight)
+    if (scroller) scroller.scrollTop = scroller.scrollHeight
+    await sleep(randInt(500, 900))
+    const moreBtn = Array.from(mainEl.querySelectorAll('button, [role="button"]'))
+      .find(b => b.offsetParent !== null && moreRe.test((b.textContent || '').trim()))
+    if (moreBtn) {
+      moreBtn.click()
+      debug.loadMoreClicked++
+      await sleep(randInt(900, 1500))
+    }
+    const n = mainEl.querySelectorAll('a[href*="/in/"]').length
+    if (n === prevN && !moreBtn) stable++
+    else { stable = 0; prevN = n }
+  }
+  debug.finalAnchors = Math.max(prevN, 0)
+  window.scrollTo({ top: 0 })
+  await sleep(600)
+  return debug
+}
+
+async function withdrawInvites(payload = {}) {
+  const minAgeDays = payload.minAgeDays ?? 30
+  const maxWithdraw = payload.maxWithdraw ?? 15
+  const dryRun = !!payload.dryRun
+  console.log(`[Orion content] withdrawInvites minAge=${minAgeDays}d max=${maxWithdraw} dryRun=${dryRun}`)
+
+  if (!/\/mynetwork\/invitation-manager\/sent/.test(location.pathname)) {
+    return { action: 'withdraw_invites', status: 'error', error: 'not_on_sent_invitations_page', currentUrl: location.href }
+  }
+  const found = await waitForSelector(['main section', 'main div[class*="invitation-card"]', 'main'], 12000)
+  if (!found) return { action: 'withdraw_invites', status: 'error', error: 'container_not_found' }
+  await sleep(1500)
+
+  const loadDebug = await loadAllSentInvites()
+
+  const main = document.querySelector('main') || document.body
+  const tm = (main.innerText || '').match(/personas?\s*\((\d+)\)/i) || (main.innerText || '').match(/people\s*\((\d+)\)/i)
+  const statedTotal = tm ? parseInt(tm[1], 10) : null
+
+  const withdrawn = []
+  let candidatesSeen = 0, oldestSeenDays = null
+
+  if (dryRun) {
+    const scan = collectWithdrawCandidates(minAgeDays)
+    candidatesSeen = scan.candidates.length
+    oldestSeenDays = scan.oldestSeenDays
+    for (const c of scan.candidates.slice(0, 50)) {
+      withdrawn.push({ profileUrl: c.profileUrl, name: c.name, ageDays: c.ageDays, dryRun: true })
+    }
+  } else {
+    // Re-scan por iteración: retirar muta el DOM (SDUI re-renderiza) → refs viejas stale.
+    for (let i = 0; i < maxWithdraw; i++) {
+      const scan = collectWithdrawCandidates(minAgeDays)
+      if (oldestSeenDays === null) oldestSeenDays = scan.oldestSeenDays
+      const fresh = scan.candidates.filter(c => !withdrawn.some(w => w.profileUrl === c.profileUrl))
+      candidatesSeen = Math.max(candidatesSeen, withdrawn.length + fresh.length)
+      if (!fresh.length) break
+      const t = fresh[0]
+      await humanClick(t.btn)
+      await sleep(randInt(900, 1500))
+      // Modal de confirmación ("¿Retirar invitación?") — botón Retirar/Withdraw
+      const modal = document.querySelector('[role="dialog"], .artdeco-modal')
+      const confirmBtn = modal && modal.offsetParent !== null
+        ? Array.from(modal.querySelectorAll('button'))
+            .find(b => b.offsetParent !== null && /retirar|withdraw/i.test((b.textContent || '').trim()))
+        : null
+      if (confirmBtn) {
+        await humanClick(confirmBtn)
+        await sleep(randInt(1200, 2000))
+        withdrawn.push({ profileUrl: t.profileUrl, name: t.name, ageDays: t.ageDays })
+      } else if (!document.body.contains(t.btn)) {
+        // Sin modal y el botón desapareció → retiro directo aplicado
+        withdrawn.push({ profileUrl: t.profileUrl, name: t.name, ageDays: t.ageDays })
+      } else {
+        // Click no produjo efecto — abortar corrida (no martillar)
+        console.warn('[Orion content] withdraw: click sin efecto, abortando corrida')
+        break
+      }
+      await sleep(randInt(2500, 5000))  // pacing humano entre retiros
+    }
+  }
+
+  const out = {
+    action: 'withdraw_invites', status: 'ok',
+    withdrawn, count: withdrawn.length, dryRun,
+    candidatesSeen, oldestSeenDays, statedTotal, loadDebug,
+    scrapedAt: new Date().toISOString(),
+  }
+  // Telemetría de paginación: si no vimos candidatos viejos pero LinkedIn declara
+  // muchos pending, el load quedó corto — capturar controles visibles para diagnóstico.
+  if (withdrawn.length === 0 && statedTotal && loadDebug.finalAnchors < statedTotal) {
+    out.buttonTexts = Array.from(main.querySelectorAll('button, [role="button"]'))
+      .filter(b => b.offsetParent !== null)
+      .map(b => (b.textContent || '').trim())
+      .filter(t => t && t.length < 40)
+      .slice(0, 25)
   }
   return out
 }

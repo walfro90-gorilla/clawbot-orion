@@ -869,6 +869,15 @@ async function handleCommandResult(msg) {
       console.error(`[bridge] ingest check_sent_invites failed:`, err.message)
     }
   }
+  // withdraw_invites ingest (v0.10.18) — leads retirados → dead(invite_withdrawn).
+  // NUNCA re-invitar: LinkedIn bloquea re-invitar al mismo perfil ~3 semanas tras retirar.
+  if (!isError && action === 'withdraw_invites' && result?.status === 'ok') {
+    try {
+      await ingestWithdrawInvites(commandId, result)
+    } catch (err) {
+      console.error(`[bridge] ingest withdraw_invites failed:`, err.message)
+    }
+  }
   // check_connections ingest — accept-detection POSITIVA (presencia en la lista de conexiones)
   if (!isError && action === 'check_connections' && result?.status === 'ok' && Array.isArray(result?.connections)) {
     try {
@@ -959,6 +968,48 @@ async function ingestContactInfo(commandId, result, isError) {
       .filter(Boolean).join('+') || (contactInfo.error ? `error:${contactInfo.error}` : 'sin datos')
     console.log(`[bridge] 📇 contact_info lead ${cmd.related_lead_id.slice(0, 8)} → ${got}`)
   }
+}
+
+// ── Ingest: withdraw_invites → dead(invite_withdrawn) (v0.10.18) ─────────────
+// Los retirados se marcan dead para que NUNCA se re-inviten (bloqueo ~3 semanas de
+// LinkedIn tras retirar). Match por URL normalizada (misma lógica que sent_invites).
+async function ingestWithdrawInvites(commandId, result) {
+  const withdrawn = Array.isArray(result?.withdrawn) ? result.withdrawn : []
+  console.log(`[bridge] withdraw_invites: ${withdrawn.length} retiradas (candidatos=${result?.candidatesSeen ?? '?'}, anchors=${result?.loadDebug?.finalAnchors ?? '?'}/${result?.statedTotal ?? '?'}, oldest=${result?.oldestSeenDays ?? '?'}d, dryRun=${!!result?.dryRun})`)
+  if (!withdrawn.length || result?.dryRun) return
+
+  const { data: cmd } = await supabase
+    .from('extension_commands').select('account_id').eq('id', commandId).single()
+  if (!cmd?.account_id) return
+
+  const { data: invitedLeads } = await supabase
+    .from('leads')
+    .select('id, full_name, linkedin_url, campaigns!inner(linkedin_account_id)')
+    .eq('campaigns.linkedin_account_id', cmd.account_id)
+    .eq('status', 'invite_sent')
+  if (!invitedLeads?.length) return
+
+  const normalize = (url) => {
+    let u = (url || '').toLowerCase().split('?')[0]
+    try { u = decodeURIComponent(u) } catch {}
+    return u
+      .replace(/^https?:\/\/(www\.)?linkedin\.com/, '')
+      .replace(/\/$/, '')
+      .replace(/\/(es|en|pt|fr|de|it|nl|es-es|en-us|pt-br)$/, '')
+      .replace(/\/$/, '')
+  }
+  const wUrls = new Set(withdrawn.map(w => normalize(w.profileUrl)))
+  let marked = 0
+  for (const lead of invitedLeads) {
+    if (!wUrls.has(normalize(lead.linkedin_url))) continue
+    const { error } = await supabase.from('leads')
+      .update({ status: 'dead', dead_reason: 'invite_withdrawn' }).eq('id', lead.id)
+    if (!error) {
+      marked++
+      console.log(`[bridge] 🧹 invitación retirada: ${lead.full_name} → dead(invite_withdrawn)`)
+    }
+  }
+  console.log(`[bridge] withdraw_invites ingest: ${marked} leads marcados dead(invite_withdrawn)`)
 }
 
 // ── Ingest: check_sent_invites → marca accepts (leads que dejaron de estar pending)
