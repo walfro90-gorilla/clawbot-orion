@@ -6063,6 +6063,9 @@ async function checkSentInvites(payload = {}) {
     const moreRe = /mostrar m[áa]s|ver m[áa]s|cargar m[áa]s|m[áa]s resultados|show more|load more|see more/i
     let prevN = -1, stableRounds = 0
     for (let i = 0; i < 50 && stableRounds < 3; i++) {
+      // v0.10.19: el scroller real de /sent/ es <main> (body overflow:hidden) —
+      // window.scrollTo solo NUNCA cargó más de ~10. Fix probado en vivo: 271/271.
+      mainEl.scrollTop = mainEl.scrollHeight
       window.scrollTo(0, document.body.scrollHeight)
       await sleep(randInt(450, 800))
       // Buscar botón "mostrar más" visible y clickearlo
@@ -6169,6 +6172,8 @@ async function checkSentInvites(payload = {}) {
 
 function parseInviteAgeDays(text) {
   const t = (text || '').toLowerCase()
+  // horas/minutos = hoy (formato real observado: "Enviado hace 2 horas")
+  if (/hace\s+\d+\s*(h\b|hora|min)|(\d+\s*(hour|minute)s?|an? hour)\s+ago/.test(t)) return 0
   let m = t.match(/hace\s+(\d+)\s+(d[íi]a|semana|mes|año)/)
   if (!m) m = t.match(/(\d+)\s+(day|week|month|year)s?\s+ago/)
   if (m) {
@@ -6184,6 +6189,39 @@ function parseInviteAgeDays(text) {
   if (/hace\s+un\s+año|a year ago/.test(t)) return 365
   if (/hace\s+un\s+d[íi]a|a day ago|ayer|yesterday/.test(t)) return 1
   return null
+}
+
+// El "Retirar" de la card es un <a> SDUI que IGNORA el .click() simple (probado en
+// vivo 13-ago: ni el.click() ni click sintético solo abrían el modal; el click real
+// con secuencia pointer completa SÍ). Dispatch pointer+mouse+click en orden.
+async function withdrawClick(el) {
+  if (!el) return false
+  el.scrollIntoView({ behavior: 'instant', block: 'center' })
+  await sleep(randInt(200, 450))
+  const r = el.getBoundingClientRect()
+  const x = r.left + r.width / 2, y = r.top + r.height / 2
+  const opts = { bubbles: true, cancelable: true, composed: true, view: window, clientX: x, clientY: y, button: 0, pointerId: 1, isPrimary: true }
+  for (const [Ctor, type] of [
+    [PointerEvent, 'pointerover'], [MouseEvent, 'mouseover'], [MouseEvent, 'mousemove'],
+    [PointerEvent, 'pointerdown'], [MouseEvent, 'mousedown'],
+    [PointerEvent, 'pointerup'], [MouseEvent, 'mouseup'],
+  ]) {
+    try { el.dispatchEvent(new Ctor(type, opts)) } catch {}
+    await sleep(randInt(30, 80))
+  }
+  try { el.focus() } catch {}
+  el.click()
+  return true
+}
+
+// Busca el control (botón O anchor) de retirar dentro de un contenedor.
+// Real (13-ago): <a aria-label="Retirar la invitación enviada a X">Retirar</a>;
+// el confirm del modal es <button aria-label="Retirar la invitación...">Retirar</button>.
+function findWithdrawControl(root) {
+  return Array.from(root.querySelectorAll('button, [role="button"], a'))
+    .find(e => e.offsetParent !== null &&
+      /retirar|withdraw/i.test(((e.textContent || '').trim() + ' ' + (e.getAttribute('aria-label') || ''))) &&
+      !/cancelar|cancel/i.test((e.textContent || '').trim()))
 }
 
 // Card = ancestro del anchor /in/ que sigue conteniendo UN solo perfil.
@@ -6207,8 +6245,7 @@ function collectWithdrawCandidates(minAgeDays) {
       node = node.parentElement
     }
     if (!card) continue
-    const btn = Array.from(card.querySelectorAll('button, [role="button"]'))
-      .find(b => b.offsetParent !== null && /retirar|withdraw/i.test((b.textContent || '').trim()))
+    const btn = findWithdrawControl(card)
     const age = parseInviteAgeDays(card.innerText)
     if (age !== null && (oldestSeenDays === null || age > oldestSeenDays)) oldestSeenDays = age
     if (!btn || age === null || age < minAgeDays) continue
@@ -6227,15 +6264,19 @@ async function loadAllSentInvites() {
   const mainEl = document.querySelector('main') || document.body
   const moreRe = /mostrar m[áa]s|ver m[áa]s|cargar m[áa]s|m[áa]s resultados|show more|load more|see more/i
   const debug = { loadMoreClicked: 0, iterations: 0, innerScroller: false, finalAnchors: 0 }
+  // GROUND TRUTH (13-ago, en vivo): el scroller de /sent/ es <main> MISMO
+  // (overflowY:scroll, body overflow:hidden — window.scrollTo NO hace nada).
+  // main.scrollTop=main.scrollHeight en loop cargó las 271/271 en ~30 rondas.
   const scroller = Array.from(mainEl.querySelectorAll('div'))
     .find(d => d.scrollHeight > d.clientHeight + 200 && d.clientHeight > 300) ?? null
   if (scroller) debug.innerScroller = true
   let prevN = -1, stable = 0
-  for (let i = 0; i < 60 && stable < 3; i++) {
+  for (let i = 0; i < 90 && stable < 3; i++) {
     debug.iterations = i + 1
+    mainEl.scrollTop = mainEl.scrollHeight
     window.scrollTo(0, document.body.scrollHeight)
     if (scroller) scroller.scrollTop = scroller.scrollHeight
-    await sleep(randInt(500, 900))
+    await sleep(randInt(700, 1000))
     const moreBtn = Array.from(mainEl.querySelectorAll('button, [role="button"]'))
       .find(b => b.offsetParent !== null && moreRe.test((b.textContent || '').trim()))
     if (moreBtn) {
@@ -6248,6 +6289,7 @@ async function loadAllSentInvites() {
     else { stable = 0; prevN = n }
   }
   debug.finalAnchors = Math.max(prevN, 0)
+  mainEl.scrollTop = 0
   window.scrollTo({ top: 0 })
   await sleep(600)
   return debug
@@ -6291,20 +6333,24 @@ async function withdrawInvites(payload = {}) {
       candidatesSeen = Math.max(candidatesSeen, withdrawn.length + fresh.length)
       if (!fresh.length) break
       const t = fresh[0]
-      await humanClick(t.btn)
-      await sleep(randInt(900, 1500))
-      // Modal de confirmación ("¿Retirar invitación?") — botón Retirar/Withdraw
+      await withdrawClick(t.btn)
+      await sleep(randInt(1100, 1700))
+      // Modal "Retirar invitación" (confirmado en vivo 13-ago: warning de 3 semanas +
+      // Cancelar/Retirar; el confirm es <button aria-label="Retirar la invitación...">)
       const modal = document.querySelector('[role="dialog"], .artdeco-modal')
-      const confirmBtn = modal && modal.offsetParent !== null
-        ? Array.from(modal.querySelectorAll('button'))
-            .find(b => b.offsetParent !== null && /retirar|withdraw/i.test((b.textContent || '').trim()))
-        : null
+      const confirmBtn = (modal && modal.offsetParent !== null) ? findWithdrawControl(modal) : null
       if (confirmBtn) {
-        await humanClick(confirmBtn)
-        await sleep(randInt(1200, 2000))
+        await withdrawClick(confirmBtn)
+        await sleep(randInt(1500, 2200))
+        // verificación: el modal debe cerrar tras confirmar
+        const still = document.querySelector('[role="dialog"], .artdeco-modal')
+        if (still && still.offsetParent !== null) {
+          console.warn('[Orion content] withdraw: modal no cerró tras confirmar, abortando corrida')
+          break
+        }
         withdrawn.push({ profileUrl: t.profileUrl, name: t.name, ageDays: t.ageDays })
       } else if (!document.body.contains(t.btn)) {
-        // Sin modal y el botón desapareció → retiro directo aplicado
+        // Sin modal y el control desapareció → retiro directo aplicado
         withdrawn.push({ profileUrl: t.profileUrl, name: t.name, ageDays: t.ageDays })
       } else {
         // Click no produjo efecto — abortar corrida (no martillar)
