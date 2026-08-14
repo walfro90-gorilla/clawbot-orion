@@ -6436,17 +6436,40 @@ async function withdrawInviteFromProfile(payload = {}) {
   await waitForSelector(topCardSels, 12000)
   await sleep(randInt(2000, 3000))  // hidratación
 
-  const topCard = findTopCard() ?? document
-  const pendingBtn = Array.from(topCard.querySelectorAll('button, [role="menuitem"]')).find(b => {
+  const exactPending = (root) => Array.from(root.querySelectorAll('button, [role="menuitem"]')).find(b => {
+    if (b.offsetParent === null) return false
     const t = (b.textContent ?? '').trim().toLowerCase()
     return t === 'pendiente' || t === 'pending'
   })
+  const topCard = findTopCard()
+  let pendingBtn = (topCard && exactPending(topCard)) || exactPending(document)
+
+  // Fallback (0.10.24): en algunos perfiles "Pendiente" vive dentro del dropdown "Más"
+  if (!pendingBtn) {
+    const moreBtn = findProfileMoreButton()
+    if (moreBtn) {
+      await humanClick(moreBtn)
+      await sleep(randInt(1000, 1800))
+      pendingBtn = Array.from(document.querySelectorAll('[role="menuitem"], button')).find(b => {
+        if (b.offsetParent === null) return false
+        const t = (b.textContent ?? '').trim().toLowerCase()
+        return t === 'pendiente' || t === 'pending' || /retirar invitaci|withdraw invitation/i.test(t)
+      })
+    }
+  }
+
   if (!pendingBtn) {
     // Invite ya no está pendiente: aceptada (check_sent aún no la vio), expirada o
     // retirada a mano. El bridge pone cooldown para no reintentar en días.
+    // Debug: botones visibles para diagnosticar variantes de UI.
+    const visibleButtons = Array.from((topCard ?? document).querySelectorAll('button, [role="button"], [role="menuitem"]'))
+      .filter(b => b.offsetParent !== null)
+      .map(b => (b.textContent || '').trim())
+      .filter(t => t && t.length < 35)
+      .slice(0, 12)
     return {
       action: 'withdraw_invite_profile', status: 'error', error: 'pending_button_not_found',
-      currentUrl: location.href,
+      currentUrl: location.href, visibleButtons,
     }
   }
   if (dryRun) {
