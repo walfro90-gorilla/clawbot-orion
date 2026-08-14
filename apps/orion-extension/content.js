@@ -2804,17 +2804,27 @@ function listVisibleButtons() {
 
 async function waitForSendConfirmation(timeoutMs = 8000) {
   const start = Date.now()
+  // v0.10.26: devuelve CÓMO se confirmó (telemetría, no cambia decisiones).
+  // 'toast' = LinkedIn confirmó el envío explícitamente. 'modal_closed' = solo
+  // desapareció el modal, que también ocurre si LinkedIn DESCARTA el envío en
+  // silencio (sospecha abierta en Josh: 'sent' reportado, invite ausente de /sent/).
   while (Date.now() - start < timeoutMs) {
-    // Si modal cerró (no hay role=dialog visible) → asumimos sent
-    const modal = document.querySelector('[role="dialog"], .artdeco-modal')
-    if (!modal || modal.offsetParent === null) return true
-    // Si toast con "enviada" / "sent" aparece
     const toast = Array.from(document.querySelectorAll('[role="alert"], [class*="toast"]'))
       .find(t => /enviad[ao]|sent|success/i.test(t.textContent ?? ''))
-    if (toast) return true
+    if (toast) return { ok: true, by: 'toast', toastText: (toast.textContent || '').trim().slice(0, 120) }
+    const modal = document.querySelector('[role="dialog"], .artdeco-modal')
+    if (!modal || modal.offsetParent === null) {
+      // Grace: el toast puede tardar un instante más que el cierre del modal.
+      await sleep(1200)
+      const late = Array.from(document.querySelectorAll('[role="alert"], [class*="toast"]'))
+        .find(t => /enviad[ao]|sent|success/i.test(t.textContent ?? ''))
+      return late
+        ? { ok: true, by: 'toast', toastText: (late.textContent || '').trim().slice(0, 120) }
+        : { ok: true, by: 'modal_closed' }
+    }
     await sleep(400)
   }
-  return false
+  return { ok: false, by: 'timeout' }
 }
 
 // v0.10.17 — LinkedIn rechaza el send SIN error visible cuando la cuenta alcanzó el
@@ -2831,12 +2841,19 @@ function detectInviteLimitModal() {
 // Post-click verify compartido por las 3 rutas de send_invite.
 // error 'weekly_invite_limit' → el bridge pausa SOLO invites 24h (account-level).
 async function verifyInviteSent(base) {
-  const confirmed = await waitForSendConfirmation(8000)
-  if (confirmed) return { ...base, status: 'sent', sentAt: new Date().toISOString() }
+  const conf = await waitForSendConfirmation(8000)
+  if (conf.ok) {
+    // confirmedBy es TELEMETRÍA (el status no cambia): 'modal_closed' sistemático en
+    // una cuenta + invites ausentes de /sent/ = descarte silencioso de LinkedIn.
+    return {
+      ...base, status: 'sent', sentAt: new Date().toISOString(),
+      confirmedBy: conf.by, ...(conf.toastText ? { toastText: conf.toastText } : {}),
+    }
+  }
   if (detectInviteLimitModal()) {
     return { ...base, status: 'error', error: 'weekly_invite_limit', modalDebug: dumpModalContent() }
   }
-  return { ...base, status: 'sent_unconfirmed', sentAt: new Date().toISOString(), modalDebug: dumpModalContent() }
+  return { ...base, status: 'sent_unconfirmed', sentAt: new Date().toISOString(), confirmedBy: conf.by, modalDebug: dumpModalContent() }
 }
 
 // ── humanClick + humanType ───────────────────────────────────────────────────
