@@ -6436,10 +6436,15 @@ async function withdrawInviteFromProfile(payload = {}) {
   await waitForSelector(topCardSels, 12000)
   await sleep(randInt(2000, 3000))  // hidratación
 
-  const exactPending = (root) => Array.from(root.querySelectorAll('button, [role="menuitem"]')).find(b => {
+  // (0.10.25, en vivo) El botón Pendiente del perfil es un <A> con
+  // aria-label "Pendiente. Haz clic para retirar la invitación enviada a X"
+  // — NO un <button>. Texto exacto 'pendiente' evita falsos del sidebar
+  // ("Más perfiles para ti" dice "Conectar", nunca "Pendiente").
+  const exactPending = (root) => Array.from(root.querySelectorAll('button, a, [role="button"], [role="menuitem"]')).find(b => {
     if (b.offsetParent === null) return false
     const t = (b.textContent ?? '').trim().toLowerCase()
-    return t === 'pendiente' || t === 'pending'
+    const aria = (b.getAttribute('aria-label') ?? '').toLowerCase()
+    return t === 'pendiente' || t === 'pending' || /^pendiente\.|^pending\./.test(aria)
   })
   const topCard = findTopCard()
   let pendingBtn = (topCard && exactPending(topCard)) || exactPending(document)
@@ -6476,7 +6481,9 @@ async function withdrawInviteFromProfile(payload = {}) {
     return { action: 'withdraw_invite_profile', status: 'dry_run_ok', pendingFound: true }
   }
 
-  await humanClick(pendingBtn)
+  // withdrawClick (secuencia pointer completa + Enter): el Pendiente del perfil es
+  // <a> del stack nuevo — máxima probabilidad de activación sintética.
+  await withdrawClick(pendingBtn)
   let modal = null
   for (let w = 0; w < 10; w++) {
     await sleep(400)
@@ -6491,7 +6498,7 @@ async function withdrawInviteFromProfile(payload = {}) {
       modalDebug: modal ? dumpModalContent() : null,
     }
   }
-  await humanClick(confirmBtn)
+  await withdrawClick(confirmBtn)
   await sleep(randInt(1500, 2500))
   const still = document.querySelector('[role="dialog"], .artdeco-modal')
   if (still && still.offsetParent !== null) {
