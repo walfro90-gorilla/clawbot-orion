@@ -686,14 +686,17 @@ async function executeCommand(commandId, action, payload) {
     // 120s aun throttled. Se mantiene OFF para invite/FU/inbox (frecuentes, validados sin foco,
     // y son los que más molestan robando el foco durante el typing). Search es infrecuente
     // (~pocos/hora) → el robo de foco es mínimo y sí necesita la pestaña activa para renderizar.
-    if (action === 'search' || action === 'search_posts') {
+    // (13-ago) + withdraw_invites: el lazy-load de /sent/ usa IntersectionObserver
+    // que Chrome NO dispara en tab de fondo — probado en vivo: foreground carga
+    // 271/271, background se queda en 10. Es 1×/día por cuenta → robo de foco mínimo.
+    if (action === 'search' || action === 'search_posts' || action === 'withdraw_invites') {
       try {
         await chrome.tabs.update(tab.id, { active: true })
         if (tab.windowId != null) {
           await chrome.windows.update(tab.windowId, { focused: true })
         }
       } catch (e) {
-        console.warn(`[Orion] anti-throttle focus (search) falló (sigo igual): ${e?.message}`)
+        console.warn(`[Orion] anti-throttle focus (${action}) falló (sigo igual): ${e?.message}`)
       }
     }
 
