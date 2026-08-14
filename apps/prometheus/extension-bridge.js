@@ -878,6 +878,32 @@ async function handleCommandResult(msg) {
       console.error(`[bridge] ingest withdraw_invites failed:`, err.message)
     }
   }
+  // withdraw_invite_profile ingest (v0.10.23) — retiro vía perfil, 1 lead por comando.
+  // withdrawn → dead(invite_withdrawn). Error (invite ya no pendiente / modal raro) →
+  // cooldown_until +7d para que el scheduler no lo re-seleccione en loop.
+  if (action === 'withdraw_invite_profile') {
+    try {
+      const { data: cmdRow } = await supabase
+        .from('extension_commands').select('related_lead_id').eq('id', commandId).single()
+      const leadId = cmdRow?.related_lead_id
+      if (leadId) {
+        if (!isError && result?.status === 'withdrawn') {
+          const { error: upErr } = await supabase.from('leads')
+            .update({ status: 'dead', dead_reason: 'invite_withdrawn' }).eq('id', leadId)
+          if (upErr) console.error(`[bridge] withdraw_profile dead update failed: ${upErr.message}`)
+          else console.log(`[bridge] 🧹 invitación retirada vía perfil: lead ${leadId.slice(0, 8)} → dead(invite_withdrawn)`)
+        } else if (isError && ['pending_button_not_found', 'withdraw_modal_not_shown', 'withdraw_confirm_not_found', 'withdraw_modal_not_closed'].includes(result?.error)) {
+          const cd = new Date(Date.now() + 7 * 86_400_000).toISOString()
+          const { error: upErr } = await supabase.from('leads')
+            .update({ cooldown_until: cd }).eq('id', leadId)
+          if (upErr) console.error(`[bridge] withdraw_profile cooldown update failed: ${upErr.message}`)
+          else console.log(`[bridge] withdraw_profile ${result.error}: lead ${leadId.slice(0, 8)} cooldown 7d`)
+        }
+      }
+    } catch (err) {
+      console.error(`[bridge] ingest withdraw_invite_profile failed:`, err.message)
+    }
+  }
   // check_connections ingest — accept-detection POSITIVA (presencia en la lista de conexiones)
   if (!isError && action === 'check_connections' && result?.status === 'ok' && Array.isArray(result?.connections)) {
     try {

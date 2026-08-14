@@ -131,6 +131,7 @@ function actionShort(a) {
     check_inbox: 'leyendo inbox', check_sent_invites: 'verificando',
     check_connections: 'verificando conexiones',
     withdraw_invites: 'retirando invitaciones',
+    withdraw_invite_profile: 'retirando invitación',
     search: 'buscando leads',
   })[a] ?? 'trabajando'
 }
@@ -1439,6 +1440,8 @@ async function executeAction(action, payload) {
       return await checkSentInvites(payload)
     case 'withdraw_invites':
       return await withdrawInvites(payload)
+    case 'withdraw_invite_profile':
+      return await withdrawInviteFromProfile(payload)
     case 'check_connections':
       return await checkConnections(payload)
     case 'get_contact_info':
@@ -6410,4 +6413,66 @@ async function withdrawInvites(payload = {}) {
       .slice(0, 25)
   }
   return out
+}
+
+// ── 3.7 — withdraw_invite_profile — retiro vía PERFIL (v0.10.23) ─────────────
+// La lista /sent/ es SDUI nuevo: el anchor "Retirar" checa isTrusted → ningún click
+// sintético lo activa (probado 0.10.19-0.10.22: click_sin_efecto con 200 candidatos).
+// El PERFIL sigue en el stack clásico donde humanClick SÍ funciona (send_invite/FU
+// operan ahí a diario). Flujo: /in/<lead> → botón "Pendiente" (top card) → modal
+// "¿Retirar invitación?" → Retirar. Candidatos = leads DB invite_sent >30d (el
+// scheduler los conoce; no hay que scrapear la lista).
+async function withdrawInviteFromProfile(payload = {}) {
+  const { dryRun } = payload
+  if (/\/checkpoint|\/challenge|\/authwall/.test(location.href)) {
+    return { action: 'withdraw_invite_profile', status: 'error', error: 'captcha_or_checkpoint' }
+  }
+  const topCardSels = [
+    'main section.artdeco-card',
+    'main .pv-top-card',
+    'main [class*="ph5"][class*="pb5"]',
+    'main [class*="top-card"]',
+  ]
+  await waitForSelector(topCardSels, 12000)
+  await sleep(randInt(2000, 3000))  // hidratación
+
+  const topCard = findTopCard() ?? document
+  const pendingBtn = Array.from(topCard.querySelectorAll('button, [role="menuitem"]')).find(b => {
+    const t = (b.textContent ?? '').trim().toLowerCase()
+    return t === 'pendiente' || t === 'pending'
+  })
+  if (!pendingBtn) {
+    // Invite ya no está pendiente: aceptada (check_sent aún no la vio), expirada o
+    // retirada a mano. El bridge pone cooldown para no reintentar en días.
+    return {
+      action: 'withdraw_invite_profile', status: 'error', error: 'pending_button_not_found',
+      currentUrl: location.href,
+    }
+  }
+  if (dryRun) {
+    return { action: 'withdraw_invite_profile', status: 'dry_run_ok', pendingFound: true }
+  }
+
+  await humanClick(pendingBtn)
+  let modal = null
+  for (let w = 0; w < 10; w++) {
+    await sleep(400)
+    const m = document.querySelector('[role="dialog"], .artdeco-modal')
+    if (m && m.offsetParent !== null) { modal = m; break }
+  }
+  const confirmBtn = modal ? findWithdrawControl(modal) : null
+  if (!confirmBtn) {
+    return {
+      action: 'withdraw_invite_profile', status: 'error',
+      error: modal ? 'withdraw_confirm_not_found' : 'withdraw_modal_not_shown',
+      modalDebug: modal ? dumpModalContent() : null,
+    }
+  }
+  await humanClick(confirmBtn)
+  await sleep(randInt(1500, 2500))
+  const still = document.querySelector('[role="dialog"], .artdeco-modal')
+  if (still && still.offsetParent !== null) {
+    return { action: 'withdraw_invite_profile', status: 'error', error: 'withdraw_modal_not_closed', modalDebug: dumpModalContent() }
+  }
+  return { action: 'withdraw_invite_profile', status: 'withdrawn', withdrawnAt: new Date().toISOString() }
 }

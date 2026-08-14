@@ -18,6 +18,7 @@ const ACTION_MIN_VERSION = {
   reload_extension:  '0.10.4',
   get_contact_info:  '0.10.16',
   withdraw_invites:  '0.10.18',
+  withdraw_invite_profile: '0.10.23',
 }
 
 // v0.10.0: la búsqueda con facet currentCompany requiere la misma versión. Una ext
@@ -30,9 +31,11 @@ export const COMPANY_SCOPED_MIN_VERSION = '0.10.0'
 // silencio (sin generar la alerta extension_outdated en cada tick).
 export const CONTACT_INFO_MIN_VERSION = '0.10.16'
 
-// v0.10.18: retiro de invitaciones viejas (higiene anti-límite-semanal). El scheduler
-// pre-checa para skippear en silencio en extensiones viejas.
-export const WITHDRAW_INVITES_MIN_VERSION = '0.10.18'
+// v0.10.23: retiro de invitaciones viejas VÍA PERFIL (higiene anti-límite-semanal).
+// La ruta por lista /sent/ (0.10.18-22) quedó descartada: el SDUI nuevo checa isTrusted
+// en el anchor Retirar — ningún click sintético lo activa. El scheduler pre-checa esta
+// versión para skippear en silencio en extensiones viejas.
+export const WITHDRAW_INVITES_MIN_VERSION = '0.10.23'
 
 // Compara semver simple (a.b.c). Versión desconocida (null) = demasiado vieja → fail-closed.
 export function meetsVersion(have, min) {

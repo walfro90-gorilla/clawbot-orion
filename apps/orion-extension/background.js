@@ -652,6 +652,9 @@ async function executeCommand(commandId, action, payload) {
       tab = await navigateTabAndWait('https://www.linkedin.com/mynetwork/invitation-manager/sent/', 15000)
     } else if (action === 'check_connections') {
       tab = await navigateTabAndWait('https://www.linkedin.com/mynetwork/invite-connect/connections/', 15000)
+    } else if (action === 'withdraw_invite_profile' && payload?.profileUrl) {
+      // v0.10.23: retiro vía perfil — navegar directo al /in/ del lead
+      tab = await navigateTabAndWait(payload.profileUrl, 15000)
     } else if (action === 'get_contact_info' && payload?.profileUrl) {
       // v0.10.13: overlay de contact-info del perfil (1er grado) — email/tel para
       // el digest diario. Carga ligera: NO va en el branch del anti-throttle focus.

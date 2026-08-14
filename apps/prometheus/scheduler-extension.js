@@ -1729,14 +1729,16 @@ async function tryContactInfoScrape(account) {
   }
 }
 
-// ── Retiro de invitaciones viejas (v0.10.18) ─────────────────────────────────
+// ── Retiro de invitaciones viejas VÍA PERFIL (v0.10.23) ──────────────────────
 // Higiene anti-límite-semanal: un backlog grande de pending (Josh: 492 el 13-ago-2026)
-// endurece los límites de invitación de LinkedIn. 1 corrida/día por cuenta (gap 22h),
-// cap WITHDRAW_MAX_PER_RUN por corrida, última prioridad del loop per-account.
+// endurece los límites de invitación de LinkedIn. Candidatos = leads DB en invite_sent
+// con sent_at >30d (no se scrapea la lista /sent/ — su anchor Retirar checa isTrusted).
+// 1 lead por tick, cap 15/día por cuenta (ventana 24h), última prioridad del loop.
 // El bridge marca los retirados dead(invite_withdrawn) — LinkedIn bloquea re-invitar
-// al mismo perfil ~3 semanas tras retirar, NUNCA regresarlos a scraped.
+// al mismo perfil ~3 semanas tras retirar, NUNCA regresarlos a scraped. Errores
+// (pending_button_not_found etc.) ponen cooldown_until +7d para no reintentar en loop.
 const WITHDRAW_MIN_AGE_DAYS = 30
-const WITHDRAW_MAX_PER_RUN = 15
+const WITHDRAW_DAILY_CAP = 15
 
 async function tryWithdrawOldInvites(account) {
   if (DRY_RUN) return { skipped: true, reason: 'dry_run' }
@@ -1744,21 +1746,40 @@ async function tryWithdrawOldInvites(account) {
     return { skipped: true, reason: 'ext_version' }  // silencioso, igual que contact-info
   }
   try {
-    // 1 corrida/día: última withdraw_invites (cualquier status) hace <22h → skip
-    const { data: last } = await supabase.from('extension_commands')
-      .select('created_at')
-      .eq('account_id', account.id).eq('action', 'withdraw_invites')
-      .order('created_at', { ascending: false }).limit(1).maybeSingle()
-    if (last && Date.now() - new Date(last.created_at).getTime() < 22 * 3_600_000) {
-      return { skipped: true, reason: 'daily_gap' }
-    }
-    const cmdId = await dispatchCommand(account.id, 'withdraw_invites',
-      { minAgeDays: WITHDRAW_MIN_AGE_DAYS, maxWithdraw: WITHDRAW_MAX_PER_RUN },
-      { expiresInMinutes: 30 })
+    // cap diario — ventana rodante 24h (mismo patrón que contact-info)
+    const { count: today } = await supabase.from('extension_commands')
+      .select('id', { count: 'exact', head: true })
+      .eq('account_id', account.id).eq('action', 'withdraw_invite_profile')
+      .gt('created_at', new Date(Date.now() - 86_400_000).toISOString())
+    if ((today ?? 0) >= WITHDRAW_DAILY_CAP) return { skipped: true, reason: 'daily_cap' }
+
+    // in-flight guard
+    const { count: inFlight } = await supabase.from('extension_commands')
+      .select('id', { count: 'exact', head: true })
+      .eq('account_id', account.id).eq('action', 'withdraw_invite_profile')
+      .in('status', ['pending', 'dispatched']).gt('expires_at', new Date().toISOString())
+    if (inFlight > 0) return { skipped: true, reason: 'in_flight' }
+
+    // lead elegible: invite viejo, sin cooldown (los errores de retiro ponen +7d)
+    const cutoff = new Date(Date.now() - WITHDRAW_MIN_AGE_DAYS * 86_400_000).toISOString()
+    const { data: lead } = await supabase.from('leads')
+      .select('id, full_name, linkedin_url, sent_at, campaigns!inner(linkedin_account_id)')
+      .eq('campaigns.linkedin_account_id', account.id)
+      .eq('status', 'invite_sent')
+      .lt('sent_at', cutoff)
+      .not('linkedin_url', 'is', null)
+      .or(`cooldown_until.is.null,cooldown_until.lt.${new Date().toISOString()}`)
+      .order('sent_at', { ascending: true })
+      .limit(1).maybeSingle()
+    if (!lead) return { skipped: true, reason: 'no_candidates' }
+
+    const cmdId = await dispatchCommand(account.id, 'withdraw_invite_profile',
+      { profileUrl: lead.linkedin_url, leadId: lead.id },
+      { relatedLeadId: lead.id, expiresInMinutes: 10 })
     if (!cmdId) return { skipped: true, reason: 'dispatch_failed' }
-    return { dispatched: true }
+    return { dispatched: true, leadName: lead.full_name }
   } catch (e) {
-    console.warn(`[SCH-EXT]   withdraw_invites falló para ${account.label}: ${e.message}`)
+    console.warn(`[SCH-EXT]   withdraw_invite_profile falló para ${account.label}: ${e.message}`)
     return { skipped: true, reason: e.message }
   }
 }
@@ -2744,11 +2765,11 @@ async function tick() {
       continue
     }
 
-    // Retiro de invitaciones viejas (v0.10.18): higiene anti-límite-semanal, última
-    // prioridad del loop, 1 corrida/día por cuenta.
+    // Retiro de invitaciones viejas (v0.10.23, vía perfil): higiene anti-límite-semanal,
+    // última prioridad del loop, 1 lead/tick, cap 15/día por cuenta.
     const wRes = await tryWithdrawOldInvites(account)
     if (wRes.dispatched) {
-      console.log(`[SCH-EXT]   🧹 withdraw_invites dispatched for ${account.label} (≥${WITHDRAW_MIN_AGE_DAYS}d, cap ${WITHDRAW_MAX_PER_RUN})`)
+      console.log(`[SCH-EXT]   🧹 withdraw_invite_profile dispatched for ${account.label} (${wRes.leadName})`)
     }
   }
 
