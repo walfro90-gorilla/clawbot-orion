@@ -6200,17 +6200,25 @@ async function withdrawClick(el) {
   await sleep(randInt(200, 450))
   const r = el.getBoundingClientRect()
   const x = r.left + r.width / 2, y = r.top + r.height / 2
-  const opts = { bubbles: true, cancelable: true, composed: true, view: window, clientX: x, clientY: y, button: 0, pointerId: 1, isPrimary: true }
+  // pointerType:'mouse' es CRÍTICO — PointerEvent default pointerType='' y el SDUI filtra
+  const opts = { bubbles: true, cancelable: true, composed: true, view: window, clientX: x, clientY: y, button: 0, pointerId: 1, isPrimary: true, pointerType: 'mouse', detail: 1 }
+  // dispatch sobre el nodo MÁS PROFUNDO en el punto (la delegación SDUI espera el target real)
+  const target = document.elementFromPoint(x, y) ?? el
   for (const [Ctor, type] of [
     [PointerEvent, 'pointerover'], [MouseEvent, 'mouseover'], [MouseEvent, 'mousemove'],
     [PointerEvent, 'pointerdown'], [MouseEvent, 'mousedown'],
-    [PointerEvent, 'pointerup'], [MouseEvent, 'mouseup'],
+    [PointerEvent, 'pointerup'], [MouseEvent, 'mouseup'], [MouseEvent, 'click'],
   ]) {
-    try { el.dispatchEvent(new Ctor(type, opts)) } catch {}
+    try { target.dispatchEvent(new Ctor(type, opts)) } catch {}
     await sleep(randInt(30, 80))
   }
   try { el.focus() } catch {}
   el.click()
+  // Fallback teclado: activación por Enter sobre el elemento enfocado (handlers keydown SDUI)
+  await sleep(400)
+  for (const type of ['keydown', 'keyup']) {
+    try { el.dispatchEvent(new KeyboardEvent(type, { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true })) } catch {}
+  }
   return true
 }
 
@@ -6316,6 +6324,7 @@ async function withdrawInvites(payload = {}) {
 
   const withdrawn = []
   let candidatesSeen = 0, oldestSeenDays = null
+  let abortReason = null, modalDebugOnAbort = null
 
   if (dryRun) {
     const scan = collectWithdrawCandidates(minAgeDays)
@@ -6334,17 +6343,24 @@ async function withdrawInvites(payload = {}) {
       if (!fresh.length) break
       const t = fresh[0]
       await withdrawClick(t.btn)
-      await sleep(randInt(1100, 1700))
+      // el modal puede tardar — poll hasta 4s
+      let modal = null
+      for (let w = 0; w < 10; w++) {
+        await sleep(400)
+        const m = document.querySelector('[role="dialog"], .artdeco-modal')
+        if (m && m.offsetParent !== null) { modal = m; break }
+      }
       // Modal "Retirar invitación" (confirmado en vivo 13-ago: warning de 3 semanas +
       // Cancelar/Retirar; el confirm es <button aria-label="Retirar la invitación...">)
-      const modal = document.querySelector('[role="dialog"], .artdeco-modal')
-      const confirmBtn = (modal && modal.offsetParent !== null) ? findWithdrawControl(modal) : null
+      const confirmBtn = modal ? findWithdrawControl(modal) : null
       if (confirmBtn) {
         await withdrawClick(confirmBtn)
         await sleep(randInt(1500, 2200))
         // verificación: el modal debe cerrar tras confirmar
         const still = document.querySelector('[role="dialog"], .artdeco-modal')
         if (still && still.offsetParent !== null) {
+          abortReason = 'modal_no_cerro_tras_confirmar'
+          modalDebugOnAbort = dumpModalContent()
           console.warn('[Orion content] withdraw: modal no cerró tras confirmar, abortando corrida')
           break
         }
@@ -6354,7 +6370,9 @@ async function withdrawInvites(payload = {}) {
         withdrawn.push({ profileUrl: t.profileUrl, name: t.name, ageDays: t.ageDays })
       } else {
         // Click no produjo efecto — abortar corrida (no martillar)
-        console.warn('[Orion content] withdraw: click sin efecto, abortando corrida')
+        abortReason = modal ? 'modal_sin_boton_confirmar' : 'click_sin_efecto'
+        modalDebugOnAbort = modal ? dumpModalContent() : null
+        console.warn(`[Orion content] withdraw: ${abortReason}, abortando corrida`)
         break
       }
       await sleep(randInt(2500, 5000))  // pacing humano entre retiros
@@ -6366,6 +6384,10 @@ async function withdrawInvites(payload = {}) {
     withdrawn, count: withdrawn.length, dryRun,
     candidatesSeen, oldestSeenDays, statedTotal, loadDebug,
     scrapedAt: new Date().toISOString(),
+  }
+  if (abortReason) {
+    out.abortReason = abortReason
+    if (modalDebugOnAbort) out.modalDebug = modalDebugOnAbort
   }
   // Telemetría de paginación: si no vimos candidatos viejos pero LinkedIn declara
   // muchos pending, el load quedó corto — capturar controles visibles para diagnóstico.
