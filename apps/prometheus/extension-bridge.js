@@ -892,6 +892,16 @@ async function handleCommandResult(msg) {
             .update({ status: 'dead', dead_reason: 'invite_withdrawn' }).eq('id', leadId)
           if (upErr) console.error(`[bridge] withdraw_profile dead update failed: ${upErr.message}`)
           else console.log(`[bridge] 🧹 invitación retirada vía perfil: lead ${leadId.slice(0, 8)} → dead(invite_withdrawn)`)
+        } else if (isError && result?.error === 'pending_button_not_found'
+            && Array.isArray(result?.visibleButtons)
+            && result.visibleButtons.some(t => /^(conectar|connect)$/i.test((t || '').trim()))) {
+          // Perfil muestra "Conectar" → LinkedIn ya SOLTÓ la invite vieja server-side
+          // (sigue listada en /sent/ pero no bloquea el botón — visto en vivo 14-ago,
+          // Jorge K. 60d). Nada que retirar; lead frío 30d+ sin aceptar → dead limpio.
+          const { error: upErr } = await supabase.from('leads')
+            .update({ status: 'dead', dead_reason: 'invite_expired' }).eq('id', leadId)
+          if (upErr) console.error(`[bridge] withdraw_profile expired update failed: ${upErr.message}`)
+          else console.log(`[bridge] 🧹 invite expirada (perfil muestra Conectar): lead ${leadId.slice(0, 8)} → dead(invite_expired)`)
         } else if (isError && ['pending_button_not_found', 'withdraw_modal_not_shown', 'withdraw_confirm_not_found', 'withdraw_modal_not_closed'].includes(result?.error)) {
           const cd = new Date(Date.now() + 7 * 86_400_000).toISOString()
           const { error: upErr } = await supabase.from('leads')
