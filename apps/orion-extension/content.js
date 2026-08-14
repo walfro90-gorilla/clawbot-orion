@@ -6278,8 +6278,19 @@ async function loadAllSentInvites() {
   const scroller = Array.from(mainEl.querySelectorAll('div'))
     .find(d => d.scrollHeight > d.clientHeight + 200 && d.clientHeight > 300) ?? null
   if (scroller) debug.innerScroller = true
-  let prevN = -1, stable = 0
+  let prevN = -1, stable = 0, hiddenWaits = 0
   for (let i = 0; i < 90 && stable < 3; i++) {
+    // Tab oculta = lazy-load muerto (IntersectionObserver no dispara) — esperar a que
+    // vuelva la visibilidad en vez de contar rondas ciegas como "estable" (visto en vivo:
+    // usuario cambió de ventana a media carga → loader paró en 50/271).
+    if (document.hidden) {
+      hiddenWaits++
+      debug.hiddenWaits = hiddenWaits
+      if (hiddenWaits > 30) break
+      await sleep(1000)
+      stable = 0
+      continue
+    }
     debug.iterations = i + 1
     mainEl.scrollTop = mainEl.scrollHeight
     window.scrollTo(0, document.body.scrollHeight)
