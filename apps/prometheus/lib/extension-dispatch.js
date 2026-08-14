@@ -31,11 +31,14 @@ export const COMPANY_SCOPED_MIN_VERSION = '0.10.0'
 // silencio (sin generar la alerta extension_outdated en cada tick).
 export const CONTACT_INFO_MIN_VERSION = '0.10.16'
 
-// v0.10.23: retiro de invitaciones viejas VÍA PERFIL (higiene anti-límite-semanal).
-// La ruta por lista /sent/ (0.10.18-22) quedó descartada: el SDUI nuevo checa isTrusted
-// en el anchor Retirar — ningún click sintético lo activa. El scheduler pre-checa esta
-// versión para skippear en silencio en extensiones viejas.
-export const WITHDRAW_INVITES_MIN_VERSION = '0.10.23'
+// ⛔ DESHABILITADO 14-ago-2026 (gate imposible a propósito). Veredicto del hard-test
+// en producción: LinkedIn exige eventos isTrusted para retirar invitaciones en TODAS
+// las superficies — lista /sent/ (0.10.18-22) Y perfil (0.10.23-25: Café encontró el
+// <a> Pendiente y el click sintético fue ignorado → withdraw_modal_not_shown ×9;
+// Josh ni renderiza el control). Ningún click sintético funciona; solo el click real.
+// El código queda para un futuro plan B (chrome.debugger vía optional_permissions).
+// Re-habilitar = volver a '0.10.25'.
+export const WITHDRAW_INVITES_MIN_VERSION = '9.9.9'
 
 // Compara semver simple (a.b.c). Versión desconocida (null) = demasiado vieja → fail-closed.
 export function meetsVersion(have, min) {
