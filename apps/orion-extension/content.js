@@ -2368,8 +2368,22 @@ async function sendInviteFromCustomInvite(payload) {
       }
     }
     console.log('[Orion content] Clicking "Enviar sin nota"')
+    // v0.10.27 (gated por payload.debug): ground truth del modal ANTES del click —
+    // diagnóstico del caso Josh (reporta 'sent' pero la invitación no aparece en /sent/).
+    const debugCapture = payload.debug ? {
+      btnText: (sendNoNoteBtn.textContent || '').trim().slice(0, 60),
+      btnTag: sendNoNoteBtn.tagName,
+      btnAria: (sendNoNoteBtn.getAttribute('aria-label') || '').slice(0, 80),
+      modalBefore: dumpModalContent(),
+    } : null
     await humanClick(sendNoNoteBtn)
     await sleep(2000)
+    if (debugCapture) {
+      const out = await verifyInviteSent({
+        action: 'send_invite', textareaUsed: false, withNote: false, path: 'spa_route_no_note',
+      })
+      return { ...out, _debug: { ...debugCapture, modalAfter: dumpModalContent(), url: location.href } }
+    }
     // REMOVED 2026-05-29: setTimeout location.href causaba modal "Leave site?" cuando
     // un siguiente command (FU/auto-reply) empezaba a typear durante la navegación.
     // LinkedIn detectaba texto sin guardar y mostraba el modal. Sin el auto-nav,
