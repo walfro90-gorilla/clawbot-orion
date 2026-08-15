@@ -5886,8 +5886,27 @@ async function checkConnections(payload = {}) {
   }
 
   collect()
-  let prevSize = -1, stable = 0
+  // (0.10.28) BUDGET DE TIEMPO — el hard timeout del comando es 120s y el loop de 80
+  // rondas lo excedía en cuentas con muchas conexiones: Josh timeouteaba SIEMPRE
+  // (0 conexiones en todos los intentos) ⇒ su accept-detection positiva estaba muerta.
+  // Ahora cortamos a los 75s y devolvemos lo acumulado: la lista viene ordenada por
+  // "Recientemente agregados", así que lo primero es justo lo que importa (accepts
+  // nuevos), y el ingest del bridge solo AÑADE marks (parcial nunca causa falsos).
+  // + hiddenWaits: sin foco el lazy-load (IntersectionObserver) no dispara — Café pasó
+  // de 136 a 10 conexiones en scans de fondo. background.js ahora enfoca la tab.
+  const startedAt = Date.now()
+  const TIME_BUDGET_MS = 75_000
+  let prevSize = -1, stable = 0, hiddenWaits = 0, rounds = 0
   for (let i = 0; i < 80 && stable < 4; i++) {
+    if (Date.now() - startedAt > TIME_BUDGET_MS) break
+    if (document.hidden) {
+      // tab oculta: el lazy-load está congelado, esperar en vez de gastar rondas en vano
+      hiddenWaits++
+      if (hiddenWaits > 20) break
+      await sleep(1000)
+      continue
+    }
+    rounds++
     const sc = findScrollEl()
     if (sc.scrollBy) sc.scrollBy(0, Math.round((sc.clientHeight || window.innerHeight) * 0.85))
     else sc.scrollTop = sc.scrollHeight
@@ -5904,6 +5923,7 @@ async function checkConnections(payload = {}) {
   return {
     action: 'check_connections', status: 'ok',
     connections, count: connections.length,
+    scanDebug: { rounds, hiddenWaits, elapsedMs: Date.now() - startedAt, hitBudget: Date.now() - startedAt > TIME_BUDGET_MS },
     scrapedAt: new Date().toISOString(),
   }
 }

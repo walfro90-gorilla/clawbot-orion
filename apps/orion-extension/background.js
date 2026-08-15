@@ -692,7 +692,11 @@ async function executeCommand(commandId, action, payload) {
     // (13-ago) + withdraw_invites: el lazy-load de /sent/ usa IntersectionObserver
     // que Chrome NO dispara en tab de fondo — probado en vivo: foreground carga
     // 271/271, background se queda en 10. Es 1×/día por cuenta → robo de foco mínimo.
-    if (action === 'search' || action === 'search_posts' || action === 'withdraw_invites') {
+    // (15-ago) + check_connections y check_sent_invites: sus listas usan lazy-load por
+    // IntersectionObserver, que Chrome NO dispara en tab de fondo — Café cayó de 136 a 10
+    // conexiones y /sent/ se quedaba en 10 de N. Son ~2-6 corridas/día por cuenta.
+    if (action === 'search' || action === 'search_posts' || action === 'withdraw_invites'
+        || action === 'check_connections' || action === 'check_sent_invites') {
       try {
         await chrome.tabs.update(tab.id, { active: true })
         if (tab.windowId != null) {

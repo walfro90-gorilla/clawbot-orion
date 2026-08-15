@@ -1113,6 +1113,29 @@ async function ingestCheckSentInvites(commandId, pending, statedTotal = null) {
     console.log(`[bridge] check_sent_invites: scrape parcial (${pending.length}/${statedTotal}) → modo ventana, boundary=${boundaryTime ? new Date(boundaryTime).toISOString() : 'null(skip)'}`)
   }
 
+  // ── (15-ago-2026) LOS ACCEPTS YA NO SE INFIEREN POR AUSENCIA ──────────────
+  // La ausencia de /sent/ tiene DOS causas indistinguibles desde aquí: el contacto
+  // aceptó, o la invitación nunca existió (invite fantasma — LinkedIn descarta en
+  // silencio los envíos automatizados de una cuenta marcada; caso Josh 8-ago→: 76
+  // FU a no-conexiones en 2 días). Inferir accept fabricaba los falsos connected.
+  // Ahora manda la evidencia POSITIVA de check_connections (presencia en la lista).
+  // RED DE SEGURIDAD: si la cuenta no tiene un check_connections útil en 24h (su
+  // scraper puede fallar), se conserva la inferencia conservadora para no dejar
+  // aceptaciones reales sin FU — que es el fallo caro (caso 8-jun).
+  const { data: recentConnScan } = await supabase
+    .from('extension_commands')
+    .select('id, result')
+    .eq('account_id', cmd.account_id).eq('action', 'check_connections').eq('status', 'completed')
+    .gt('created_at', new Date(Date.now() - 24 * 3_600_000).toISOString())
+    .order('created_at', { ascending: false }).limit(5)
+  const connectionsHealthy = (recentConnScan ?? []).some(c => (c.result?.connections?.length ?? 0) > 0)
+  if (connectionsHealthy) {
+    const absent = invitedLeads.filter(l => l.sent_at && !isPending(l)).length
+    console.log(`[bridge] check_sent_invites: ${absent} ausentes NO marcados (accepts los decide check_connections por presencia)`)
+    return
+  }
+  console.warn(`[bridge] check_sent_invites: check_connections sin datos en 24h para esta cuenta → fallback a inferencia por ausencia (conservadora)`)
+
   let accepted = 0, skippedAmbiguous = 0
   const minSentAgeMs = 60 * 60 * 1000  // no marcar accept si el invite tiene <1h
 
