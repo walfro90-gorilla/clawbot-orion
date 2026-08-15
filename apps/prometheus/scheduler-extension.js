@@ -437,6 +437,16 @@ async function trySearchForCampaign(campaign, account) {
   // empresa de la lista; si todas están recién buscadas, el cursor toma la más vieja.
   const target = companyMode ? await pickNextTargetCompany(campaign.id) : null
 
+  // (14-ago-2026) Sin empresa seleccionable NO se busca. El escape title-only estaba
+  // eliminado arriba, pero quedaba esta puerta: con la lista ENTERA en 'pending' (el
+  // resolver de la ext dejó de sacar el URN el 12-ago, LinkedIn cambió el markup de
+  // /search/results/companies) pickNextTargetCompany devuelve null y la búsqueda salía
+  // title-only igual → Aduanas Infinity invitó a MAHLE, Grupo Nexos, Serviacero y juntó
+  // 19 leads de fuera de la lista (incluidas agencias aduanales = competencia).
+  if (companyMode && !target) {
+    return { skipped: true, reason: 'no_company_target', companies: companyNames.length }
+  }
+
   // Con empresa: UN puesto por búsqueda, desde el cursor propio de esa empresa.
   // Sin empresa: 1 keyword rotado por la campaña, comportamiento de siempre.
   const tt = target ? nextTitleForCompany(kws, target) : null

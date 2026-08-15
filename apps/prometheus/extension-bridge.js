@@ -1452,7 +1452,13 @@ async function ingestResolveCompanies(resolved) {
                   page_title: r.resultTitle ?? null })
         .eq('id', r.id)
       ok++
-    } else if ((attempts.get(r.id) ?? 0) >= COMPANY_RESOLVE_MAX_TRIES) {
+    // (14-ago-2026) matched sin URN = sabemos QUÉ empresa es (nombre + slug + seguidores)
+    // pero LinkedIn ya no expone el id numérico en la tarjeta del buscador. Reintentar 3
+    // rondas de 24h no lo recupera: degradar YA a búsqueda por "nombre exacto", que es
+    // on-list. Sin esto la campaña pasa días con la lista en 'pending' y el scheduler la
+    // salta entera. Re-encolar cuando la ext sepa sacar el URN otra vez:
+    //   update campaign_target_companies set status='pending', resolve_attempts=0 where ...
+    } else if ((r.matched && !r.urn) || (attempts.get(r.id) ?? 0) >= COMPANY_RESOLVE_MAX_TRIES) {
       await supabase.from('campaign_target_companies')
         .update({ status: 'unresolved', slug: r.slug ?? null })
         .eq('id', r.id)
