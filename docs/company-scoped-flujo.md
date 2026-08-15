@@ -31,9 +31,45 @@ responsabilidad**.
 `title_idx` (cursor de puestos), `sort_order` (orden de la lista del usuario),
 `leads_found`. Sin UI — la lista se edita en Orion como siempre.
 
+## ⚠️ El URN dejó de venir (corte 12-ago-2026) — degradación por nombre
+
+LinkedIn cambió el markup de `/search/results/companies/` y `resolveCompanyOnPage` ya no
+encuentra `urn:li:(fsd_company|organization|company):<id>` (ni en
+`data-chameleon-result-urn` ni en el HTML de la tarjeta). El resolver **sigue matcheando
+bien** — devuelve `matched:true`, `slug`, `followers`, `resultTitle` — pero con `urn:null`.
+No es código viejo: `contentVersion` reportaba 0.10.10.
+
+Consecuencia: **toda empresa NUEVA entra degradada** a free + `"nombre exacto"` + puesto
+(sin facet `currentCompany`, sin CURRENT_COMPANY de SalesNav). Las campañas viejas no lo
+sienten porque su URN quedó cacheado en `campaign_target_companies` antes del corte.
+
+Dos parches server-side (`ecdad90`) para que el degradado no se convierta en otra cosa:
+
+- `ingestResolveCompanies`: `matched && !urn` ⇒ `unresolved` **de inmediato** (antes
+  esperaba 3 rondas de 24h y la campaña quedaba días entera en `pending`).
+- `trySearchForCampaign`: `companyMode && !target` ⇒ `skipped: 'no_company_target'`. Era la
+  última puerta al title-only: con toda la lista en `pending`, `pickNextTargetCompany`
+  devolvía `null` y la búsqueda salía sin filtro de empresa igual (Aduanas Infinity juntó
+  25 leads, cero de la lista, incluidas agencias aduanales rivales). **Si una campaña deja
+  de buscar, revisa esto antes de "arreglar" el scheduler: el silencio es el modo seguro.**
+
+Fix de raíz PENDIENTE (extensión): cuando la tarjeta no traiga URN, navegar a
+`/company/<slug>/` y sacar `urn:li:fsd_company:(\d+)` de ahí — el slug sí se sigue
+extrayendo. Al recuperarlo, re-encolar con
+`update campaign_target_companies set status='pending', resolve_attempts=0 where status='unresolved'`.
+
 ## Auditar salud (sin tocar nada)
 
 ```sql
+-- ¿el resolver sigue sacando URNs? (0 en with_urn = markup de LinkedIn cambió otra vez)
+select ec.created_at, jsonb_array_length(ec.result->'resolved') n,
+  (select count(*) from jsonb_array_elements(ec.result->'resolved') e where e->>'urn' is not null) with_urn
+ from extension_commands ec
+ where ec.action='resolve_companies' and ec.result ? 'resolved'
+ order by ec.created_at desc limit 20;
+-- ¿la campaña tiene empresa que buscar? (todo en pending = no busca, no invita)
+select status, count(*), count(linkedin_urn) with_urn from campaign_target_companies
+ where campaign_id='…' group by 1;
 -- ¿empresas mal atadas? (nombre vs página elegida, tamaño)
 select name, page_title, followers from campaign_target_companies
  where status='ready' order by followers asc nulls first limit 20;
