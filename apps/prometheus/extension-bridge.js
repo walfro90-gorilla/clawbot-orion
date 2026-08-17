@@ -33,7 +33,12 @@ const PORT = parseInt(process.env.EXTENSION_BRIDGE_PORT ?? '4002')
 // Post-mortem 2026-07-03: 3s = ~115k queries/día de piso (haya o no trabajo), principal
 // drenaje continuo del IO-burst en Nano. 10s = −67% carga base; la latencia de dispatch ≤10s
 // es irrelevante para automatización de LinkedIn (los command_result llegan por WS push, no poll).
-const POLL_INTERVAL_MS = parseInt(process.env.EXTENSION_POLL_INTERVAL_MS ?? '10000')
+// Post-mortem 2026-08-17: 10s NO alcanzó. Postgres murió 13:15-13:28 UTC (statement timeouts
+// → 522 durante 1h40) con ~13k req/h, de las que 6k eran /extension_commands. Las CUOTAS
+// estaban sanas (DB 56%, egress 15%): lo que se agota en Nano es el crédito de burst de CPU,
+// que no aparece en Usage Summary. Revivió solo al parar scheduler+bridge, sin restart.
+// 30s = −67% otra vez sobre el piso. Fix de raíz sigue siendo compute Pro, no este número.
+const POLL_INTERVAL_MS = parseInt(process.env.EXTENSION_POLL_INTERVAL_MS ?? '30000')
 // Reduced from 5min to 90s (2026-05-29 "Reloj Suizo" plan) — antes el server
 // creía conectado mientras el SW dormía, dejando un gap de hasta 5min antes
 // de detectar disconnect. 90s = 6× margen sobre alarm keep-alive cada 15s.
