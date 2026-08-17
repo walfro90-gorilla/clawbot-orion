@@ -1563,6 +1563,48 @@ async function tryAutoReplyForCampaign(campaign, account) {
       console.log(`[SCH-EXT]   🧭 inbound de ${lead.full_name} = ${inboundRole}${inboundRole === 'recruiter' && !recruiterProfile ? ' (sin recruiter_reply configurado)' : ''} — "${roleRes.reason}"`)
     }
 
+    // 🙋 RECLUTADOR = A MANO (decisión del operador, 17-ago-2026). Una entrevista la
+    // contesta la persona, no el bot: el costo de un error aquí es la reputación
+    // profesional del dueño de la cuenta, no un lead perdido. Pausamos la automatización
+    // del lead (sale del lane por el filtro automation_paused=false ⇒ tampoco se
+    // re-clasifica cada tick) y levantamos alerta para que se conteste en LinkedIn.
+    // Para volver a automatizarlo: account_config[cuenta].recruiter_reply.auto_reply = true
+    // (más cv_url/portfolio_url/github_url/note, que es lo que el bot compartiría).
+    if (inboundRole === 'recruiter' && recruiterProfile?.auto_reply !== true) {
+      if (DRY_RUN) {
+        console.log(`[SCH-EXT] DRY_RUN 🙋 RECLUTADOR → ${lead.full_name}: pausaría para respuesta manual`)
+        return { dispatched: false, dryRun: true, manualRecruiter: true, leadName: lead.full_name }
+      }
+      const { error: pauseErr } = await supabase.from('leads')
+        .update({ automation_paused: true })
+        .eq('id', lead.id)
+      if (pauseErr) {
+        // Sin la pausa el próximo tick lo re-clasificaría y podría contestarle: mejor
+        // reintentar el tick siguiente que arriesgar un auto-reply a un reclutador.
+        console.error(`[SCH-EXT] ❌ pausa de reclutador ${lead.id.slice(0,8)}: ${pauseErr.message}`)
+        continue
+      }
+      try {
+        await supabase.from('account_alerts').insert({
+          linkedin_account_id: account.id,
+          campaign_id: campaign.id,
+          alert_type: 'manual_reply_needed',
+          severity: 'warning',
+          message: `${lead.full_name} escribió como reclutador/vacante — contéstale a mano (automatización pausada para este contacto).`,
+          details: {
+            lead_id: lead.id,
+            reason: roleRes.reason,
+            last_inbound: String(lastInText ?? '').slice(0, 500),
+            linkedin_url: lead.linkedin_url ?? null,
+          },
+        })
+      } catch (e) {
+        console.warn(`[SCH-EXT] ⚠️  alerta manual_reply_needed no insertada: ${e.message}`)
+      }
+      console.log(`[SCH-EXT]   🙋 RECLUTADOR ${lead.full_name} → automation_paused, respuesta MANUAL — "${roleRes.reason}"`)
+      continue
+    }
+
     // Generar respuesta vía AI con conversation history + cal_url + FU template guía
     const aiType = `fm_reply_${fmStep}`
     const aiRes = await generateLinkedInReply(campaign, lead, {
