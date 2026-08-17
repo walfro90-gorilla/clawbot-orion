@@ -85,7 +85,7 @@ export async function maybeSendDailyDigest() {
 
   const res = await sendEmail({
     to: recipients,
-    subject: `🤝 ClawBot — ${total} ${total === 1 ? 'conexión nueva' : 'conexiones nuevas'} · ${today}`,
+    subject: `🤝 Orion Lead Connections — ${total} ${total === 1 ? 'conexión nueva' : 'conexiones nuevas'} · ${today}`,
     html: buildDigestHtml(groupRows(rows), { dateLabel, total }),
   })
   if (!res.ok) {
@@ -157,7 +157,7 @@ export async function maybeSendCampaignDigests() {
       }).format(new Date())
       const res = await sendEmail({
         to: recipients,
-        subject: `📇 ClawBot · ${camp.name} — ${total} ${total === 1 ? 'contacto nuevo' : 'contactos nuevos'} · ${today}`,
+        subject: `📇 Orion Lead Connections · ${camp.name} — ${total} ${total === 1 ? 'contacto nuevo' : 'contactos nuevos'} · ${today}`,
         html: buildDigestHtml(groupRows(rows), { dateLabel, total }),
       })
       if (!res.ok) {

@@ -73,9 +73,9 @@ export function buildDigestHtml(groups, { dateLabel, total }) {
   }
   if (!total) body = `<p style="font-size:14px;color:#6b7280">Sin conexiones nuevas desde el último reporte.</p>`
   return `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111827;padding:8px">`
-    + `<h1 style="font-size:18px;margin:0 0 4px">🤝 ClawBot — conexiones aceptadas</h1>`
+    + `<h1 style="font-size:18px;margin:0 0 4px">🤝 Orion Lead Connections — conexiones aceptadas</h1>`
     + `<p style="margin:0 0 8px;font-size:13px;color:#6b7280">${esc(dateLabel)} · total: ${total}</p>`
     + body
-    + `<p style="margin-top:24px;font-size:11px;color:#9ca3af">Enviado automáticamente por ClawBot Orion. Email/teléfono aparecen cuando el contacto los hace visibles a su red (1er grado).</p>`
+    + `<p style="margin-top:24px;font-size:11px;color:#9ca3af">Enviado automáticamente por Orion Lead Connections. Email/teléfono aparecen cuando el contacto los hace visibles a su red (1er grado).</p>`
     + `</div>`
 }
