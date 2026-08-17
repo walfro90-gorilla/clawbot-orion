@@ -228,6 +228,13 @@ Los FU **no están hardcodeados**. Cada campaña define **1..20 pasos** en `camp
 
 `campaignPersonaBlock` inyecta persona/contexto/tono **solo si hay persona o contexto** (tono solo no dispara → campañas tono-only quedan idénticas), con caps 2000/3000 chars anti-bloat. El FU verbatim NO se toca (no llama LLM).
 
+### 7.2 A QUIÉN le responde el auto-reply (17-ago-2026)
+
+El FM asumía "prospecto" para todo inbound: a reclutadores les contestó como candidato **inventando experiencia** del dueño de la cuenta, y a proveedores les seguía el pitch. Ahora `classifyInboundRole` (`lib/ai-message.js`, clasificador aparte de `detectExitIntent` — ese está afinado a fuerza de casos y no se toca) etiqueta el último mensaje: `prospect | vendor | recruiter | other`, **fail-open a `prospect`** (si el LLM falla, comportamiento idéntico al anterior). `inboundRoleBlock` va **al final** del system prompt para ganarle al pitch de la campaña y al empuje a cita de `fm_reply_2/3`. `recruiter`/`vendor` nunca reciben el cal.com de ventas.
+
+- **`recruiter` NO se contesta solo** (decisión del operador): `leads.automation_paused=true` + alerta `manual_reply_needed`. Se enciende con `account_config[cuenta].recruiter_reply.auto_reply=true` (+ `cv_url`/`portfolio_url`/`github_url`/`note`, que es lo que compartiría; el prompt prohíbe inventar experiencia y sin `note` el modelo no sabe nada real de ti).
+- **Guard anti-meta** (`isMetaOutput`) en `callProvider` — chokepoint de invite/FU-LLM/FM: prefijo meta o <30 chars ⇒ retry ⇒ error ⇒ el caller cae al template verbatim. Nació porque `"User Safety: safe."` (veredicto del clasificador de Groq/llama) se envió CRUDO a un lead: pasaba placeholder-guard, cap y puntuación. **NO** está en el guard pre-envío del FU verbatim a propósito: un template corto legítimo del usuario quedaría bloqueado en silencio. Self-check: `scripts/test-reply-guards.js`.
+
 ---
 
 ## 8. Orion — rutas y auth
