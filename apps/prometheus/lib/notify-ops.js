@@ -31,6 +31,42 @@ function _saveState(state) {
 }
 
 /**
+ * Formatea la petición según el destino. Puro y exportado para poder testearlo.
+ *
+ * (17-ago-2026) El payload era SIEMPRE con forma de Slack (`{text: "..."}`), así que en el
+ * móvil las alertas llegaban como JSON crudo con asteriscos de markdown sin renderizar:
+ *   {"text":"🔴 *ClawBot ops* — Scheduler lento: 18 ticks >30s consecutivos."}
+ * ntfy espera el cuerpo en TEXTO PLANO y los metadatos en headers. Una alerta que cuesta
+ * leer se acaba ignorando, que es el mismo fallo de fondo que tener el canal sin nadie
+ * suscrito. Cualquier otro destino (Slack y compatibles) mantiene el JSON de siempre.
+ *
+ * @param {string} webhookUrl
+ * @param {string} text
+ * @param {string} [detail]
+ * @returns {{headers: Record<string,string>, body: string}}
+ */
+export function buildOpsRequest(webhookUrl, text, detail = '') {
+  let host = ''
+  try { host = new URL(webhookUrl).hostname } catch { /* URL rara → trátala como Slack */ }
+  if (/(^|\.)ntfy\.sh$/i.test(host)) {
+    return {
+      // Headers ASCII a propósito: ntfy rechaza los no-ASCII en Title/Tags.
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+        Title: 'ClawBot ops',
+        Priority: 'high',
+        Tags: 'rotating_light',
+      },
+      body: `${text}${detail}`,
+    }
+  }
+  return {
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: `🔴 *ClawBot ops* — ${text}${detail}` }),
+  }
+}
+
+/**
  * Notifica un evento de ops por el canal out-of-band, con dedup persistente.
  * @param {string} key   Clave de dedup (p.ej. 'scheduler_crash_loop', 'db_degraded').
  * @param {string} text  Mensaje legible.
@@ -48,15 +84,11 @@ export async function notifyOps(key, text, { force = false, extra = null } = {})
   const detail = extra && Object.keys(extra).length
     ? '\n```' + JSON.stringify(extra, null, 2).slice(0, 500) + '```'
     : ''
+  const { headers, body } = buildOpsRequest(WEBHOOK, text, detail)
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), SEND_TIMEOUT_MS)
   try {
-    await fetch(WEBHOOK, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ text: `🔴 *ClawBot ops* — ${text}${detail}` }),
-      signal:  ctrl.signal,
-    })
+    await fetch(WEBHOOK, { method: 'POST', headers, body, signal: ctrl.signal })
     return true
   } catch {
     return false  // el webhook también puede fallar; jamás propagar (fire-and-forget)

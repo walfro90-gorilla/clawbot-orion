@@ -2805,9 +2805,16 @@ async function runTickSafely() {
     lastTickAt = Date.now()
     consecutiveTickFailures = 0
     const dur = Date.now() - start
-    if (dur > 30_000) { slowTickStreak++; console.warn(`[SCH-EXT] ⚠️  tick lento: ${dur}ms (racha ${slowTickStreak})`) }
+    // (17-ago-2026) Umbral 30s → 90s. El baseline REAL de un tick sano es 33-47s (992 avisos
+    // históricos, rachas de 32+ con la DB perfecta), y este mismo archivo ya lo decía en el
+    // comentario del watchdog: "un tick lento (30-40s por IO)" es lo normal. A 30s la alerta
+    // era ruido crónico — y el ruido en un canal de alertas es peor que no tener canal: el
+    // operador lo silencia y entonces las alertas REALES tampoco llegan (justo lo que se
+    // acababa de arreglar suscribiéndolo a ntfy). 90s = muy por encima del ruido, muy por
+    // debajo del TICK_SOFT_TIMEOUT_MS (240s) que ya avisa por otra vía.
+    if (dur > 90_000) { slowTickStreak++; console.warn(`[SCH-EXT] ⚠️  tick lento: ${dur}ms (racha ${slowTickStreak})`) }
     else slowTickStreak = 0
-    if (slowTickStreak >= 3) notifyOps('scheduler_slow', `Scheduler lento: ${slowTickStreak} ticks >30s consecutivos (¿DB degradada?).`).catch(() => {})
+    if (slowTickStreak >= 3) notifyOps('scheduler_slow', `Scheduler lento: ${slowTickStreak} ticks >90s consecutivos (¿DB degradada?).`).catch(() => {})
     setTickSignal(null)  // ÉXITO: limpia la señal (en FALLO se deja ABORTADA, ver catch)
   } catch (err) {
     consecutiveTickFailures++
