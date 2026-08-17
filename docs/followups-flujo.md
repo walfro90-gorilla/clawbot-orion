@@ -105,6 +105,26 @@ where id = '<lead_id>';
 ```
 > ⚠️ Lección 01-jul: supuse (mal) que el bloqueo era el "lockout", luego "cuarentena" — el real era **`cooldown_until` en el futuro**. Por eso están los 4 juntos.
 
+### Re-enviar un FU que salió MAL (mensaje basura, no fallo técnico)
+Caso 17-ago: a un lead se le envió `"User Safety: safe."` (output meta del LLM). El comando fue
+un éxito técnico, así que ninguno de los 4 campos de arriba lo desbloquea. Hacen falta **tres**
+cosas y las dos primeras se olvidan fácil:
+```sql
+update leads set followup_step = 0,          -- el motor pide el paso N-1
+                 last_followup_at = null,
+                 status = 'connected'         -- ⚠️ el step 1 SOLO acepta 'connected' (statusFromArr)
+where id = '<lead_id>';
+```
+1. `followup_step = N-1` **y** `status` = el que exige ese paso: **`connected` para el step 1**,
+   `follow_up_sent` para el resto. Con `status='follow_up_sent'` y `followup_step=0` el lead cae
+   en tierra de nadie y no lo toma ningún paso (el síntoma es `no_followups_due` eterno).
+2. El **step-dedup de 48h cuenta el comando malo** (fue `completed`): el reenvío NO sale hasta que
+   expire esa ventana. No lo esquives falseando el `payload`/`created_at` del comando histórico —
+   es la única protección contra dobles envíos. Si el mensaje no puede esperar, escríbelo a mano.
+3. Si la campaña tiene `gemini_system_prompt`, el reenvío vuelve a pasar por el LLM: verifica
+   antes que la cadena de proveedores esté viva (`pm2 logs prometheus-scheduler | grep "proveedor"`),
+   o repetirás el mismo accidente.
+
 ---
 
 ## 5. Ciclo de vida del comando (`extension_commands`)
