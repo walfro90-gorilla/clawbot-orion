@@ -8,7 +8,7 @@
     "search": "node search.js",
     "batch": "node batch.js",
     "test": "node --test --test-force-exit test/*.test.mjs",
-    "check": "node scripts/test-company-name-scoring.js && node scripts/test-company-title-cursor.js && node scripts/test-seniority-rank.js && node scripts/test-geo-filter.js && node scripts/test-digest.js"
+    "check": "node scripts/test-company-name-scoring.js && node scripts/test-company-title-cursor.js && node scripts/test-seniority-rank.js && node scripts/test-geo-filter.js && node scripts/test-digest.js && node scripts/test-db-circuit.js"
   },
   "keywords": [],
   "author": "",

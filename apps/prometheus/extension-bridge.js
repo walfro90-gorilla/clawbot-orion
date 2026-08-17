@@ -26,6 +26,7 @@ import { checkAndKillLeadIfStuck, checkAccountHealthAndPause, dispatchInvite, LE
 import { isSystemLinkedInAccount } from './lib/system-accounts.js'
 import { isGroupConversationName } from './lib/group-conversation.js'
 import { applyLeadAttemptOutcome, isNonFaultError } from './lib/lead-failure.js'
+import { noteDbResult, dbCircuitOpen } from './lib/db-circuit.js'
 
 dotenv.config()
 
@@ -50,6 +51,8 @@ const AUTH_FAILURES = new Map() // accountId → { count, firstFailAt, lockedUnt
 const AUTH_FAIL_WINDOW_MS = 2 * 60 * 1000
 const AUTH_FAIL_THRESHOLD = 5
 const AUTH_LOCKOUT_MS = 5 * 60 * 1000
+
+// Circuit breaker de DB (post-mortem 2026-08-17) → lib/db-circuit.js (con self-check).
 
 // Cliente Supabase con timeout (fetchWithTimeout 20s) desde lib/supabase.js.
 // Post-mortem 2026-07-03: el bridge usaba createClient CRUDO sin timeout → sus queries
@@ -141,11 +144,31 @@ async function handleConnection(ws, accountId) {
         return
       }
       // Validar API key contra DB
-      const { data: account } = await supabase
+      const { data: account, error: authDbErr } = await supabase
         .from('linkedin_accounts')
         .select('id, label, extension_api_key')
         .eq('id', msg.accountId)
         .maybeSingle()
+
+      // (17-ago-2026) "No pude LEER la key" ≠ "la key es MALA". Antes se descartaba el
+      // `error`: con PostgREST caído la query timeouteaba a los 20s, `account` llegaba
+      // undefined y caía en la rama de abajo → las 4 cuentas a lockout de 5min EN CASCADA,
+      // con logs que culpaban a las credenciales (que eran correctas). Eso convirtió una
+      // caída de DB en un apagón que necesitó intervención manual.
+      //
+      // ⚠️ Cerramos SIN mandar `auth_error`: el cliente mete CUALQUIER auth_error en su
+      // propio lockout de 5min (background.js:379, mismo razonamiento que el 4005 de
+      // duplicate_race más abajo). Esto se arregla solo cuando la DB vuelva, así que el
+      // listener 'close' de la extensión reconecta en ~2s y reintenta limpio.
+      // maybeSingle() da { data:null, error:null } si la cuenta no existe → ese caso
+      // legítimo sigue cayendo en la rama de key inválida, como debe.
+      if (authDbErr) {
+        noteDbResult(authDbErr, 'auth')
+        console.warn(`[bridge] ⚠️  Auth NO verificable para ${accountId} — la DB no responde (${authDbErr.message}). Sin lockout; reintenta.`)
+        try { ws.close(4006, 'db_unavailable') } catch {}
+        return
+      }
+      noteDbResult(null, 'auth')
 
       if (!account || !account.extension_api_key || account.extension_api_key !== msg.apiKey) {
         const sent = msg.apiKey ?? ''
@@ -2255,6 +2278,7 @@ function isAccountInNoWindowCooldown(accountId) {
 }
 
 async function pollAndDispatch() {
+  if (dbCircuitOpen()) return  // (17-ago-2026) DB caída: no añadir presión, ver noteDbResult
   const connectedAccountIds = Array.from(connections.keys())
   if (connectedAccountIds.length === 0) return
 
@@ -2266,10 +2290,16 @@ async function pollAndDispatch() {
   // v0.7.21 P1-4: además de extension_paused (boolean), respetar
   // extension_paused_until (TIMESTAMPTZ futuro) — esto cubre el gap del banner
   // warning (invite_limit/rate_limit) que sólo setea el cooldown sin pausar.
-  const { data: pausedRows } = await supabase
+  const { data: pausedRows, error: pausedErr } = await supabase
     .from('linkedin_accounts')
     .select('id, label, extension_paused, extension_paused_until, extension_paused_reason, inbox_paused')
     .in('id', connectedAccountIds)
+  // (17-ago-2026) Query centinela del ciclo, por dos motivos. (1) Salud: si falla, la DB no
+  // está bien y seguir el ciclo solo suma presión sobre una instancia que intenta levantar.
+  // (2) SEGURIDAD: el error se descartaba, así que una query fallida se leía como "ninguna
+  // cuenta pausada" → se despachaba a cuentas que SÍ estaban pausadas (fail-open). Ahora
+  // fail-closed: sin la lista de pausas, no se despacha nada este ciclo.
+  if (!noteDbResult(pausedErr, 'poll')) return
   const pausedAccounts = new Set()
   const nowMs = Date.now()
   for (const row of pausedRows ?? []) {
@@ -2413,6 +2443,7 @@ function pingAll() {
 // timeout perpetuo. Ahora completed_at = NOW() en la misma transacción.
 
 async function cleanupExpired() {
+  if (dbCircuitOpen()) return  // (17-ago-2026) sus 3 UPDATEs cada 30s también martillaban
   const nowIso = new Date().toISOString()
   // v0.7.26 BUG extension_did_not_respond fix B2: distinguir dos causas muy
   // distintas que antes se mezclaban bajo 'extension_did_not_respond':
