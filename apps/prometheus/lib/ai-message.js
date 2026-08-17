@@ -47,6 +47,16 @@ export function hasLeftoverPlaceholder(text) {
   return PLACEHOLDER_RE.test(String(text ?? ''))
 }
 
+// Detecta output que NO es un mensaje: veredicto del clasificador del propio modelo
+// ("User Safety: safe.") o encabezado meta ("Respuesta:", "Output:") en vez del texto.
+// Ver GUARD ANTI-META en callProvider.
+const META_OUTPUT_RE = /^\s*(user\s+safety|safety|assistant|system|output|input|respuesta|mensaje|message|note)\s*:/i
+
+export function isMetaOutput(text) {
+  const t = String(text ?? '').trim()
+  return t.length < 30 || META_OUTPUT_RE.test(t)
+}
+
 const TYPE_RULES = {
   invite: {
     maxChars: 150,
@@ -197,6 +207,42 @@ const WRONG_FIT_RULE = [
   'En todos los casos: responde a LO QUE DIJO, no a lo que te gustaría que hubiera dicho. Si te falta información, pregunta; jamás la inventes.',
 ].join('\n')
 
+// (17-ago-2026) QUIÉN ESTÁ ESCRIBIENDO. El auto-reply trataba TODO inbound como
+// prospecto: a un reclutador técnico que preguntó por experiencia en AWS le contestó
+// como candidato improvisado ("sí, he trabajado en equipos con code review…") —
+// experiencia INVENTADA en nombre del dueño de la cuenta. WRONG_FIT_RULE solo cubría
+// "no es fit"; faltaba saber a QUIÉN se le responde. classifyInboundRole etiqueta el
+// último mensaje y esto arma la conducta para ese rol. Sin rol reconocido → null →
+// prompt idéntico al de hoy (cero regresión para prospectos).
+export function inboundRoleBlock(role, recruiterProfile = null) {
+  if (role === 'vendor') {
+    return [
+      '🧭 QUIÉN TE ESCRIBE: un PROVEEDOR/VENDEDOR — te está ofreciendo SU producto o servicio, no es un prospecto.',
+      '- Agradece con calidez y dile con honestidad que por ahora no estás buscando ese servicio.',
+      '- PROHIBIDO pitchear de vuelta, PROHIBIDO proponer llamada y PROHIBIDO incluir link de calendario.',
+      '- Cierra cordial y breve. Deja la puerta abierta solo si él dejó algo concreto que valga la pena.',
+    ].join('\n')
+  }
+  if (role === 'recruiter') {
+    const links = []
+    if (recruiterProfile?.cv_url)        links.push(`- CV: ${recruiterProfile.cv_url}`)
+    if (recruiterProfile?.portfolio_url) links.push(`- Portafolio: ${recruiterProfile.portfolio_url}`)
+    if (recruiterProfile?.github_url)    links.push(`- GitHub: ${recruiterProfile.github_url}`)
+    return [
+      '🧭 QUIÉN TE ESCRIBE: un RECLUTADOR o el responsable técnico de una VACANTE — te está evaluando como candidato.',
+      '- Responde a SUS preguntas, una por una, de forma concreta y profesional. Es lo único que importa en este mensaje.',
+      '- 🚫 NUNCA INVENTES experiencia, tecnologías, años, empleadores, certificaciones ni resultados. Si el dato no está en tu perfil/contexto de abajo, dilo con naturalidad ("eso no lo he trabajado en producción, pero sí X") — una respuesta honesta vale más que una inflada, y mentir aquí te quema.',
+      '- PROHIBIDO vender servicios, PROHIBIDO pitch comercial y PROHIBIDO el link de calendario de ventas: esta conversación NO es prospección.',
+      ...(links.length
+        ? ['- Comparte tus materiales copiando estos links EXACTOS, completos y sin acortar (uno por línea):', ...links]
+        : ['- Si pide CV, portafolio o repositorio, ofrécelo con gusto y dile que se lo compartes enseguida (no tienes los links a mano en este mensaje).']),
+      ...(recruiterProfile?.note ? [`- Contexto tuyo que SÍ puedes usar: ${String(recruiterProfile.note).slice(0, 800)}`] : []),
+      '- Cierra mostrando disposición a seguir por donde él prefiera (llamada, correo o aquí mismo).',
+    ].join('\n')
+  }
+  return null
+}
+
 // Modo relación ("vender sin vender") para el FM/auto-reply. Sustituye las reglas
 // hardcodeadas fm_reply_* que empujan a cita. Se activa cuando la campaña define
 // followup_tone_directive (mismo gate que el FU path). El lead pide la reunión; nunca al revés.
@@ -239,7 +285,7 @@ export function campaignPersonaBlock(campaign) {
   return parts.length ? parts.join('\n\n') : null
 }
 
-export function buildSystemPrompt({ campaignPrompt, personaBlock, brainBlock, type, exampleReply, calUrl, toneDirective, lastFuTemplate, lastFuStepNum }) {
+export function buildSystemPrompt({ campaignPrompt, personaBlock, brainBlock, type, exampleReply, calUrl, toneDirective, lastFuTemplate, lastFuStepNum, roleBlock }) {
   const typeConf = TYPE_RULES[type] ?? TYPE_RULES.invite
   // Modo relación (vender sin vender): si la campaña define followup_tone_directive y esto es
   // un reply al lead (FM), el auto-reply NO empuja a cita — solo conversa. Sin directive el
@@ -293,6 +339,10 @@ export function buildSystemPrompt({ campaignPrompt, personaBlock, brainBlock, ty
   sections.push('', LANGUAGE_RULE)
   // Solo en replies: en invite/FU no hay mensaje del contacto que malinterpretar.
   if (String(type).startsWith('fm_reply')) sections.push('', WRONG_FIT_RULE)
+  // Rol del inbound (proveedor / reclutador). VA AL FINAL: es lo más específico que
+  // sabemos de esta conversación y debe ganarle al resto del prompt (incluido el pitch
+  // de la campaña y el empuje a cita de fm_reply_2/3).
+  if (roleBlock && String(type).startsWith('fm_reply')) sections.push('', roleBlock)
   return sections.join('\n')
 }
 
@@ -534,6 +584,16 @@ async function callProvider(provider, systemPrompt, userPrompt, maxChars, opts) 
       if (!/[.?!…]$/.test(text)) {
         text = text + (text.includes('?') || text.startsWith('¿') ? '?' : '.')
       }
+      // 🛡️ GUARD ANTI-META: el LLM a veces devuelve el veredicto de su clasificador
+      // interno ("User Safety: safe." — Groq/llama, 17-ago-2026, se envió crudo a un
+      // lead) o un encabezado tipo "Respuesta:" en vez del mensaje. Pasaba TODOS los
+      // demás guards: sin placeholders, ≤maxChars, termina en punto. El piso de 30
+      // chars es seguro — el mensaje legítimo más corto del historial pasa de 45.
+      if (isMetaOutput(text)) {
+        lastError = `meta_output: ${text.slice(0, 40)}`
+        if (attempt < retries) { await new Promise(r => setTimeout(r, 600)); continue }
+        return { error: 'meta_output' }
+      }
       // 🛡️ GUARD ANTI-PLACEHOLDER: el AI a veces deja instrucciones de relleno
       // literales ("[menciona algo de su perfil]", "[Nombre]", "{nombre}", "[CAL_URL]")
       // que se enviaban CRUDAS al lead. NUNCA devolver texto con placeholders sin
@@ -677,19 +737,32 @@ export async function generateLinkedInReply(campaign, lead, ctx = {}, opts = {})
   const type = `fm_reply_${fmStep}`
   const exampleField = `fm${fmStep}_example_reply`
   const exampleReply = campaign[exampleField] ?? null
-  const calUrl = calUrlWithLeadId(ctx.calUrl ?? null, lead?.id)  // v0.7.45: link rastreable por lead
+  // (17-ago) Rol del inbound: proveedor y reclutador NO llevan link de calendario de
+  // ventas — el de reclutador porque no es prospección, el de proveedor porque sería
+  // pitchear de vuelta a quien nos vino a vender.
+  const role = ctx.inboundRole ?? 'prospect'
+  const roleBlock = inboundRoleBlock(role, ctx.recruiterProfile ?? null)
+  const calUrl = (role === 'recruiter' || role === 'vendor')
+    ? null
+    : calUrlWithLeadId(ctx.calUrl ?? null, lead?.id)  // v0.7.45: link rastreable por lead
   const brainBlock = await fetchBrainBlock(campaign, lead, { turn: fmStep })
   const systemPrompt = buildSystemPrompt({
     campaignPrompt: campaign.gemini_system_prompt,
     personaBlock: campaignPersonaBlock(campaign),
     brainBlock,
-    type, exampleReply, calUrl,
+    type, exampleReply, calUrl, roleBlock,
     toneDirective: campaign.followup_tone_directive ?? null,  // modo relación: no empujar cita en el reply
     lastFuTemplate: ctx.lastFuTemplate ?? null,
     lastFuStepNum:  ctx.lastFuStepNum ?? null,
   })
   const userPrompt = buildReplyUserPrompt(lead, ctx.conversationHistory ?? [], calUrl)
-  const maxChars = TYPE_RULES[type]?.maxChars ?? 700
+  // Respuesta a reclutador con materiales: 3 URLs no caben en 320 chars. Los FU verbatim
+  // de 900 chars se envían a diario (la ext chunkea >300), así que el cap "typing-safe"
+  // de 320 no es un techo real. ponytail: si vieras typing_complete_timeout en estos
+  // envíos, baja este 560 antes de tocar la extensión.
+  const maxChars = (role === 'recruiter' && ctx.recruiterProfile)
+    ? 560
+    : (TYPE_RULES[type]?.maxChars ?? 700)
   return await callLLM(systemPrompt, userPrompt, maxChars, opts)
 }
 
@@ -827,6 +900,55 @@ export async function detectExitIntent(lastInbound, lastOutbound = '', opts = {}
   // Tolerante a proveedores que devuelven el bool como string; cualquier otra cosa → false (fail-open).
   const exit = d.exit === true || String(d.exit).toLowerCase() === 'true'
   return { exit, reason: String(d.reason ?? '').slice(0, 300) }
+}
+
+/**
+ * (17-ago-2026) ¿QUIÉN nos escribió? El auto-reply asumía "prospecto" siempre y le
+ * contestó a un reclutador técnico inventando experiencia laboral del dueño de la
+ * cuenta. Clasificador aparte del sensor de salida a propósito: detectExitIntent está
+ * afinado a fuerza de casos y no se toca. FAIL-OPEN a 'prospect' ⇒ si el LLM falla,
+ * el comportamiento es EXACTAMENTE el de hoy.
+ *
+ * @returns {{role:'prospect'|'vendor'|'recruiter'|'other', reason:string}}
+ */
+export async function classifyInboundRole(lastInbound, lastOutbound = '', opts = {}) {
+  const text = String(lastInbound ?? '').trim()
+  if (!text) return { role: 'prospect', reason: 'empty_inbound' }
+
+  const systemPrompt = [
+    'Eres un clasificador. Nosotros hacemos prospección B2B por LinkedIn; alguien nos respondió.',
+    'Decide QUÉ PAPEL juega ese contacto en la conversación, según su ÚLTIMO mensaje.',
+    '',
+    'role="recruiter" — nos evalúa como CANDIDATO a un puesto:',
+    '  habla de una vacante, entrevista, CV/currículum, portafolio, proceso de selección,',
+    '  pregunta por nuestra experiencia técnica o disponibilidad para un empleo, agenda entrevista.',
+    'role="vendor" — nos QUIERE VENDER su producto/servicio (invirtió el rol): pitchea, ofrece demo,',
+    '  manda su catálogo o precios, propone que le compremos.',
+    'role="prospect" — es un posible CLIENTE nuestro: pregunta por lo que ofrecemos, cuenta su',
+    '  operación o problema, pide info/precio, agenda con nosotros, o simplemente conversa/saluda.',
+    'role="other" — nada de lo anterior: busca empleo CON nosotros, pide un favor o referencia,',
+    '  spam, o un mensaje puramente social sin relación comercial.',
+    '',
+    'REGLAS:',
+    '- Clasifica por el papel del CONTACTO, no por el nuestro. Si él nos ofrece algo → vendor;',
+    '  si él nos evalúa para un puesto → recruiter; si él podría comprarnos → prospect.',
+    '- Un simple "gracias", "ok" o saludo dentro de una conversación de prospección → prospect.',
+    '- ANTE LA DUDA responde "prospect" (es el comportamiento por defecto y el menos dañino).',
+    '',
+    'Responde SOLO un objeto JSON con exactamente estas llaves:',
+    '{"role": "prospect"|"vendor"|"recruiter"|"other", "reason": "frase corta en español citando qué lo indica"}',
+  ].join('\n')
+
+  const userPrompt = [
+    lastOutbound ? `NUESTRO ÚLTIMO MENSAJE (solo contexto, NO lo clasifiques):\n"""${String(lastOutbound).slice(0, 600)}"""` : null,
+    `ÚLTIMO MENSAJE DEL CONTACTO (esto es lo que clasificas):\n"""${text.slice(0, 1000)}"""`,
+  ].filter(Boolean).join('\n\n')
+
+  const res = await callLLMJson(systemPrompt, userPrompt, { temperature: 0, ...opts })
+  if (res.error) return { role: 'prospect', reason: `classifier_failed: ${res.error}` }
+  const raw = String(res.data?.role ?? '').toLowerCase().trim()
+  const role = ['prospect', 'vendor', 'recruiter', 'other'].includes(raw) ? raw : 'prospect'
+  return { role, reason: String(res.data?.reason ?? '').slice(0, 300) }
 }
 
 /**

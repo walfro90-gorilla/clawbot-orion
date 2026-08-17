@@ -27,7 +27,7 @@ import {
   dispatchPostSearch, dispatchCommentOnPost, checkPostCampaignActiveGates,
   getDailyCommentsToday, getEffectiveCommentCap,
 } from './lib/extension-dispatch.js'
-import { generateLinkedInMessage, generateLinkedInReply, personalizeFollowupMessage, hasLeftoverPlaceholder, qualifyPost, generatePostComment, extractCompaniesFromHeadlines, detectExitIntent } from './lib/ai-message.js'
+import { generateLinkedInMessage, generateLinkedInReply, personalizeFollowupMessage, hasLeftoverPlaceholder, isMetaOutput, qualifyPost, generatePostComment, extractCompaniesFromHeadlines, detectExitIntent, classifyInboundRole } from './lib/ai-message.js'
 import { generatePostCopy, generateDailyPost } from './lib/daily-publish.js'
 import { uploadGeneratedImage } from './lib/gemini-image.js'
 import { isSystemLinkedInAccount } from './lib/system-accounts.js'
@@ -1548,6 +1548,21 @@ async function tryAutoReplyForCampaign(campaign, account) {
       lastFuTemplate = fuSteps.find(s => s.step === lastFuStepNum)?.message ?? null
     }
 
+    // 🧭 QUIÉN NOS ESCRIBIÓ (17-ago-2026): prospecto / proveedor / reclutador. Sin esto el
+    // FM le respondía a todos como prospecto — a un reclutador técnico le INVENTÓ experiencia
+    // laboral en nombre del dueño de la cuenta. Fail-open a 'prospect' = comportamiento de hoy.
+    // Los materiales de candidato (CV/portafolio/GitHub) viven en
+    // account_config[account.id]['recruiter_reply'] = {cv_url, portfolio_url, github_url, note};
+    // sin esa fila el reply de reclutador es honesto pero sin links.
+    const roleRes = await classifyInboundRole(lastInText, lastOutbound?.content ?? '')
+    const inboundRole = roleRes.role ?? 'prospect'
+    const recruiterProfile = inboundRole === 'recruiter'
+      ? await getAccountConfigRaw(account.id, 'recruiter_reply')
+      : null
+    if (inboundRole !== 'prospect') {
+      console.log(`[SCH-EXT]   🧭 inbound de ${lead.full_name} = ${inboundRole}${inboundRole === 'recruiter' && !recruiterProfile ? ' (sin recruiter_reply configurado)' : ''} — "${roleRes.reason}"`)
+    }
+
     // Generar respuesta vía AI con conversation history + cal_url + FU template guía
     const aiType = `fm_reply_${fmStep}`
     const aiRes = await generateLinkedInReply(campaign, lead, {
@@ -1556,6 +1571,8 @@ async function tryAutoReplyForCampaign(campaign, account) {
       fmStep,
       lastFuTemplate,
       lastFuStepNum,
+      inboundRole,
+      recruiterProfile,
     })
     if (aiRes.error) {
       // Gemini timeout retry (2026-05-29 fix): timeout es transitorio, no permanente.
@@ -1603,6 +1620,13 @@ async function tryAutoReplyForCampaign(campaign, account) {
     // responder que enviar basura — el lead se queda 'replied' y se reintenta.
     if (hasLeftoverPlaceholder(aiRes.message)) {
       console.warn(`[SCH-EXT] 🚫 auto-reply a ${lead.full_name} BLOQUEADO por placeholder: ${aiRes.message.match(/\[[^\]]*\]|\{[^}]*\}/)?.[0]?.slice(0,40)}`)
+      continue
+    }
+
+    // Mismo criterio para output meta: "User Safety: safe." se le envió a un lead el
+    // 17-ago porque el veredicto del clasificador del modelo pasaba todos los guards.
+    if (isMetaOutput(aiRes.message)) {
+      console.warn(`[SCH-EXT] 🚫 auto-reply a ${lead.full_name} BLOQUEADO por output meta/corto: "${aiRes.message.slice(0, 60)}"`)
       continue
     }
 
