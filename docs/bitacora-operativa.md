@@ -18,6 +18,27 @@
 
 ## ✅ Resuelto
 
+### ⚡ CPU al 99% en Supabase — NO era solo el free tier  [17-ago-2026, cambios en DB]
+El panel marcaba **COMPUTE 99% / CPU 99%** (memoria 52%, disco 4%). La respuesta fácil era "es el tier Free"; el reparto real de CPU (`pg_stat_statements`) dijo que había **dos causas a la vez**:
+
+| % CPU | Qué | Diagnóstico |
+|---|---|---|
+| **22,3%** | `/api/extension/account-status` (`apps/orion/.../route.ts:50`) | pedía SOLO el último comando completado (`limit 1`) pero hacía **Seq Scan** de la tabla entera: ningún índice ordenaba por `completed_at` |
+| 8,6% | introspección de esquema de PostgREST | 4 llamadas a **14,5 s** cada una ⇒ es la operación que reventó como `PGRST002` en el outage de la mañana. **Cierra el círculo del diagnóstico** |
+| 8,0% | `set_config` por petición (47.759 llamadas) | inherente a PostgREST; baja con el nº de peticiones (de ahí el poll a 30s) |
+| 5,6% | vista `v_crm_lead_list` | 166-302 ms por consulta |
+
+**Fix 1 — índice `idx_extcmd_account_completed_at`** `(account_id, completed_at desc) where completed_at is not null`. Seq Scan → Index Scan, **buffers 315 → 3**, 1,68 ms → 0,05 ms. ~35× menos trabajo en el mayor consumidor individual.
+
+**Fix 2 — `v_crm_lead_list` con LATERAL en vez de CTE.** Sus 3 CTE (`ev_counts`/`cmd_last`/`cmd_errors`) **agregaban sobre las tablas enteras** y solo después se filtraba por cuenta: para devolver 25 filas calculaba los contadores de los 1.492 leads (Seq Scan de `conversation_events` 4.566 filas + `conversations` 1.492). Ahora son `LEFT JOIN LATERAL` ⇒ solo se calculan sobre las filas devueltas, con índices que **ya existían** (`conversations_lead_id_key`, `idx_conv_events_conversation`, `idx_extcmd_related_lead_created`, `idx_extcmd_related_lead_status_recent`). Detalle: `conversations.lead_id` es UNIQUE ⇒ el LATERAL se cuelga del join `c` que la vista ya hacía, en vez de re-escanear `conversations`.
+- **Medido espalda con espalda**: listado ordenado del CRM **663 ms → 29 ms**; resumen de `health_flags` 274 ms → 80 ms.
+- **Equivalencia PROBADA antes de aplicar**: se creó una vista candidata, se comparó con `EXCEPT` en ambos sentidos ⇒ **2.072 filas y 0 diferencias**. Solo entonces se hizo el swap.
+- `CREATE OR REPLACE` (no `DROP`) para **conservar los GRANT** del pase de seguridad de jul-2026. Verificado tras aplicar: `anon` sigue **sin** SELECT, `authenticated` lo mantiene.
+
+⚠️ **Cautela con los números absolutos**: el mismo plan midió **29, 78 y 504 ms** en tres pasadas. La instancia está throttled (Nano), así que el reloj oscila; lo que no oscila es la estructura del plan. Comparar siempre en la misma pasada, nunca contra una medición de otro momento.
+
+**Conclusión operativa**: el free tier pone el techo y la carga ineficiente subía el suelo. Estos fixes bajan el suelo; **el Pro sigue haciendo falta, pero por los backups** (backlog #8), no por el CPU.
+
 ### 📇 Digest a clientes DESBLOQUEADO — ebooms.com verificado + marca propia  [17-ago-2026, `a5228ee` + `fe4ef22`]
 Cierra el backlog #14: desde el 12-ago los digests per-campaña daban **Resend 403** en 3 de las 4 campañas (`from=onboarding@resend.dev` = modo test, solo entrega al dueño de la cuenta). **Los clientes no habían recibido ni uno.**
 - **Dominio**: `ebooms.com` verificado en Resend (cuenta walfre.am, **Pro** — el límite de 1 dominio era del Free). DNS creado por AWS CLI en Route 53 (zona `Z03150043832D3KGPJIWH`, cuenta `010438486750`): `resend._domainkey` TXT (DKIM, 218 chars ⇒ cupo en una sola cadena), `send` MX (`10 feedback-smtp.us-east-1.amazonses.com`), `send` TXT (`v=spf1 include:amazonses.com ~all`) y `_dmarc` TXT (`p=none` + rua). Verificado DKIM+SPF+MX en verde.
