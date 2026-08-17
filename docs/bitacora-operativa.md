@@ -18,6 +18,30 @@
 
 ## ✅ Resuelto
 
+### 🏢 Aduanas Infinity invitaba a empresas FUERA de su lista  [17-ago-2026, `f4c892f`]
+**Queja del cliente**: la campaña enviaba conexiones, pero no a las empresas de su lista.
+
+**Causa raíz — el scoping de empresa era DECORATIVO.** Desde el corte del URN (12-ago) las 42 empresas de esa campaña están `unresolved` con **0 URN**, así que toda búsqueda va degradada: sin URN no hay facet `currentCompany` y el nombre viaja como **texto libre**. LinkedIn lo matchea tan laxo que devuelve a cualquiera que cuadre con **puesto + geo**, ignorando la empresa en la práctica.
+
+**Medición (129 leads de la campaña)**:
+| Grupo | n | Qué es |
+|---|---|---|
+| Headline nombra la empresa objetivo | **43** | correctos ✅ |
+| Headline nombra OTRA empresa | **46** | BWI, Sensata, Dana, Astemo, ISUZU, Merik, Samsung, Degas Café… ❌ |
+| Con objetivo pero sin headline | 15 | no verificable |
+| Sin objetivo (fuga title-only pre-`ecdad90`) | 25 | Serviacero, Grupo Nexos, MAHLE ❌ |
+
+⇒ **55% de los leads con empresa asignada no trabajaban ahí.**
+
+**Fix**: `ingestSearch` **ya calculaba `companyIsCertain`** (desde el 27-jul) pero solo lo usaba para decidir si estampaba `currentCompany` — no descartaba nada. Añadido `headlineNamesCompany` (`lib/company-match.js`), chokepoint hermano de `matchesCampaignGeo`: server-side, cubre free Y SalesNav, no toca los scrapers del DOM. Corre **solo** cuando `targetCompany && !companyIsCertain` (con URN el facet ya garantiza la empresa).
+- ⚠️ **Exige TODOS los tokens significativos, no uno**: con `some`, "Gerente en **ISUZU Motors** de México" pasaba como "General **Motors** de México" — falso positivo real de la campaña.
+- Sin headline ⇒ se descarta: en degradado no existe otra evidencia, y la regla del proyecto es *"mejor menos leads de la lista que basura fuera de parámetros"* (decisión 10-ago).
+- Self-check `scripts/test-company-match.js` con los headlines reales que se colaron.
+
+**Limpieza aplicada**: 34 `scraped` de empresa ajena → `disqualified` (`company_mismatch_degraded_search`); pool 70 → 36, ahora correctos. Y **10 ya contactados fuera de lista** (4 de empresa ajena + 6 de la fuga title-only) → `automation_paused=true` + `off_list_company`. **Se usó pausa y NO `dead` a propósito**: es reversible y no los da por perdidos — un Director de Compras de otra automotriz puede seguir siendo prospecto válido para una agencia aduanal; la lista es preferencia de targeting, no descalificación. No se tocaron los 15 sin headline (ambiguos) ni los correctos.
+
+⚠️ **Esto es contención, no cura.** Mientras la ext no recupere el URN, cada búsqueda seguirá trayendo mayormente gente equivocada y el filtro la tirará: mucho trabajo para pocos leads. El fix de raíz sigue siendo sacar `urn:li:fsd_company:<id>` de `/company/<slug>/`.
+
 ### ⚡ CPU al 99% en Supabase — NO era solo el free tier  [17-ago-2026, cambios en DB]
 El panel marcaba **COMPUTE 99% / CPU 99%** (memoria 52%, disco 4%). La respuesta fácil era "es el tier Free"; el reparto real de CPU (`pg_stat_statements`) dijo que había **dos causas a la vez**:
 
