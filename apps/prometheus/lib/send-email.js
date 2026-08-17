@@ -3,18 +3,23 @@
 // jamás throw, no-op seguro sin credenciales).
 //
 // Config (prometheus/.env):
-//   RESEND_API_KEY — API key de Resend. Sin ella, sendEmail es no-op {ok:false}.
-//   DIGEST_FROM    — remitente por default, formato 'Nombre <email@dominio-verificado>'.
-//                    El dominio DEBE estar verificado en Resend para enviar a terceros.
+//   RESEND_API_KEY  — API key de Resend. Sin ella, sendEmail es no-op {ok:false}.
+//   DIGEST_FROM     — remitente por default, formato 'Nombre <email@dominio-verificado>'.
+//                     El dominio DEBE estar verificado en Resend para enviar a terceros.
+//   DIGEST_REPLY_TO — (17-ago-2026) buzón REAL al que van las respuestas. El From del digest
+//                     es una dirección de envío (digest@…) que puede no existir como buzón;
+//                     sin Reply-To, un cliente que contesta "me interesa" se come un rebote.
+//                     Opcional: sin la var, el header no se manda y el comportamiento es el
+//                     de siempre.
 
 const SEND_TIMEOUT_MS = 10_000
 
 /**
  * Envía un email por Resend. Nunca lanza.
- * @param {{to: string[]|string, subject: string, html: string, from?: string}} params
+ * @param {{to: string[]|string, subject: string, html: string, from?: string, replyTo?: string}} params
  * @returns {Promise<{ok: true, id: string} | {ok: false, error: string}>}
  */
-export async function sendEmail({ to, subject, html, from = process.env.DIGEST_FROM }) {
+export async function sendEmail({ to, subject, html, from = process.env.DIGEST_FROM, replyTo = process.env.DIGEST_REPLY_TO }) {
   const apiKey = process.env.RESEND_API_KEY || ''
   if (!apiKey) return { ok: false, error: 'RESEND_API_KEY no configurada' }
   if (!from) return { ok: false, error: 'DIGEST_FROM no configurado' }
@@ -26,7 +31,7 @@ export async function sendEmail({ to, subject, html, from = process.env.DIGEST_F
     const res = await fetch('https://api.resend.com/emails', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-      body:    JSON.stringify({ from, to, subject, html }),
+      body:    JSON.stringify({ from, to, subject, html, ...(replyTo ? { reply_to: replyTo } : {}) }),
       signal:  ctrl.signal,
     })
     if (!res.ok) {
