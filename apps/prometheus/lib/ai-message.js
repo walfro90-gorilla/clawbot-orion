@@ -23,6 +23,17 @@ const OPENAI_COMPAT = {
   cerebras:   { baseUrl: 'https://api.cerebras.ai/v1',     keyEnv: 'CEREBRAS_API_KEY',   model: process.env.CEREBRAS_MODEL   || 'llama-3.3-70b' },
   openrouter: { baseUrl: 'https://openrouter.ai/api/v1',   keyEnv: 'OPENROUTER_API_KEY', model: process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct' },
   together:   { baseUrl: 'https://api.together.xyz/v1',    keyEnv: 'TOGETHER_API_KEY',   model: process.env.TOGETHER_MODEL   || 'meta-llama/Llama-3.3-70B-Instruct-Turbo' },
+  // Moonshot / Kimi (17-ago-2026). Host GLOBAL `.ai` — el `.cn` rechaza esta key con
+  // "Invalid Authentication". Dos rarezas propias que exigen los campos de abajo:
+  //   · `fixedTemperature`: kimi-k3 y k2.6 devuelven 400 "invalid temperature: only 1 is
+  //     allowed for this model" con cualquier otro valor (nuestros defaults son 0.85/0.2).
+  //   · `tokenMultiplier`: los tokens de RAZONAMIENTO cuentan dentro de completion_tokens
+  //     (296 tokens para un JSON de 2 campos). Con el cap normal de 300 el JSON se trunca
+  //     y llega vacío. El texto útil viene limpio en `message.content` — el razonamiento
+  //     va aparte en `reasoning_content`, que no leemos.
+  // OJO: el plan actual topa en **3 RPM por organización** → sirve de respaldo, no de
+  // primario (Groq es de paga y responde en <1s; Kimi tarda ~9s).
+  moonshot:   { baseUrl: 'https://api.moonshot.ai/v1',     keyEnv: 'MOONSHOT_API_KEY',   model: process.env.MOONSHOT_MODEL   || 'kimi-k3', fixedTemperature: 1, tokenMultiplier: 4 },
 }
 
 // Puro + exportado para test: nombre de proveedor → config OpenAI-compat, o null si no es uno.
@@ -464,8 +475,11 @@ async function callOpenAICompatRaw(providerName, systemPrompt, userPrompt, opts,
   const body = {
     model: cfg.model,
     messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
-    temperature: opts.temperature ?? (json ? 0.2 : 0.85),
-    max_tokens: json ? 300 : 500,
+    // fixedTemperature / tokenMultiplier: ajustes POR PROVEEDOR (ver OPENAI_COMPAT). Un
+    // modelo de razonamiento puede exigir temperature=1 y gastar el presupuesto de tokens
+    // pensando antes de escribir; sin esto devuelve 400 o texto truncado.
+    temperature: cfg.fixedTemperature ?? opts.temperature ?? (json ? 0.2 : 0.85),
+    max_tokens: (json ? 300 : 500) * (cfg.tokenMultiplier ?? 1),
   }
   if (json) body.response_format = { type: 'json_object' }
   const resp = await fetch(`${cfg.baseUrl}/chat/completions`, {

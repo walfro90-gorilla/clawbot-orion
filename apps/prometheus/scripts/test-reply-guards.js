@@ -11,7 +11,15 @@ import assert from 'node:assert/strict'
 process.env.SUPABASE_URL ||= 'https://selfcheck.supabase.co'
 process.env.SUPABASE_SERVICE_ROLE_KEY ||= 'selfcheck-key-not-real'
 
-const { isMetaOutput, inboundRoleBlock, buildSystemPrompt } = await import('../lib/ai-message.js')
+const { isMetaOutput, inboundRoleBlock, buildSystemPrompt, resolveProvider } = await import('../lib/ai-message.js')
+
+// ── 0. Rarezas por proveedor que NO se pueden "limpiar" sin romper el envío ─────
+// Kimi devuelve 400 con cualquier temperature != 1, y sus tokens de razonamiento se
+// comen el cap de max_tokens (JSON truncado → vacío). Ambos campos son obligatorios.
+const kimi = resolveProvider('moonshot')
+assert.equal(kimi?.fixedTemperature, 1, 'kimi solo acepta temperature=1')
+assert.ok((kimi?.tokenMultiplier ?? 1) > 1, 'kimi necesita presupuesto extra por el razonamiento')
+assert.ok(kimi.baseUrl.includes('moonshot.ai'), 'el host .cn rechaza la key')
 
 // ── 1. Anti-meta: lo que NO es un mensaje ──────────────────────────────────────
 assert.equal(isMetaOutput('User Safety: safe.'), true, 'el caso real de prod debe bloquearse')
