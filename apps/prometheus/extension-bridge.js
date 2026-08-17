@@ -27,6 +27,7 @@ import { isSystemLinkedInAccount } from './lib/system-accounts.js'
 import { isGroupConversationName } from './lib/group-conversation.js'
 import { applyLeadAttemptOutcome, isNonFaultError } from './lib/lead-failure.js'
 import { noteDbResult, dbCircuitOpen } from './lib/db-circuit.js'
+import { headlineNamesCompany } from './lib/company-match.js'
 
 dotenv.config()
 
@@ -1413,7 +1414,7 @@ async function ingestSearch(commandId, result) {
   const { data: camp } = await supabase.from('campaigns').select('search_location').eq('id', campaignId).maybeSingle()
   const geoRaw = camp?.search_location ?? ''
   let droppedGeo = 0
-  const profiles = rawProfiles.filter(p => {
+  let profiles = rawProfiles.filter(p => {
     if (matchesCampaignGeo(p.location, geoRaw)) return true
     droppedGeo++; return false
   })
@@ -1421,6 +1422,27 @@ async function ingestSearch(commandId, result) {
   if (profiles.length === 0) {
     await bumpDrySearchStreak(campaignId, 0)
     return
+  }
+
+  // (17-ago) FILTRO DE EMPRESA en modo DEGRADADO. Con URN, LinkedIn ya garantiza la empresa
+  // vía facet y no hay nada que verificar. SIN URN (desde el corte del 12-ago, toda empresa
+  // nueva) el nombre viaja como texto libre y el scoping es DECORATIVO: medido en Aduanas
+  // Infinity, 46 de 104 leads trabajaban en otra empresa (BWI, Sensata, Dana, Degas Café,
+  // ISUZU, Samsung…) y al cliente le llegaron invitaciones fuera de su lista.
+  // Chokepoint hermano de matchesCampaignGeo: cubre free Y SalesNav sin tocar los scrapers.
+  if (targetCompanyName && !companyIsCertain) {
+    let droppedCompany = 0
+    profiles = profiles.filter(p => {
+      if (headlineNamesCompany(p.headline, targetCompanyName)) return true
+      droppedCompany++; return false
+    })
+    if (droppedCompany > 0) {
+      console.log(`[bridge] search ${commandId.slice(0,8)}: 🏢 ${droppedCompany} perfiles que NO trabajan en "${targetCompanyName}" descartados (búsqueda degradada sin URN)`)
+    }
+    if (profiles.length === 0) {
+      await bumpDrySearchStreak(campaignId, 0)
+      return
+    }
   }
 
   // Dedupe contra leads existentes en la campaña por linkedin_url
