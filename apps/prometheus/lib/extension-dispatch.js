@@ -243,6 +243,10 @@ export const LEAD_FAULT_ERRORS = new Set([
   'lead_invite_still_pending',
   'profile_not_found',
   'thread_header_mismatch',
+  // (17-ago-2026) LinkedIn exige el email del contacto para invitarlo: propiedad de ESE
+  // perfil, no de la cuenta. Sin esto, una racha de perfiles con muro de email contaria
+  // como fallos de cuenta y el circuit breaker la auto-pausaria sin motivo.
+  'invite_requires_email',
 ])
 
 // Errores de PÁGINA/RENDER que NO son culpa de la cuenta. Estos errores indican

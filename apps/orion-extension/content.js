@@ -2347,6 +2347,19 @@ async function sendInviteFromCustomInvite(payload) {
   emitInviteCheckpoint('modal_found', { withNote })
   await sleep(randInt(800, 1400))  // hidratación
 
+  // MURO DE EMAIL: abortar limpio ANTES de intentar enviar (ver detectInviteEmailWall).
+  // Va aquí, tras la hidratación y antes de las dos rutas, porque bloquea ambas.
+  const emailWall = detectInviteEmailWall()
+  if (emailWall) {
+    console.warn('[Orion content] Muro de EMAIL detectado — abortando invite', emailWall)
+    emitInviteCheckpoint('invite_requires_email', emailWall)
+    await closeInviteModal()   // no dejar el modal colgado bloqueando la pestaña
+    return {
+      action: 'send_invite', status: 'error', error: 'invite_requires_email',
+      emailWall, url: location.href,
+    }
+  }
+
   // ── PATH A.1: SIN NOTA — Click directo "Enviar sin nota" o "Enviar" ──────
   if (!withNote) {
     const sendNoNoteBtn = findSendWithoutNoteButton()
@@ -2493,6 +2506,56 @@ function findSendButtonInPreloadModal() {
     const t = (b.textContent ?? '').trim().toLowerCase()
     return t === 'enviar' || t === 'send' || /^enviar.+invitaci|send invitation/i.test(t)
   })
+}
+
+// ── Muro de EMAIL de LinkedIn (v0.10.29, 17-ago-2026) ───────────────────────
+// Para ciertos perfiles (2º/3er grado, según privacidad/región) LinkedIn exige el
+// EMAIL del contacto "para comprobar que lo conoces" y deja "Enviar sin nota"
+// DESHABILITADO. Documentado desde jul-2026 en Sales Navigator; ahora aparece
+// también en el perfil PÚBLICO, que era justo el flujo elegido para esquivarlo (v7-A).
+//
+// Sin esta detección la ext clickeaba el botón deshabilitado, no pasaba nada, y el
+// modal se quedaba ABIERTO hasta que verifyInviteSent expiraba: resultado
+// `sent_unconfirmed`/timeout (ambiguo) + modal colgado bloqueando la pestaña.
+// Medido en Wal: 12 casos entre el 15 y el 17-ago.
+//
+// NO se rellena el email a propósito: es un dato personal que no tenemos y que
+// LinkedIn usa para verificar una relación real. Se aborta y el lead se descarta.
+function isBtnDisabled(btn) {
+  if (!btn) return true
+  return btn.disabled === true ||
+         btn.getAttribute('aria-disabled') === 'true' ||
+         btn.getAttribute('disabled') !== null ||
+         btn.classList.contains('artdeco-button--disabled')
+}
+
+function detectInviteEmailWall() {
+  const modal = document.querySelector('[role="dialog"], .artdeco-modal')
+  if (!modal) return null
+  const txt = (modal.textContent || '').toLowerCase()
+  // Señal A: el texto pide el email para verificar que conoces al miembro.
+  const asksEmail = /introduce su (correo|email)|introduce el (correo|email)|enter (their|the recipient)/i.test(txt) ||
+                    (/comprobar que conoces|verify you know|please enter .*email/i.test(txt))
+  // Señal B: hay un input de email dentro del modal.
+  const emailInput = modal.querySelector('input[type="email"], input[name*="email" i], input[id*="email" i]')
+  // Señal C: el botón de enviar está deshabilitado.
+  const sendBtn = findSendWithoutNoteButton()
+  const sendDisabled = !!sendBtn && isBtnDisabled(sendBtn)
+  // Exigimos la señal de intención (A o B) Y que efectivamente no se pueda enviar.
+  // Solo-C sería demasiado laxo: un botón puede estar deshabilitado un instante por hidratación.
+  if ((asksEmail || emailInput) && (sendDisabled || !sendBtn)) {
+    return { asksEmail, hasEmailInput: !!emailInput, sendDisabled }
+  }
+  return null
+}
+
+async function closeInviteModal() {
+  const closeBtn = document.querySelector(
+    '[role="dialog"] button[aria-label*="cerrar" i], [role="dialog"] button[aria-label*="close" i], .artdeco-modal__dismiss'
+  )
+  if (closeBtn) { await humanClick(closeBtn); return true }
+  document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  return false
 }
 
 // Botón "Enviar sin nota" / "Send without a note" / "Enviar" directo en modal preload

@@ -685,6 +685,32 @@ async function handleCommandResult(msg) {
   }
 
   // profile_not_found = LinkedIn devolvió /404/ → lead deleted/private → marcar dead
+  // (17-ago-2026, ext 0.10.29) invite_requires_email: LinkedIn exige el EMAIL del contacto
+  // para dejar enviar la invitación ("comprobar que conoces a este miembro") y deshabilita
+  // "Enviar sin nota". Es una propiedad de ESE perfil (grado/privacidad/región), no un fallo
+  // de la cuenta ni un race de UI ⇒ reintentar es inútil: siempre pedirá lo mismo.
+  // Antes de detectarlo, la ext clickeaba el botón deshabilitado y el resultado era un
+  // `sent_unconfirmed`/timeout ambiguo que el bridge daba por ENVIADO (okStatuses).
+  // El email NO se rellena a propósito: es un dato personal que no tenemos.
+  if (action === 'send_invite' && result?.error === 'invite_requires_email') {
+    try {
+      const { data: cmd } = await supabase
+        .from('extension_commands')
+        .select('related_lead_id')
+        .eq('id', commandId)
+        .single()
+      if (cmd?.related_lead_id) {
+        await supabase.from('leads').update({
+          status: 'disqualified',
+          last_failure_reason: 'invite_requires_email',
+        }).eq('id', cmd.related_lead_id)
+        console.log(`[bridge] 📧 Lead ${cmd.related_lead_id.slice(0,8)} descalificado: LinkedIn exige email para invitarlo`)
+      }
+    } catch (err) {
+      console.error(`[bridge] invite_requires_email handler failed:`, err.message)
+    }
+  }
+
   if (action === 'send_followup' && result?.error === 'profile_not_found') {
     try {
       const { data: cmd } = await supabase
