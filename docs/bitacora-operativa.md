@@ -18,6 +18,22 @@
 
 ## ✅ Resuelto
 
+### 🔗 Accept-detection rota en silencio: 3 fallos encadenados  [18-ago-2026, `81a9464` + `b4bfe65`, ext 0.10.30]
+**Síntoma**: Josh con **207 invitaciones esperando y 1 solo accept detectado en 72h**, mientras Café (228 esperando) llevaba 16. Sus `check_connections`: **16 timeouts seguidos** con `content_died_mid_work`.
+
+**1. El scan NO moría — llegaba tarde** (`81a9464`). El comando `f4afd9e0` figura como `timeout`/`content_died_mid_work` con result null, pero el bridge loggeó `→ OK` e **ingirió 396 conexiones**. El scan tarda **más de 10 min** (TTL del comando) porque la lista de Josh es casi el triple que la de Café (396 vs 146) + el freno de timers de Chrome. `cleanupExpired` lo enterraba y el resultado caía en una fila muerta. **TTL 10 → 25 min.**
+- ⚠️ **No era cosmético**: la red de seguridad de accept-detection exige un `check_connections` **`completed`** con datos en 24h; sin él, `ingestCheckSentInvites` cae a la **inferencia por ausencia** — justo lo que se eliminó el 15-ago (`6e0b586`) por fabricar `connected` falsos. **El TTL corto reactivaba en silencio el bug que ese commit cerró.**
+
+**2. El hack de foco no cubría la ventana MINIMIZADA** (`b4bfe65`, background.js). `tabs.update({active:true})` hace la pestaña activa *dentro de su ventana*; si la ventana está minimizada la página sigue invisible (`document.hidden===true`) y el IntersectionObserver del lazy-load **no dispara**. `windows.update({focused:true})` **no restaura una ventana minimizada**. Evidencia en `scanDebug`: scans con `rounds:0` + `hiddenWaits:21` devolvían **~10 conexiones en vez de 140-380** (Rosy siempre, Café intermitente). Ahora se consulta el `state` y solo si es `minimized` se manda `state:'normal'` — mandarlo siempre des-maximizaría una ventana maximizada (intrusivo en la máquina del operador).
+
+**3. Un scan degradado contaba como SANO** (`b4bfe65`, el peor de los tres). Con la pestaña oculta el scan devuelve `status: ok` con los ~10 perfiles que ya estaban en el DOM. Al bridge le bastaba `count>0` ⇒ daba la accept-detection por viva, buscaba accepts **solo entre esos 10** Y desactivaba la red de seguridad. **Peor que no tener scan**: silencio con apariencia de normalidad. La ext marca `degraded: rounds===0 && hiddenWaits>0` (rounds===0 solo ocurre si estuvo oculta desde el principio; una lista pequeña siempre hace ≥1 ronda) y `connectionsHealthy` lo exige `false`.
+
+**Dato tranquilizador**: con las 396 conexiones reales se confirmaron **0 accepts de sus 207 pendientes** ⇒ no es que no se detecten, es que nadie de esa cola ha aceptado. Coherente con el historial de invitaciones fantasma.
+
+⚠️ **Correcciones a hipótesis intermedias** (para no repetir el camino): las **0 micro-fases NO probaban** que el content script muriera al instante — `checkConnections` no emite ninguna, tampoco en las cuentas que funcionan. Y `content_died_mid_work` **no era regresión de 0.10.28**: viene del 13-ago, así que el presupuesto de 75s atacó un síntoma que no era el de Josh.
+
+🟡 **PENDIENTE**: instalar **0.10.30** en las 4 máquinas (el arreglo del foco vive en la ext). **Verificación**: en el próximo scan, `scanDebug.rounds > 0` y `hiddenWaits: 0` ⇒ la ventana se restauró. Si sigue `rounds:0`, la ventana no estaba minimizada sino **tapada por otra** y hay que ir por otro camino.
+
 ### 📧 Muro de EMAIL de LinkedIn en el perfil público — detectado en vez de chocar  [17-ago-2026, ext 0.10.29, `667b3dd`]
 **Hallazgo del operador** (captura): para ciertos perfiles (2º/3er grado, según privacidad/región) LinkedIn muestra *"Para comprobar que conoces a este miembro, introduce su email"* y deja **"Enviar sin nota" DESHABILITADO**. Documentado desde jul-2026 **en Sales Navigator** — y el flujo v7-A se movió al perfil público precisamente para esquivarlo. **Ahora aparece también en `/in/`**, es decir en el flujo que se creía libre del muro.
 
