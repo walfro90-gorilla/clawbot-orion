@@ -40,7 +40,14 @@
 
 **Limpieza aplicada**: 34 `scraped` de empresa ajena → `disqualified` (`company_mismatch_degraded_search`); pool 70 → 36, ahora correctos. Y **10 ya contactados fuera de lista** (4 de empresa ajena + 6 de la fuga title-only) → `automation_paused=true` + `off_list_company`. **Se usó pausa y NO `dead` a propósito**: es reversible y no los da por perdidos — un Director de Compras de otra automotriz puede seguir siendo prospecto válido para una agencia aduanal; la lista es preferencia de targeting, no descalificación. No se tocaron los 15 sin headline (ambiguos) ni los correctos.
 
-⚠️ **Esto es contención, no cura.** Mientras la ext no recupere el URN, cada búsqueda seguirá trayendo mayormente gente equivocada y el filtro la tirará: mucho trabajo para pocos leads. El fix de raíz sigue siendo sacar `urn:li:fsd_company:<id>` de `/company/<slug>/`.
+**✅ VERIFICADO EN VIVO (18-ago 00:12Z)** con una búsqueda real de `Nissan Motor Corporation`:
+```
+search 80cab445: 🏢 11 perfiles que NO trabajan en "Nissan Motor Corporation" descartados (búsqueda degradada sin URN)
+✅ search ingested: 1 leads nuevos en campaña 781d93ae @Nissan Motor Corporation
+```
+El único que entró: **Edgar Aparicio — "SCO Quality & Packaging Manager en Nissan Motor Corporation"** (empresa de la lista + puesto de la whitelist). **11 de 12 perfiles que devolvió LinkedIn eran de otra empresa** — ese 92% es exactamente lo que antes llegaba al cliente.
+
+⚠️ **Esto es contención, no cura, y el 92% lo demuestra.** Mientras la ext no recupere el URN, cada búsqueda gasta una visita para rendir ~1 lead: el filtro protege la calidad pero **el volumen se desploma**. El fix de raíz sigue siendo sacar `urn:li:fsd_company:<id>` de `/company/<slug>/`. Nota de config: `min_pending_threshold` de esa campaña 15 → **45** (igual que Josh; pool más lleno para una campaña de cliente).
 
 ### ⚡ CPU al 99% en Supabase — NO era solo el free tier  [17-ago-2026, cambios en DB]
 El panel marcaba **COMPUTE 99% / CPU 99%** (memoria 52%, disco 4%). La respuesta fácil era "es el tier Free"; el reparto real de CPU (`pg_stat_statements`) dijo que había **dos causas a la vez**:
