@@ -18,6 +18,19 @@
 
 ## ✅ Resuelto
 
+### 📧 Muro de EMAIL de LinkedIn en el perfil público — detectado en vez de chocar  [17-ago-2026, ext 0.10.29, `667b3dd`]
+**Hallazgo del operador** (captura): para ciertos perfiles (2º/3er grado, según privacidad/región) LinkedIn muestra *"Para comprobar que conoces a este miembro, introduce su email"* y deja **"Enviar sin nota" DESHABILITADO**. Documentado desde jul-2026 **en Sales Navigator** — y el flujo v7-A se movió al perfil público precisamente para esquivarlo. **Ahora aparece también en `/in/`**, es decir en el flujo que se creía libre del muro.
+
+**El bug**: `findSendWithoutNoteButton` localizaba el botón **solo por texto**, sin mirar `disabled`/`aria-disabled` (sí había esa comprobación para el composer de mensajes, líneas 676-730, pero no en la ruta de invite). La ext clickeaba el botón muerto, no pasaba nada, el modal quedaba **abierto** y `verifyInviteSent` expiraba a los 8s ⇒ `sent_unconfirmed`/`timeout`, que el bridge da por **enviado** (está en `okStatuses`) + pestaña bloqueada por el modal colgado.
+
+**Alcance medido**: 12 casos, **solo en Wal**, del 15 al 17-ago. Contrastados contra la lista real de "Enviadas": **7 SÍ se habían enviado** (era solo fallo de detección), 3 posteriores al último escaneo (no concluyente), 1 aceptado (por eso ya no figura en pendientes), **1 sin explicar**. ⇒ El muro es real pero **puntual por perfil**, no una caída masiva. La red de seguridad de `verifyInviteSent` (13-ago) hizo su trabajo: no los reportó como enviados a ciegas.
+
+**Fix (ext)**: `detectInviteEmailWall()` aborta limpio antes de intentarlo y **cierra el modal**. ⚠️ Exige **dos señales**: intención (texto que pide el email **o** input de email) **Y** que no se pueda enviar. Solo-botón-deshabilitado sería demasiado laxo — se deshabilita un instante durante la hidratación y abortaría invites buenos; **ese es el caso crítico del self-check** `scripts/test-email-wall.js`, escrito con el texto real de la captura. **El email NO se rellena a propósito**: es un dato personal que no tenemos y que LinkedIn usa para verificar una relación real.
+
+**Fix (server)**: `invite_requires_email` ⇒ lead a `disqualified` (reintentar es inútil: ese perfil siempre pedirá lo mismo) + añadido a `LEAD_FAULT_ERRORS` para que una racha de perfiles con muro no cuente como fallos de cuenta y el circuit breaker no la auto-pause sin motivo.
+
+🟡 **PENDIENTE del operador**: instalar **0.10.29** en las 4 máquinas (`curl -fsSL http://209.50.63.149/download/install.sh | bash` + recargar en `chrome://extensions`). Bundle ya republicado y verificado en `/opt/orion-public`. **Verificar con `linkedin_accounts.ext_version` = 0.10.29**, no con "recargué la extensión".
+
 ### 🏢 Aduanas Infinity invitaba a empresas FUERA de su lista  [17-ago-2026, `f4c892f`]
 **Queja del cliente**: la campaña enviaba conexiones, pero no a las empresas de su lista.
 
