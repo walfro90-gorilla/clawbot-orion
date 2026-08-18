@@ -815,8 +815,22 @@ export async function dispatchCheckSentInvites(account) {
 // (2026-07-04) Accept-detection POSITIVA: scrapea la lista de conexiones y marca connected
 // por PRESENCIA (no por ausencia como check_sent_invites). Backstop que cierra las zonas ciegas.
 export async function dispatchCheckConnections(account) {
+  // (18-ago-2026) TTL 10 -> 25 min. El scan de una cuenta con red grande tarda MAS de 10min
+  // y el resultado llegaba DESPUES del reap: la fila ya estaba en 'timeout'
+  // (content_died_mid_work) con result null, aunque el bridge SI ingeria las conexiones.
+  // Caso Josh: 16 scans seguidos marcados muertos; el ultimo entrego 396 conexiones tarde.
+  //
+  // No es cosmetico: la red de seguridad de accept-detection (ingestCheckSentInvites) exige
+  // un check_connections `completed` con datos en 24h; sin el cae a la inferencia por
+  // AUSENCIA, que es justo lo que se elimino el 15-ago (6e0b586) por fabricar connected
+  // falsos. O sea, el TTL corto reactivaba el bug que ese commit habia cerrado.
+  //
+  // El scan es lento por dos motivos: listas grandes (Josh 396 vs Cafe 146) y el freno de
+  // timers de Chrome en pestanas ocultas (se ve en scanDebug: rounds=0 + hiddenWaits=21).
+  // ponytail: subir el TTL es el fix minimo que deja de TIRAR datos buenos. Que el scan sea
+  // lento y bloquee otros comandos de la cuenta mientras corre es un problema aparte.
   return dispatchCommand(account.id, 'check_connections', {}, {
-    expiresInMinutes: 10,
+    expiresInMinutes: 25,
   })
 }
 
