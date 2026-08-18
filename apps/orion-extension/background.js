@@ -700,7 +700,23 @@ async function executeCommand(commandId, action, payload) {
       try {
         await chrome.tabs.update(tab.id, { active: true })
         if (tab.windowId != null) {
-          await chrome.windows.update(tab.windowId, { focused: true })
+          // (18-ago-2026) VENTANA MINIMIZADA: `active:true` hace la pestaña activa DENTRO de
+          // su ventana, pero si la ventana está minimizada la página sigue invisible
+          // (`document.hidden === true`) y el IntersectionObserver del lazy-load NO dispara.
+          // `focused:true` por sí solo NO restaura una ventana minimizada.
+          // Medido en scanDebug: scans con `rounds:0` + `hiddenWaits:21` devolvían ~10
+          // conexiones en vez de 140-380 (Rosy siempre, Café intermitente).
+          //
+          // Solo se toca el state cuando está MINIMIZADA: mandar 'normal' a una ventana
+          // maximizada la des-maximizaría, que es intrusivo en la máquina del operador.
+          const win = await chrome.windows.get(tab.windowId).catch(() => null)
+          const update = { focused: true }
+          if (win?.state === 'minimized') update.state = 'normal'
+          await chrome.windows.update(tab.windowId, update)
+          if (update.state) {
+            console.log(`[Orion] anti-throttle: ventana estaba MINIMIZADA → restaurada (${action})`)
+            await new Promise(r => setTimeout(r, 400))  // dar tiempo a que el compositor la pinte
+          }
         }
       } catch (e) {
         console.warn(`[Orion] anti-throttle focus (${action}) falló (sigo igual): ${e?.message}`)

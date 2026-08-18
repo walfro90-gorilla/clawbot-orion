@@ -1183,7 +1183,13 @@ async function ingestCheckSentInvites(commandId, pending, statedTotal = null) {
     .eq('account_id', cmd.account_id).eq('action', 'check_connections').eq('status', 'completed')
     .gt('created_at', new Date(Date.now() - 24 * 3_600_000).toISOString())
     .order('created_at', { ascending: false }).limit(5)
-  const connectionsHealthy = (recentConnScan ?? []).some(c => (c.result?.connections?.length ?? 0) > 0)
+  // (18-ago-2026) Un scan DEGRADADO no cuenta como sano. Si la pestaña estuvo oculta, el
+  // lazy-load no dispara y el scan devuelve ~10 conexiones (las que ya estaban en el DOM)
+  // con status ok: antes bastaba count>0 para dar la accept-detection por viva, asi que los
+  // accepts se buscaban solo entre esos 10 Y ADEMAS se desactivaba esta red de seguridad.
+  // Peor que no tener scan. La ext marca `degraded` cuando rounds===0 && hiddenWaits>0.
+  const connectionsHealthy = (recentConnScan ?? []).some(c =>
+    (c.result?.connections?.length ?? 0) > 0 && c.result?.degraded !== true)
   if (connectionsHealthy) {
     const absent = invitedLeads.filter(l => l.sent_at && !isPending(l)).length
     console.log(`[bridge] check_sent_invites: ${absent} ausentes NO marcados (accepts los decide check_connections por presencia)`)

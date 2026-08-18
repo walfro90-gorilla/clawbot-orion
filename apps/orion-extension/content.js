@@ -5986,6 +5986,12 @@ async function checkConnections(payload = {}) {
   return {
     action: 'check_connections', status: 'ok',
     connections, count: connections.length,
+    // (18-ago-2026) `degraded`: la pestaña estuvo OCULTA y no se pudo scrollear ni una vez
+    // ⇒ el lazy-load (IntersectionObserver) nunca disparó y esto son solo los ~10 que ya
+    // estaban en el DOM, NO la lista real. Sin esta marca el bridge lo tomaba por un scan
+    // sano (le basta con count>0) y desactivaba la red de seguridad de accept-detection,
+    // buscando accepts solo entre esos 10. Medido: Rosy siempre, Café intermitente.
+    degraded: rounds === 0 && hiddenWaits > 0,
     scanDebug: { rounds, hiddenWaits, elapsedMs: Date.now() - startedAt, hitBudget: Date.now() - startedAt > TIME_BUDGET_MS },
     scrapedAt: new Date().toISOString(),
   }
