@@ -28,15 +28,31 @@ assert.equal(groups.get('Wal').size, 2)
 assert.equal(groups.get('Wal').get('Café').length, 2)
 assert.equal(groups.get('Josh').get('LATAM').length, 1)
 
-// Sin contact_info → email/tel en "—"; empresa cae a profile_data.currentCompany
+// Sin contact_info → sin mailto; empresa cae a profile_data.currentCompany
 let html = buildDigestHtml(groups, { dateLabel: 'lunes 10 de agosto', total: 4 })
 assert.ok(html.includes('Acme'))
 assert.ok(html.includes('CFO en Acme'))
-assert.ok(html.includes('—'))
 assert.ok(html.includes('href="https://linkedin.com/in/ana"'))
 assert.ok(!html.includes('mailto:'))
+assert.ok(html.includes('Reporte ORION'))
+assert.ok(html.includes('EBOOMS'))
+assert.ok(html.includes('LEADS GENERADOS'))
 
-// Con contact_info → email como mailto, phones unidos, company de contact_info gana
+// Numeración DESCENDENTE y orden del más reciente al más antiguo.
+const ordered = groupRows([
+  mkRow('Wal', 'Café', { full_name: 'Viejo',  connected_at: '2026-08-01T10:00:00Z' }),
+  mkRow('Wal', 'Café', { full_name: 'Nuevo',  connected_at: '2026-08-09T10:00:00Z' }),
+  mkRow('Wal', 'Café', { full_name: 'Medio',  connected_at: '2026-08-05T10:00:00Z' }),
+])
+html = buildDigestHtml(ordered, { dateLabel: 'x', total: 3 })
+assert.ok(html.indexOf('Nuevo') < html.indexOf('Medio'), 'el más reciente va primero')
+assert.ok(html.indexOf('Medio') < html.indexOf('Viejo'))
+// ojo: buscar '#1' a secas hace match dentro de los colores hex (#111111) —
+// anclar al render real del número: >#N<
+assert.ok(html.includes('>#3<') && html.includes('>#1<'), 'numera descendente')
+assert.ok(html.indexOf('>#3<') < html.indexOf('>#1<'), 'el número más alto va primero')
+
+// Con contact_info → email como mailto, teléfono en el bloque mono, company gana
 const rich = mkRow('Wal', 'Café', {
   contact_info: { email: 'ana@acme.com', phones: ['+52 55 1234 5678'], company: 'Acme Corp' },
 })
@@ -45,13 +61,50 @@ assert.ok(html.includes('mailto:ana@acme.com'))
 assert.ok(html.includes('+52 55 1234 5678'))
 assert.ok(html.includes('Acme Corp'))
 
-// Centinela {} (visitado, sin datos) → "—", sin crash
+// address → línea "Dirección:" en itálica (hoy el scraper no la produce; el
+// reporte debe pintarla en cuanto exista)
+html = buildDigestHtml(groupRows([mkRow('Wal', 'Café', {
+  contact_info: { address: 'Privada Paraíso 106, Monterrey, NL.' },
+})]), { dateLabel: 'x', total: 1 })
+assert.ok(html.includes('Dirección: Privada Paraíso 106, Monterrey, NL.'))
+
+// Centinela {} (visitado, sin datos) → sin mailto, sin crash, sin línea de contacto
 html = buildDigestHtml(groupRows([mkRow('Wal', 'Café', { contact_info: {} })]), { dateLabel: 'x', total: 1 })
 assert.ok(!html.includes('mailto:'))
+assert.ok(!html.includes('Dirección:'))
 
 // 0 conexiones → mensaje vacío explícito
 html = buildDigestHtml(new Map(), { dateLabel: 'x', total: 0 })
 assert.ok(html.includes('Sin conexiones nuevas'))
+
+// notice: NO se pinta si no se pasa; se pinta (escapado) si se pasa
+html = buildDigestHtml(groupRows([mkRow('Wal', 'Café')]), { dateLabel: 'x', total: 1 })
+assert.ok(!html.includes('ESTATUS DEL SISTEMA'))
+html = buildDigestHtml(groupRows([mkRow('Wal', 'Café')]), {
+  dateLabel: 'x', total: 1,
+  notice: { title: 'ESTATUS DEL SISTEMA — OPERANDO LIMITADO', body: 'Opera a 1ra velocidad <b>x</b>.' },
+})
+assert.ok(html.includes('ESTATUS DEL SISTEMA — OPERANDO LIMITADO'))
+assert.ok(!html.includes('<b>x</b>'), 'el cuerpo del aviso se escapa')
+
+// kpis explícitos ganan a los derivados
+html = buildDigestHtml(groupRows([mkRow('Wal', 'Café')]), {
+  dateLabel: 'x', total: 1,
+  kpis: [{ value: '136', label: 'Conexiones totales generadas' }, { value: '26', label: 'Leads con respuesta / oportunidad' }, { value: '1ra', label: 'Velocidad actual del sistema' }],
+})
+assert.ok(html.includes('136') && html.includes('26') && html.includes('1ra'))
+assert.ok(html.includes('Velocidad actual del sistema'))
+
+// Empresa en minúsculas (tecleada en el Centro de Control) → Title Case; los
+// acrónimos y CamelCase legítimos NO se tocan.
+html = buildDigestHtml(groupRows([mkRow('Wal', 'Café', {
+  profile_data: { targetCompany: 'home depot de mexico' },
+})]), { dateLabel: 'x', total: 1 })
+assert.ok(html.includes('Home Depot de Mexico'), 'capitaliza y respeta la minúscula de enlace')
+for (const keep of ['MOLEX', 'FORVIA HELLA', 'thyssenkrupp Automotive', 'OPmobility (USA)']) {
+  const h = buildDigestHtml(groupRows([mkRow('Wal', 'Café', { profile_data: { targetCompany: keep } })]), { dateLabel: 'x', total: 1 })
+  assert.ok(h.includes(keep.replace(/&/g, '&amp;')), `no debe reescribir "${keep}"`)
+}
 
 // Escape de HTML en datos del perfil (headline hostil)
 html = buildDigestHtml(groupRows([mkRow('Wal', 'Café', {
@@ -60,14 +113,9 @@ html = buildDigestHtml(groupRows([mkRow('Wal', 'Café', {
 assert.ok(!html.includes('<script>'))
 assert.ok(html.includes('a &amp; b'))
 
-// Digest POR-CAMPAÑA: 1 sola campaña → un grupo, un nombre de campaña renderizado
-const oneCamp = groupRows([mkRow('Wal', 'Fintech'), mkRow('Wal', 'Fintech')])
-assert.equal(oneCamp.size, 1)
-assert.equal(oneCamp.get('Wal').size, 1)
-assert.equal(oneCamp.get('Wal').get('Fintech').length, 2)
-html = buildDigestHtml(oneCamp, { dateLabel: 'x', total: 2 })
-assert.ok(html.includes('Fintech'))
-assert.ok(!html.includes('Sin conexiones nuevas'))
+// La cuenta aparece en el eyebrow del encabezado
+html = buildDigestHtml(groupRows([mkRow('Wal', 'Fintech')]), { dateLabel: 'x', total: 1 })
+assert.ok(html.includes('WAL'), 'la cuenta va en el eyebrow, en mayúsculas')
 
 // startOfYesterdayIso: instante válido, entre 24h y 49h atrás (medianoche local de ayer)
 const since = new Date(startOfYesterdayIso('America/Mexico_City')).getTime()

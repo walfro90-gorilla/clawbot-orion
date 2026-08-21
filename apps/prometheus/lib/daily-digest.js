@@ -58,6 +58,37 @@ async function readConfigRow(key) {
   return (data?.value && typeof data.value === 'object') ? data.value : null
 }
 
+// KPIs del encabezado del reporte: ACUMULADOS de la campaña ("desde su activación"),
+// no del período del envío. El cuerpo sí lista solo lo nuevo desde el high-water.
+// head:true → count sin traer filas (la instancia es pequeña, ver postmortem 19-ago).
+async function campaignTotals(campaignId) {
+  const base = () => supabase.from('leads').select('id', { count: 'exact', head: true }).eq('campaign_id', campaignId)
+  const [{ count: conexiones }, { count: respuestas }] = await Promise.all([
+    base().not('connected_at', 'is', null),
+    base().not('replied_at', 'is', null),
+  ])
+  return { conexiones: conexiones ?? 0, respuestas: respuestas ?? 0 }
+}
+
+// Presentación por campaña, opcional, en runtime_config.daily_digest:
+//   { ..., campaign_report: { "<campaignId>": { intro, speed, notice: {title, body} } } }
+// Sin entrada → el reporte sale con su intro por defecto, 2 KPIs y sin caja de aviso.
+// Vive aquí y NO en una columna de campaigns porque es copy editorial que cambia por
+// temporada; el aviso de "operando limitado" es de UNA campaña, mandarlo a todas sería
+// mentirle al resto de clientes.
+function reportOpts(cfg, campaignId, totals) {
+  const r = cfg?.campaign_report?.[campaignId] ?? {}
+  return {
+    intro: r.intro,
+    notice: r.notice,
+    kpis: [
+      { value: String(totals.conexiones), label: 'Conexiones totales generadas' },
+      { value: String(totals.respuestas), label: 'Leads con respuesta / oportunidad' },
+      ...(r.speed ? [{ value: String(r.speed), label: 'Velocidad actual del sistema' }] : []),
+    ],
+  }
+}
+
 /**
  * Llamado cada tick. Envía el digest 1×/día a partir de send_hour (tz).
  * @returns {Promise<{sent?: true, total?: number, recipients?: number, skipped?: true, reason?: string}>}
@@ -158,7 +189,9 @@ export async function maybeSendCampaignDigests() {
       const res = await sendEmail({
         to: recipients,
         subject: `📇 Orion Lead Connections · ${camp.name} — ${total} ${total === 1 ? 'contacto nuevo' : 'contactos nuevos'} · ${today}`,
-        html: buildDigestHtml(groupRows(rows), { dateLabel, total }),
+        html: buildDigestHtml(groupRows(rows), {
+          dateLabel, total, ...reportOpts(cfg, camp.id, await campaignTotals(camp.id)),
+        }),
       })
       if (!res.ok) {
         // Estado NO avanza → retry el próximo tick. Alerta deduped, no tumba las demás.

@@ -41,41 +41,167 @@ export function groupRows(rows) {
 }
 
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
-const dash = v => (v && String(v).trim()) ? esc(v) : '—'
+const clean = v => (v && String(v).trim()) ? String(v).trim() : ''
 
-const TD = 'padding:6px 10px;border-bottom:1px solid #e5e7eb;font-size:13px;vertical-align:top'
-const TH = 'padding:6px 10px;border-bottom:2px solid #d1d5db;font-size:12px;text-align:left;color:#6b7280;text-transform:uppercase'
+// El nombre de empresa puede venir del array que el usuario teclea en el Centro de
+// Control ("home depot"), así que en el reporte al cliente sale en minúsculas junto
+// a las que sí vienen bien ("MOLEX", "FORVIA HELLA"). Solo se capitaliza cuando NO
+// hay ninguna mayúscula — así no se destroza un acrónimo ni un CamelCase legítimo.
+const TITLE_MINOR = new Set(['de', 'del', 'la', 'las', 'los', 'y', 'e', 'of', 'the', 'and'])
+function prettyCompany(name) {
+  const s = clean(name)
+  if (!s || /[A-ZÁÉÍÓÚÑÜ]/.test(s)) return s
+  return s.split(/(\s+)/).map((w, i) => {
+    if (/^\s+$/.test(w)) return w
+    if (i > 0 && TITLE_MINOR.has(w)) return w
+    return w.charAt(0).toUpperCase() + w.slice(1)
+  }).join('')
+}
 
-export function buildDigestHtml(groups, { dateLabel, total }) {
-  let body = ''
+// ── Paleta / tipografía del reporte ──────────────────────────────────────────
+const RED   = '#C8102E'
+const INK   = '#111111'
+const MUTED = '#666666'
+const RULE  = '#e6e6e6'
+const SANS  = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
+const MONO  = "'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace"
+
+// Aplana los grupos a una lista ordenada del MÁS RECIENTE al más antiguo.
+// El reporte numera descendente (#N … #1), así que el orden de entrada (que
+// daily-digest trae ascendente por connected_at) se invierte aquí.
+export function flattenRows(groups) {
+  const out = []
   for (const [label, byCampaign] of groups) {
-    body += `<h2 style="font-size:16px;margin:24px 0 4px">👤 ${esc(label)}</h2>`
     for (const [camp, rows] of byCampaign) {
-      body += `<p style="margin:8px 0 4px;font-size:13px;color:#6b7280">Campaña: <strong>${esc(camp)}</strong> — ${rows.length} ${rows.length === 1 ? 'conexión' : 'conexiones'}</p>`
-      body += `<table style="border-collapse:collapse;width:100%;max-width:760px"><tr>`
-        + `<th style="${TH}">Nombre</th><th style="${TH}">Empresa</th><th style="${TH}">Cargo</th>`
-        + `<th style="${TH}">Email</th><th style="${TH}">Teléfono</th></tr>`
-      for (const r of rows) {
-        const ci = (r.contact_info && typeof r.contact_info === 'object') ? r.contact_info : {}
-        const pd = (r.profile_data && typeof r.profile_data === 'object') ? r.profile_data : {}
-        const name = r.linkedin_url
-          ? `<a href="${esc(r.linkedin_url)}" style="color:#2563eb">${dash(r.full_name)}</a>`
-          : dash(r.full_name)
-        const phones = Array.isArray(ci.phones) ? ci.phones.filter(Boolean).join(', ') : ''
-        body += `<tr><td style="${TD}">${name}</td>`
-          + `<td style="${TD}">${dash(ci.company ?? pd.currentCompany)}</td>`
-          + `<td style="${TD}">${dash(pd.headline)}</td>`
-          + `<td style="${TD}">${ci.email ? `<a href="mailto:${esc(ci.email)}" style="color:#2563eb">${esc(ci.email)}</a>` : '—'}</td>`
-          + `<td style="${TD}">${dash(phones)}</td></tr>`
-      }
-      body += `</table>`
+      for (const r of rows) out.push({ ...r, _account: label, _campaign: camp })
     }
   }
-  if (!total) body = `<p style="font-size:14px;color:#6b7280">Sin conexiones nuevas desde el último reporte.</p>`
-  return `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111827;padding:8px">`
-    + `<h1 style="font-size:18px;margin:0 0 4px">🤝 Orion Lead Connections — conexiones aceptadas</h1>`
-    + `<p style="margin:0 0 8px;font-size:13px;color:#6b7280">${esc(dateLabel)} · total: ${total}</p>`
-    + body
-    + `<p style="margin-top:24px;font-size:11px;color:#9ca3af">Enviado automáticamente por Orion Lead Connections. Email/teléfono aparecen cuando el contacto los hace visibles a su red (1er grado).</p>`
-    + `</div>`
+  return out.sort((a, b) => String(b.connected_at ?? '').localeCompare(String(a.connected_at ?? '')))
+}
+
+function kpiCell(value, label, width) {
+  return `<td width="${width}%" style="border:1px solid ${RULE};padding:16px 10px;text-align:center;vertical-align:middle">`
+    + `<div style="font-family:${SANS};font-size:26px;font-weight:800;color:${RED};line-height:1.1">${esc(value)}</div>`
+    + `<div style="font-family:${SANS};font-size:10.5px;color:${MUTED};margin-top:6px;line-height:1.35">${esc(label)}</div>`
+    + `</td>`
+}
+
+// Un lead: #N · Empresa · Nombre · Puesto · contacto (mono) · dirección (itálica)
+function leadBlock(r, num) {
+  const ci = (r.contact_info && typeof r.contact_info === 'object') ? r.contact_info : {}
+  const pd = (r.profile_data && typeof r.profile_data === 'object') ? r.profile_data : {}
+
+  const company = prettyCompany(clean(ci.company) || clean(pd.currentCompany) || clean(pd.targetCompany)) || '—'
+  const name    = clean(r.full_name) || '—'
+  const role    = clean(pd.headline)
+  // phones/address no los produce el scraper hoy (contact_info trae email/websites),
+  // pero el reporte los pinta en cuanto existan. ponytail: sin columna vacía.
+  const phones  = Array.isArray(ci.phones) ? ci.phones.filter(Boolean) : (clean(ci.phone) ? [clean(ci.phone)] : [])
+  const email   = clean(ci.email)
+  const address = clean(ci.address)
+
+  const nameHtml = r.linkedin_url
+    ? `<a href="${esc(r.linkedin_url)}" style="color:${RED};text-decoration:none">${esc(name)}</a>`
+    : esc(name)
+
+  const contactBits = [
+    ...phones.map(p => `${esc(p)}&nbsp;&nbsp;<span style="color:#999">(móvil)</span>`),
+    email ? `<a href="mailto:${esc(email)}" style="color:#333;text-decoration:none">${esc(email)}</a>` : '',
+  ].filter(Boolean)
+
+  return `<tr>`
+    + `<td width="56" valign="top" style="padding:14px 0 14px 0;border-top:1px solid ${RULE}">`
+      + `<div style="font-family:${SANS};font-size:15px;font-weight:700;color:#c9c9c9">#${num}</div>`
+    + `</td>`
+    + `<td valign="top" style="padding:14px 0;border-top:1px solid ${RULE}">`
+      + `<div style="font-family:${SANS};font-size:15px;font-weight:700;color:${INK};line-height:1.3">${esc(company)}</div>`
+      + `<div style="font-family:${SANS};font-size:13.5px;font-weight:700;color:${RED};margin-top:2px;line-height:1.3">${nameHtml}</div>`
+      + (role ? `<div style="font-family:${SANS};font-size:12.5px;color:${MUTED};margin-top:4px;line-height:1.4">${esc(role)}</div>` : '')
+      + (contactBits.length
+          ? `<div style="font-family:${MONO};font-size:12px;color:#444;margin-top:6px;line-height:1.5">${contactBits.join('&nbsp;&nbsp;|&nbsp;&nbsp;')}</div>`
+          : '')
+      + (address ? `<div style="font-family:${SANS};font-style:italic;font-size:11.5px;color:#555;margin-top:4px;line-height:1.4">Dirección: ${esc(address)}</div>` : '')
+    + `</td>`
+    + `</tr>`
+}
+
+/**
+ * Reporte ORION — Leads Generados.
+ * @param {Map} groups  Map(cuenta → Map(campaña → rows)), de groupRows()
+ * @param {object} opts
+ *   dateLabel  fecha legible del envío
+ *   total      nº de leads del período
+ *   brand      marca del encabezado (default EBOOMS)
+ *   intro      línea descriptiva bajo el título
+ *   kpis       [{value,label}] — máx 3. Si no se pasan, se derivan de los rows.
+ *   notice     {title, body} — caja de aviso opcional (no se pinta sin ella)
+ */
+export function buildDigestHtml(groups, { dateLabel, total, brand = 'EBOOMS', intro, kpis, notice } = {}) {
+  const rows = flattenRows(groups ?? new Map())
+  const accounts  = [...new Set(rows.map(r => r._account))]
+  const campaigns = [...new Set(rows.map(r => r._campaign))]
+
+  const eyebrow = ['SISTEMA ORION', 'PROSPECCIÓN LINKEDIN', ...accounts.map(a => a.toUpperCase())].join(' · ')
+
+  const conEmail = rows.filter(r => clean(r.contact_info?.email)).length
+  const cards = (Array.isArray(kpis) && kpis.length ? kpis : [
+    { value: String(total ?? rows.length), label: 'Conexiones totales generadas' },
+    { value: String(conEmail), label: 'Contactos con email identificado' },
+    { value: String(campaigns.length), label: campaigns.length === 1 ? 'Campaña activa' : 'Campañas activas' },
+  ]).slice(0, 3)
+  const w = Math.floor(100 / cards.length)
+
+  const leadsHtml = rows.length
+    ? `<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">`
+        + rows.map((r, i) => leadBlock(r, rows.length - i)).join('')
+      + `</table>`
+    : `<p style="font-family:${SANS};font-size:13.5px;color:${MUTED};margin:0">Sin conexiones nuevas desde el último reporte.</p>`
+
+  return `<div style="background:#f4f4f5;padding:24px 10px;margin:0">`
+    + `<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;max-width:720px;margin:0 auto;background:#ffffff">`
+    + `<tr><td style="padding:34px 40px 40px 40px">`
+
+      // Encabezado
+      + `<div style="font-family:${SANS};font-size:19px;font-weight:800;color:${RED};letter-spacing:.6px">${esc(brand)}</div>`
+      + `<div style="font-family:${SANS};font-size:10.5px;font-weight:700;color:${INK};letter-spacing:.7px;margin-top:3px">${esc(eyebrow)}</div>`
+      + `<h1 style="font-family:${SANS};font-size:27px;font-weight:800;color:${INK};margin:14px 0 7px;line-height:1.2">Reporte ORION — Leads Generados</h1>`
+      + `<p style="font-family:${SANS};font-size:13.5px;color:#555;margin:0;line-height:1.5">`
+        + esc(intro || 'Contactos y oportunidades identificadas por el sistema desde su activación.')
+      + `</p>`
+      + `<div style="border-top:2px solid ${RED};margin-top:18px;font-size:0;line-height:0">&nbsp;</div>`
+
+      // KPIs
+      + `<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:20px 0 0">`
+        + `<tr>${cards.map(c => kpiCell(c.value, c.label, w)).join('')}</tr>`
+      + `</table>`
+
+      // Aviso opcional
+      + (notice?.body
+          ? `<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:20px 0 0;background:#FDF4E0">`
+            + `<tr><td style="border-left:4px solid #E0A03A;padding:14px 18px">`
+              + (notice.title
+                  ? `<div style="font-family:${SANS};font-size:11.5px;font-weight:700;color:#B07D18;letter-spacing:.5px">■ ${esc(notice.title)}</div>`
+                  : '')
+              + `<div style="font-family:${SANS};font-size:12.5px;color:#4a4a4a;margin-top:8px;line-height:1.6">${esc(notice.body)}</div>`
+            + `</td></tr></table>`
+          : '')
+
+      // Sección de leads
+      + `<div style="font-family:${SANS};font-size:11.5px;font-weight:700;color:${RED};letter-spacing:.7px;margin:28px 0 6px">LEADS GENERADOS</div>`
+      + `<p style="font-family:${SANS};font-size:13px;color:#555;margin:0 0 6px;line-height:1.5">`
+        + (rows.length
+            ? `Detalle de los ${rows.length} contactos identificados, del más reciente al primero.`
+            : 'Sin novedades en este período.')
+      + `</p>`
+      + leadsHtml
+
+      // Pie
+      + `<div style="border-top:1px solid ${RULE};margin-top:28px;padding-top:14px">`
+        + `<p style="font-family:${SANS};font-size:11px;color:#999;margin:0;line-height:1.6">`
+          + `${esc(dateLabel ?? '')} · Enviado automáticamente por Orion Lead Connections.<br>`
+          + `El email y el teléfono aparecen cuando el contacto los hace visibles a su red (1er grado).`
+        + `</p>`
+      + `</div>`
+
+    + `</td></tr></table></div>`
 }
