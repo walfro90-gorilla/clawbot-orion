@@ -61,7 +61,7 @@ async function readConfigRow(key) {
 // KPIs del encabezado del reporte: ACUMULADOS de la campaña ("desde su activación"),
 // no del período del envío. El cuerpo sí lista solo lo nuevo desde el high-water.
 // head:true → count sin traer filas (la instancia es pequeña, ver postmortem 19-ago).
-async function campaignTotals(campaignId) {
+export async function campaignTotals(campaignId) {
   const base = () => supabase.from('leads').select('id', { count: 'exact', head: true }).eq('campaign_id', campaignId)
   const [{ count: conexiones }, { count: respuestas }] = await Promise.all([
     base().not('connected_at', 'is', null),
@@ -76,7 +76,7 @@ async function campaignTotals(campaignId) {
 // Vive aquí y NO en una columna de campaigns porque es copy editorial que cambia por
 // temporada; el aviso de "operando limitado" es de UNA campaña, mandarlo a todas sería
 // mentirle al resto de clientes.
-function reportOpts(cfg, campaignId, totals) {
+export function reportOpts(cfg, campaignId, totals) {
   const r = cfg?.campaign_report?.[campaignId] ?? {}
   return {
     intro: r.intro,
