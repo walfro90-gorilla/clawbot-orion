@@ -4860,7 +4860,7 @@ function _normForFilter(s) {
 // canónica). Ahora se puntúa por SEGUIDORES: la duplicada tiene decenas, la real
 // millones.
 const COMPANY_URN_RE = /urn:li:(?:fsd_company|organization|company):(\d+)/
-const CONTENT_VERSION = '0.10.31'
+const CONTENT_VERSION = '0.10.32'
 const DISTINCTIVE_HIT = 10   // puntaje de un token distintivo: el umbral de "sí es esta empresa"
 const FOLLOWERS_RE = /([\d][\d.,\s]*)\s*(mil|k|m|millones)?\s*(?:de\s+)?(?:seguidores|followers)/
 
@@ -5850,6 +5850,21 @@ function extractProfilesFromPage() {
       const looksLikeLocation = (t) => {
         if (!t) return false
         const lower = t.toLowerCase()
+        // (21-ago-2026) GUARD ANTI-COMAS. La regla `commas >= 2` de abajo daba por
+        // ubicación cualquier headline con una lista, que en LinkedIn es lo normal:
+        // "Director (VP) Supply Chain, Logistics, Transportation, Imports" (4 comas) se
+        // clasificaba como lugar ⇒ el headline se anulaba Y acababa guardado en
+        // `location`. Medido: puestos evidentes viviendo en el campo de ubicación.
+        // Un puesto NO es un lugar por mucha coma que traiga, así que las señales de
+        // rol y el pipe (separador típico de headline, jamás de ciudad) mandan.
+        // Ojo: solo cortocircuita las heurísticas DÉBILES (contar comas). Las frases
+        // geográficas fuertes siguen mandando, para no dejar de reconocer ubicaciones
+        // reales como "Área metropolitana de Monterrey".
+        // Sin \b de cierre a propósito: hay que capturar los sufijos naturales
+        // ("engineering", "leading", "logística"), y "Lean Manufacturing, industrial
+        // engineering, supply chain." es un headline real que se perdía.
+        const looksLikeRole = /\b(?:director|gerente|manager|chief|ceo|cto|cio|cfo|cmo|coo|vp|founder|fundador|head of|jefe|lead|consultor|consultant|analista|analyst|especialista|specialist|engineer|ingenier|developer|president|owner|socio|supervisor|coordinador|buyer|comprador|planner|planeador|sourcing|procurement|logistic|log[ií]stic|supply chain)/i.test(t)
+          || t.includes('|')
         // Frases que SIEMPRE son ubicación (no requieren comma)
         const strongGeoPhrases = [
           'área metropolitana', 'metropolitan area', 'greater ', ' area',
@@ -5875,6 +5890,9 @@ function extractProfilesFromPage() {
         // Si toda la string es una palabra/place geográfico standalone
         const trimmed = t.trim().toLowerCase()
         if (trimmed.length < 40 && standalonePlaces.some(p => trimmed === p || trimmed.startsWith(p + ',') || trimmed.endsWith(', ' + p))) return true
+        // A partir de aquí van las heurísticas débiles (contar comas). Un texto con
+        // señales de rol nunca debe caer por ellas: ver el guard de arriba.
+        if (looksLikeRole) return false
         if (commas >= 2) return true
         if (standalonePlaces.some(g => lower.includes(g)) && commas >= 1) return true
         // Si toda la string son palabras capitalizadas separadas por comas → ubicación
