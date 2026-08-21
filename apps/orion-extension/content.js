@@ -4860,7 +4860,7 @@ function _normForFilter(s) {
 // canónica). Ahora se puntúa por SEGUIDORES: la duplicada tiene decenas, la real
 // millones.
 const COMPANY_URN_RE = /urn:li:(?:fsd_company|organization|company):(\d+)/
-const CONTENT_VERSION = '0.10.33'
+const CONTENT_VERSION = '0.10.34'
 const DISTINCTIVE_HIT = 10   // puntaje de un token distintivo: el umbral de "sí es esta empresa"
 const FOLLOWERS_RE = /([\d][\d.,\s]*)\s*(mil|k|m|millones)?\s*(?:de\s+)?(?:seguidores|followers)/
 
@@ -5861,11 +5861,24 @@ function extractProfilesFromPage() {
       if (secondaryEl) locationStr = (secondaryEl.textContent || '').replace(/\s+/g, ' ').trim()
     }
 
-    // Fallback: parsing por <p> con heurísticas mejoradas
+    // Fallback: parsing por texto del card con heurísticas.
+    // (21-ago-2026) Antes solo se miraban los <p>. Medido en vivo tras el fix del card:
+    // Café 57 seguía con 8 de 18 perfiles sin puesto NI ubicación, con la pestaña
+    // confirmada en 0.10.33 — así que el card ya era el correcto y el texto simplemente
+    // NO estaba en <p>. LinkedIn sirve variantes del resultado (A/B, ancho de ventana) que
+    // ponen el subtítulo en <div>/<span> y sin las clases `*-subtitle`. Ahora se leen las
+    // HOJAS de texto del card, sea cual sea la etiqueta: es lo único que no depende de un
+    // markup que cambia sin avisar.
     if (!headline) {
-      const paras = card
-        ? Array.from(card.querySelectorAll('p'))
-            .map(p => (p.textContent || '').replace(/\s+/g, ' ').trim())
+      const leafTexts = card
+        ? Array.from(card.querySelectorAll('p, span, div'))
+            // solo hojas: si el nodo contiene otro contenedor, su texto es la concatenación
+            // de los hijos y duplicaría (o pegaría el nombre al puesto).
+            .filter(el => !el.querySelector('p, span, div'))
+            .map(el => (el.textContent || '').replace(/\s+/g, ' ').trim())
+        : []
+      // Dedup preservando orden: el mismo texto suele aparecer en la copia accesible.
+      const paras = [...new Set(leafTexts)]
             .filter(t =>
               t &&
               t !== name &&
@@ -5880,7 +5893,6 @@ function extractProfilesFromPage() {
               !NOISE_RE.test(t) &&
               !t.includes(name.split(' ')[0])
             )
-        : []
 
       // Detector de "esto es location": 2+ comas, palabras de geografía, sin verbo/rol
       const looksLikeLocation = (t) => {
@@ -5971,6 +5983,23 @@ function extractProfilesFromPage() {
       if (!locationStr) locationStr = paras.find(p => p !== headline && looksLikeLocation(p)) ?? null
     }
 
+    // (21-ago-2026) Telemetría SOLO cuando se pierde el puesto: sin esto hay que adivinar
+    // si el card salió vacío, si el texto no estaba donde se buscaba, o si las heurísticas
+    // lo descartaron. Va en el perfil para que viaje en el result y se pueda consultar
+    // desde la DB en vez de pedirle capturas al operador.
+    if (!headline) {
+      const nLeaves = card ? Array.from(card.querySelectorAll('p, span, div')).filter(e => !e.querySelector('p, span, div')).length : -1
+      results.push({ profileUrl, name, headline, location: locationStr, _dbg: {
+        nLeaves,
+        nPs: card ? card.querySelectorAll('p').length : -1,
+        hadPrimary: !!card?.querySelector('[class*="primary-subtitle"]'),
+        sample: card ? Array.from(card.querySelectorAll('p, span, div'))
+          .filter(e => !e.querySelector('p, span, div'))
+          .map(e => (e.textContent || '').replace(/\s+/g, ' ').trim())
+          .filter(Boolean).slice(0, 6) : [],
+      } })
+      continue
+    }
     results.push({ profileUrl, name, headline, location: locationStr })
   }
   return results
