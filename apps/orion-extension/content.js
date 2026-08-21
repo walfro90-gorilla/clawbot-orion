@@ -1458,6 +1458,8 @@ async function executeAction(action, payload) {
       return await searchPosts(payload)
     case 'resolve_company':
       return await resolveCompanyOnPage(payload)
+    case 'resolve_company_urn':
+      return await resolveCompanyUrnOnPage(payload)
     case 'comment_on_post':
       return await commentOnPost(payload)
     case 'publish_post':
@@ -4858,7 +4860,7 @@ function _normForFilter(s) {
 // canónica). Ahora se puntúa por SEGUIDORES: la duplicada tiene decenas, la real
 // millones.
 const COMPANY_URN_RE = /urn:li:(?:fsd_company|organization|company):(\d+)/
-const CONTENT_VERSION = '0.10.10'
+const CONTENT_VERSION = '0.10.31'
 const DISTINCTIVE_HIT = 10   // puntaje de un token distintivo: el umbral de "sí es esta empresa"
 const FOLLOWERS_RE = /([\d][\d.,\s]*)\s*(mil|k|m|millones)?\s*(?:de\s+)?(?:seguidores|followers)/
 
@@ -5032,6 +5034,60 @@ async function resolveCompanyOnPage(payload = {}) {
     followers: best.followers, nameScore: best.nameScore,
     // Para diagnosticar cuando una empresa quede pegada en 0 resultados.
     candidates: candidates.map(c => ({ urn: c.urn, title: c.title, followers: c.followers, nameScore: c.nameScore, scoredText: c.scoredText })),
+  }
+}
+
+// ── v0.10.31 — segundo salto: el URN desde la PÁGINA de la empresa ───────────
+// (12-ago-2026) LinkedIn dejó de exponer el URN en /search/results/companies/: el
+// resolver matchea bien (matched:true + slug + followers) pero devuelve urn:null, así
+// que toda empresa nueva entra degradada a texto libre — y ahí el scoping de empresa es
+// DECORATIVO (medido: 46 de 104 leads trabajaban en otra). El slug SÍ se obtiene, así
+// que basta un segundo salto a /company/<slug>/ para recuperar el URN.
+//
+// Fuente PREFERIDA: el link "ver todos los empleados", que apunta al MISMO facet que usa
+// la búsqueda (currentCompany=["1234"]). Es inequívocamente de ESTA empresa; un
+// `urn:li:fsd_company` suelto en el HTML puede venir de "páginas similares" del sidebar,
+// y atar la empresa equivocada es el peor resultado posible (invita a otra compañía).
+//
+// Función PURA para poder testearla sin DOM. Su gemela vive en
+// scripts/test-company-urn.js — si cambias una, cambia la otra.
+const CURRENT_COMPANY_RE = /currentCompany=(?:%5B|\[)(?:%22|"|&quot;|'|)(\d+)/i
+function pickCompanyUrn({ hrefs = [], html = '' }) {
+  for (const h of hrefs) {
+    const m = String(h ?? '').match(CURRENT_COMPANY_RE)
+    if (m) return { urn: m[1], source: 'employees_link' }
+  }
+  // Fallback CONSERVADOR: el id más repetido del HTML, y solo si domina de calle. Con
+  // dos ids parecidos preferimos no resolver (queda 'unresolved' → nombre exacto, que es
+  // honesto y reversible) antes que arriesgar la empresa equivocada.
+  const counts = new Map()
+  for (const m of String(html ?? '').matchAll(/urn:li:(?:fsd_company|organization|company):(\d+)/g)) {
+    counts.set(m[1], (counts.get(m[1]) ?? 0) + 1)
+  }
+  const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1])
+  if (!ranked.length) return { urn: null, source: 'none' }
+  const [topId, topN] = ranked[0]
+  const secondN = ranked[1]?.[1] ?? 0
+  if (topN >= 3 && topN >= secondN * 3) return { urn: topId, source: 'html_dominant' }
+  return { urn: null, source: 'ambiguous' }
+}
+
+async function resolveCompanyUrnOnPage(payload = {}) {
+  if (!/\/company\//.test(location.pathname)) {
+    return { action: 'resolve_company_urn', status: 'error', error: 'not_on_company_page', currentUrl: location.href }
+  }
+  await waitForSelector(['main'], 15000)
+  await sleep(1200)  // hidratación
+
+  const scope = document.querySelector('main') ?? document
+  const hrefs = Array.from(scope.querySelectorAll('a[href*="currentCompany"]'))
+    .map(a => a.getAttribute('href') ?? '')
+  const { urn, source } = pickCompanyUrn({ hrefs, html: document.documentElement?.outerHTML ?? '' })
+
+  console.log(`[Orion content] resolve_company_urn slug=${payload.slug ?? '—'} → urn=${urn ?? '—'} (${source})`)
+  return {
+    action: 'resolve_company_urn', status: 'ok', contentVersion: CONTENT_VERSION,
+    urn, source, slug: payload.slug ?? null, currentUrl: location.href,
   }
 }
 

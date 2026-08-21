@@ -871,6 +871,21 @@ async function resolveCompanies(commandId, payload) {
     return (a?.followers ?? 0) > (b?.followers ?? 0)
   }
 
+  // v0.10.31 — segundo salto a /company/<slug>/ cuando la búsqueda matchea pero NO trae
+  // URN. Desde el 12-ago LinkedIn dejó de exponerlo en los resultados, así que TODA
+  // empresa nueva entraba degradada a texto libre (scoping decorativo: 46 de 104 leads
+  // de Aduanas Infinity trabajaban en otra empresa). El slug sí llega, y la página de la
+  // empresa lleva el link "ver todos los empleados" con el mismo facet que usa la
+  // búsqueda. Solo se hace si hace falta: una navegación extra por empresa nueva, nunca
+  // para las que ya resolvieron.
+  const urnFromCompanyPage = async (slug) => {
+    const tab = await navigateTabAndWait(`https://www.linkedin.com/company/${encodeURIComponent(slug)}/`, 20000)
+    const r = await sendMessageWithRetry(tab.id, {
+      type: 'orion_command', commandId, action: 'resolve_company_urn', payload: { slug },
+    }, 3)
+    return r ?? null
+  }
+
   for (const c of companies) {
     if (!c?.name) continue
     try {
@@ -882,6 +897,24 @@ async function resolveCompanies(commandId, payload) {
         if (better(r2, r)) {
           console.log(`[Orion] "${c.name}": nombre núcleo "${core}" encontró mejor página (${r2?.followers} seguidores vs ${r?.followers})`)
           r = r2
+        }
+      }
+      let urnSource = r?.urn ? 'search_results' : null
+      if (r?.matched && !r?.urn && r?.slug) {
+        await sleep(1500)
+        try {
+          const u = await urnFromCompanyPage(r.slug)
+          if (u?.urn) {
+            r = { ...r, urn: u.urn }
+            urnSource = u.source ?? 'company_page'
+            console.log(`[Orion] "${c.name}": URN recuperado de /company/${r.slug}/ → ${u.urn} (${urnSource})`)
+          } else {
+            console.log(`[Orion] "${c.name}": /company/${r.slug}/ tampoco dio URN (${u?.source ?? 'sin respuesta'})`)
+          }
+        } catch (e2) {
+          // Que falle el salto extra NO debe tumbar la resolución: se queda como estaba
+          // (unresolved → nombre exacto), que es el comportamiento previo.
+          console.warn(`[Orion] "${c.name}": salto a /company/${r.slug}/ falló: ${e2?.message ?? e2}`)
         }
       }
       resolved.push({
@@ -897,6 +930,9 @@ async function resolveCompanies(commandId, payload) {
         resultTitle: r?.resultTitle ?? null,
         contentVersion: r?.contentVersion ?? null,
         candidates: r?.candidates ?? null,
+        // De dónde salió el URN: 'search_results' (como antes del 12-ago) o el segundo
+        // salto. Sirve para saber, desde la DB, si el fix está funcionando en vivo.
+        urnSource,
       })
       console.log(`[Orion] resolve_company "${c.name}" → urn=${r?.urn ?? '—'} slug=${r?.slug ?? '—'}`)
     } catch (err) {
