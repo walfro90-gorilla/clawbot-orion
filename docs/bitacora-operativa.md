@@ -18,6 +18,92 @@
 
 ## ✅ Resuelto
 
+### 🧨 "Mi Orion miente": un carácter NUL tiraba los check_connections de Josh  [21-ago-2026, `e5dfce8` + `fc81042`]
+**Queja del cliente, repetida durante días**: la extensión mostraba información incorrecta. Tenía razón, y no era la extensión: era el servidor.
+
+**CAUSA RAÍZ (medida en vivo tras instrumentar el persist, no inferida):**
+```
+[bridge] persist a6303e8c (check_connections) falló (Empty or invalid json)
+[bridge] ❌ RESULTADO PERDIDO a6303e8c — la fila queda sin result
+```
+Postgres **no admite el carácter NUL dentro de un valor `jsonb`** (y un surrogate UTF-16 suelto rompe el encoding del body). PostgREST lo reporta como **`Empty or invalid json`**, que suena a *body vacío* y manda a buscar el fallo donde no está. Con 400+ nombres scrapeados de LinkedIn, **basta UNA cadena envenenada para tirar el resultado ENTERO**.
+
+**La cadena completa, que es lo que el cliente veía:**
+1. El scan termina bien y el bridge INGIERE 396 conexiones (`→ OK` en el log), pero la escritura falla ⇒ la fila se queda en `dispatched` hasta expirar y aparece como `timeout` con `result` null.
+2. `connectionsHealthy` exigía `status='completed'` ⇒ daba la accept-detection por muerta.
+3. Sin ella, `ingestCheckSentInvites` cae a la **inferencia por ausencia** — exactamente el bug de conexiones falsas cerrado el 15-ago (`6e0b586`), **reactivado en silencio**.
+4. Esas conexiones inventadas reciben FU ⇒ `lead_not_first_degree`.
+
+**Por qué SOLO Josh**: 18 de 20 scans perdidos en 5 días, contra **0** de Wal/Café/Rosy. No es el volumen (Wal tiene 409 conexiones y persiste en 1,6 min); es la lotería de que un nombre traiga el carácter.
+
+⚠️ **Dos cosas lo mantuvieron invisible, y las dos eran nuestras:**
+- **El log MENTÍA**: el `UPDATE` descartaba su error y se imprimía `→ OK` igual. El sistema se contradecía a sí mismo (ingest hecho, fila en timeout) sin dejar rastro. Mismo patrón que el auth del 17-ago: **un fallo de infraestructura leído como dato válido**. Ahora se comprueba, se reintenta una vez y si falla sale `RESULTADO PERDIDO` + `notifyOps`.
+- **El 18-ago se atacó el síntoma equivocado**: se subió el TTL 10→25 min creyendo que su scan era lento por tener la lista más grande. **No lo era** — tarda 50 s, como el de Wal. El comando no expiraba por lento sino porque la escritura nunca ocurría.
+
+**Fix 1 — sanear antes de escribir** (`lib/jsonb-sanitize.js`, self-check `test-jsonb-sanitize.js`): quita NUL, controles C0 y surrogates rotos, conservando `\t \n \r`. **El self-check cubre sobre todo el otro lado**: emoji, CJK y acentos salen intactos, porque es lo que el cliente lee en su reporte. Verificado en vivo — `1 string(s) con caracteres que jsonb no acepta — saneadas` y la fila quedó `completed` con 406 conexiones.
+
+**Fix 2 — sellar el HECHO, no el estado de la fila**: nueva columna `linkedin_accounts.last_connections_ingest_at`, que escribe `ingestCheckConnections` cuando entran conexiones reales; un scan **degradado NO sella**. `connectionsHealthy` la mira primero. Distinta de `last_connections_check_at`, que marca el DESPACHO y por eso no sirve como señal de salud. Aunque una fila vuelva a perderse, la detección ya no se da por muerta.
+
+**Hallazgo de paso que explicaba el resto**: los scans de Josh que SÍ quedaban `completed` veían **10 conexiones de 406** — eran los degradados. Tenía los dos fallos encima: los buenos no se guardaban y los guardados estaban vacíos.
+| Scan | Conexiones | rounds | hiddenWaits |
+|---|---|---|---|
+| 18-ago | 10 | **0** | **21** ← degradado |
+| 19-ago | 10 | 5 | 0 |
+| **21-ago (post-fix)** | **406** | **80** | 0 |
+
+**Auditoría del daño** (cruce de los marcados como conectados contra el scan exhaustivo de 406):
+| Cuenta | Activos marcados | Confirmados | Ausentes | **Falsos confirmados** |
+|---|---|---|---|---|
+| Café 57 | 83 | 81 | 2 | **0** |
+| Wal | 111 | 104 | 7 | **0** |
+| **Josh** | 145 | 107 | 38 | **7** |
+
+⚠️ **Los 69 ausentes de Josh NO eran 69 falsos** — el número grande se desinfla al pedir evidencia: **19 tenían un FU entregado** (para mandar un mensaje directo hay que ser 1er grado ⇒ estuvieron conectados de verdad ⇒ si desaparecieron, el contacto los eliminó), **1 nos respondió**, **13 sin evidencia alguna** y **30 ya estaban `dead`**. Solo **7** tenían prueba de falso accept: un FU rechazado por grado. **Firma inequívoca**: 4 de los 7 figuraban aceptados **el mismo día del invite**.
+
+**Revert aplicado a los 7** (Craig Levy, Laurence Lipworth, Manny Barriger, Pablo Pazmiño, Timothy Burke, Timothy Wheeler, Virginie Delalande): a `invite_sent`, `connected_at` null, `followup_step` 0, `last_followup_at` null, con nota `note_added` en su historial. **NO se descalifican**: nunca rechazaron nada, el sistema se inventó el accept; si aceptan de verdad entran por el camino normal. Se limpia el contador para que reciban el FU **1** y no el 2 — si no, su primer mensaje sería el seguimiento de una conversación que nunca existió.
+
+🟡 **PENDIENTE (revisar en 2 días, con dos scans buenos encima)**: los ~20 ausentes CON evidencia de conexión real. Si siguen ausentes, toca `dead_reason='disconnected_by_contact'` para no re-invitarlos nunca (anti-ban) — pero es prácticamente irreversible y un cambio de URL vanity da el mismo síntoma, así que **no se marca con una sola muestra**.
+
+### 🏢 El company URN, recuperado desde la página de la empresa  [21-ago-2026, `131e5e8`, ext 0.10.31]
+Cierra el corte del 12-ago. El resolver **nunca estuvo roto del todo**: sigue matcheando y sigue trayendo el `slug`; lo único que LinkedIn quitó fue el URN del markup de `/search/results/companies/`. Ahora, cuando hay match sin URN, se da un **segundo salto a `/company/<slug>/`** y se saca el id del link *"ver todos los empleados"*, que apunta a `currentCompany=["1234"]` — el MISMO facet que usa la búsqueda, así que es inequívoco.
+
+- **Solo salta cuando hace falta** (`matched && !urn && slug`): una navegación extra por empresa nueva, ninguna para las ya resueltas.
+- **Si el salto falla no rompe nada**: la empresa se queda `unresolved` → nombre exacto, el comportamiento previo.
+- **El fallback es deliberadamente cobarde**: si no aparece el link, se usa el id más repetido del HTML y **solo si domina de calle** (≥3 apariciones y ≥3× el segundo). Un `urn:li:fsd_company` suelto puede venir de "páginas similares" del sidebar y **atar la empresa equivocada es el peor resultado posible** (invita a otra compañía). Ante duda, `null`. Ese es el caso crítico de `scripts/test-company-urn.js`.
+- `urnSource` viaja al servidor para poder confirmar desde la DB si el fix opera en vivo.
+
+**Por qué importa**: era la diferencia entre Café 57 (**170 de 192 empresas con URN**, resueltas antes del corte → facet nativo) y Aduanas Infinity (**0 de 42**, creada el 12-ago justo el día del corte → texto libre). Cuestión de fecha de nacimiento, no de configuración: ambas están en `free`.
+
+⚠️ **Se descartó copiar URNs del catálogo** de 312 empresas ya cacheadas: se encontró `alfa` apuntando al slug `alfa-laval` (empresas distintas), así que el cruce habría propagado errores.
+
+🟡 **PENDIENTE**: resetear las 42 empresas de Infinity a `status='pending'`, `resolve_attempts=0`, `resolve_attempted_at=null` y verificar con `urnSource`. Las 4 cuentas ya están en 0.10.32.
+
+### 🔎 El puesto se perdía si traía comas  [21-ago-2026, `5bfbd6c`, ext 0.10.32]
+**Duda del operador**: "¿los leads sin empresa/puesto en el email es que no los tienen, o falla el scraping?". **Falla el scraping**, al menos en parte.
+
+`looksLikeLocation` daba por UBICACIÓN cualquier texto con `commas >= 2`, y en LinkedIn los headlines **son** listas. `"Director (VP) Supply Chain, Logistics, Transportation, Imports"` (4 comas) se clasificaba como lugar ⇒ el headline se anulaba a null **Y** terminaba guardado en el campo `location`. Casos reales medidos, todos viviendo en `location`:
+- `Project Consultant | Logistics, Supply Chain, Transformations, Governance, Program Management`
+- `Purchasing Manager / Director North America, Investment Specialist, Strategic Sourcing & MRO`
+- `Lean Manufacturing, industrial engineering, supply chain.`
+
+**Efecto en cadena que responde la duda**: sin headline, `tryEnrichCompanies` no tiene de dónde extraer la empresa ⇒ el lead sale en el reporte al cliente **sin puesto y sin empresa**. Por eso los dos huecos aparecían juntos.
+
+**Fix**: las señales de rol y el pipe (separador de headline, jamás de ciudad) cortocircuitan las heurísticas DÉBILES de comas; las frases geográficas fuertes siguen mandando para no dejar de reconocer "Área metropolitana de Monterrey". Sin `\b` de cierre en la regex: hacían falta los sufijos (*engineering*, *leading*). Self-check `test-profile-fields.js` con los 10 headlines reales que se perdían y 10 ubicaciones que deben seguir detectándose.
+
+⚠️ **NO explica todo, y conviene no confundirlo**: de 232 perfiles sin headline en 7 días, **137 tampoco traen ubicación** — ahí no hay nada mal clasificado, el card no dio ningún texto. Es **ambiental**, no de código: con el MISMO build, **Wal saca 409 perfiles con 0% de fallo mientras Café 57 falla el 33% y Josh-free el 58%**, y nunca falla un comando entero (siempre unos perfiles sí y otros no dentro de la misma búsqueda). 🟡 **PENDIENTE**: mirar el DOM real en la máquina de Café 57 durante una búsqueda.
+
+**Lo que NO es fallo** (para no perseguirlo): de 613 conectados, 228 tienen la empresa como centinela `''` (revisada, sin empresa) y en buena parte el headline sí existe pero no nombra ninguna ("Gerente de Operaciones Logísticas" a secas) — el centinela es correcto y el reporte cae a la empresa objetivo. Y de los emails que faltan, 133 aún no se han visitado (backlog del scrape) y 50 dieron error: no es lo mismo que "no tienen email".
+
+### 📧 El digest pasa a ser el Reporte ORION del cliente  [21-ago-2026, `0984de1` + `8c4e5ca` + `58ce7ad`]
+Rediseño pedido por el operador (mockup suyo). El email deja de ser una tabla de 5 columnas y pasa a un reporte: marca, eyebrow con la cuenta, KPIs en cajas, aviso opcional y los leads numerados en descendente (empresa en negro, nombre en rojo enlazado, puesto, contacto en monoespaciada).
+
+- **KPIs por campaña = ACUMULADOS** ("desde su activación"), no del período; el cuerpo sigue listando solo lo nuevo desde el high-water. Counts con `head:true` para no traer filas (postmortem 19-ago).
+- **`notice` / `intro` / `speed` son configurables por campaña** en `runtime_config.daily_digest.campaign_report[campaignId]`, **NO hardcodeados**: el aviso de "operando limitado" es de UNA campaña y mandarlo a todas sería mentirle al resto de clientes. Sin entrada, la caja no se pinta. Configurado para CAFE 57 (5 destinatarios reales, incluidos los del cliente).
+- **`prettyCompany`**: el nombre viene del array que se teclea en el Centro de Control, así que salía "home depot" junto a "MOLEX". Capitaliza **solo** si no hay ninguna mayúscula, para no destrozar acrónimos ni CamelCase (`FORVIA HELLA`, `OPmobility (USA)`).
+- **`DIGEST_BCC`** (env, prod = `walfre.am@gmail.com`): copia oculta de TODO email que salga por `sendEmail()` — el punto único, así cubre el digest global, los per-campaña y cualquier envío futuro. **Va en BCC y no en To** a propósito: en To, el cliente vería el correo personal del operador en la cabecera. `resolveBcc()` dedup contra To porque **Resend responde 422 si la misma dirección va en ambos** y ahí se perdería el email entero, no solo la copia.
+
+⚠️ **`contact_info` solo guarda `email`** (384 leads) y `websites` (1): **nunca ha habido `phones` ni `address`**, aunque el mockup los mostraba. El reporte los pinta en cuanto existan (con test), pero hoy esas líneas salen vacías — es trabajo de la extensión, no del email.
+
 ### 🔥 Tercera caída de Supabase: CPU del tier Nano agotado (6h)  [19-ago-2026, 00:56 CDMX]
 **Aviso**: Healthchecks `clawbot-orion-box` DOWN a las **00:56:09 -0600** (06:56 UTC). El check mide la infra COMPLETA (DB incluida), no solo la caja — por eso disparó con el servidor perfectamente sano.
 
