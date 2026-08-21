@@ -185,11 +185,13 @@ export default async function NewCampaignPage() {
                   <input name="search_count" type="number" min="5" max="200" defaultValue={25} className={inp} />
                 </Field>
               </div>
+              <WhitelistTip />
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <Field label="✅ Whitelist — Cargos que SÍ queremos"
-                  hint="Vacío = no filtrar. Busca substring en el headline.">
+                  hint="Vacío = no filtrar. Escribe PALABRAS SUELTAS, no cargos completos (mira el aviso de arriba).">
                   <input name="title_whitelist"
-                    placeholder="Director, CEO, CFO, VP, Gerente General" className={inp} />
+                    placeholder="logística, compras, aduana, import, supply chain" className={inp} />
                 </Field>
                 <Field label="🚫 Blacklist — Cargos que NO queremos"
                   hint="Se descartan si el headline contiene alguno.">
@@ -354,6 +356,45 @@ function Section({ title, icon, description, children }: {
         {description && <p className="text-gray-500 text-xs mt-0.5">{description}</p>}
       </div>
       {children}
+    </div>
+  )
+}
+
+// (21-ago-2026) El filtro de cargos compara por SUBSTRING, así que escribir el cargo
+// completo lo vuelve casi inservible sin que se note: la campaña sigue trayendo leads pero
+// casi ninguno pasa a invitación, y desde fuera parece "va lenta".
+// Caso real que motivó este aviso — Aduanas Infinity tenía "Gerente de Logística",
+// "Director de Compras"… y solo pasaban 20 de 225 leads (9%). Con palabras sueltas pasaron
+// 78 (35%), sin colar un solo perfil fuera de su público.
+function WhitelistTip() {
+  return (
+    <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-4 text-xs space-y-2">
+      <p className="text-amber-400 font-semibold">💡 Cómo escribir la whitelist: palabras sueltas, no cargos completos</p>
+      <p className="text-amber-300/80 leading-relaxed">
+        El filtro busca cada término <strong>dentro</strong> del cargo del lead. Si escribes el cargo entero,
+        solo pasan los que lo tengan <strong>idéntico</strong> — y te pierdes a casi todos.
+      </p>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+        <div className="rounded-lg bg-red-500/10 border border-red-500/20 p-2.5">
+          <p className="text-red-400 font-semibold mb-1">🚫 Así NO</p>
+          <p className="text-red-300/70 font-mono text-[11px]">Gerente de Logística, Director de Compras</p>
+          <p className="text-red-300/60 mt-1.5 leading-snug">
+            &quot;Jefe de Logística&quot; y &quot;Gerente de Compras&quot; <strong>quedan fuera</strong>.
+          </p>
+        </div>
+        <div className="rounded-lg bg-green-500/10 border border-green-500/20 p-2.5">
+          <p className="text-green-400 font-semibold mb-1">✅ Así SÍ</p>
+          <p className="text-green-300/70 font-mono text-[11px]">logística, compras, aduana, import</p>
+          <p className="text-green-300/60 mt-1.5 leading-snug">
+            Entran Jefe, Gerente, Director, Coordinador… de cualquiera de esas áreas.
+          </p>
+        </div>
+      </div>
+      <p className="text-amber-300/60 leading-relaxed pt-0.5">
+        No hace falta poner acentos ni plurales (<span className="font-mono">logistica</span> ya caza
+        &quot;Logística&quot; y &quot;Logistics&quot;). Evita términos de 3-4 letras que vivan dentro de otra
+        palabra, y usa la <strong>blacklist</strong> para lo que quieras excluir sí o sí.
+      </p>
     </div>
   )
 }
