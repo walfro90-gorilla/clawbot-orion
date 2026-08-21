@@ -1298,7 +1298,29 @@ async function ingestCheckConnections(commandId, connections, degraded = false) 
   // conexiones falsas cerrado el 15-ago (6e0b586). Efecto visible para el cliente: leads
   // marcados como conectados sin serlo y follow-ups con `lead_not_first_degree`.
   // Un scan DEGRADADO no sella: ahí el lazy-load no corrió y solo se vieron ~10 perfiles.
-  if (!degraded) {
+  // (21-ago-2026, hallazgo del hard testing) Un scan TRUNCADO pasaba por sano. El flag
+  // `degraded` de la ext solo cubre `rounds===0 && hiddenWaits>0` (pestaña oculta desde el
+  // principio); un barrido que arranca bien y se corta a mitad llega con `degraded:false`.
+  // Medido en Wal: 70 conexiones con rounds=15 cuando sus últimos 6 scans daban 379-409 con
+  // rounds=80. Con eso, la accept-detection buscaría entre 70 de 409 y daría por NO
+  // aceptados a los que sí lo hicieron — dejar accepts reales sin follow-up es el fallo
+  // caro (caso 8-jun). Se compara contra el techo reciente de LA MISMA cuenta: una lista de
+  // conexiones no se desploma un 80% de un scan a otro.
+  const { data: prevScans } = await supabase
+    .from('extension_commands').select('result')
+    .eq('account_id', cmd.account_id).eq('action', 'check_connections').eq('status', 'completed')
+    .gt('created_at', new Date(Date.now() - 7 * 86_400_000).toISOString())
+    .order('created_at', { ascending: false }).limit(10)
+  const techo = Math.max(0, ...(prevScans ?? []).map(c => c.result?.connections?.length ?? 0))
+  const truncado = techo >= 50 && connections.length < techo * 0.5
+
+  if (truncado) {
+    console.warn(`[bridge] check_connections TRUNCADO: ${connections.length} conexiones vs techo reciente ${techo} — NO se sella la salud (los accepts de esta pasada pueden ser parciales)`)
+    notifyOps('conn_scan_truncated',
+      `scan de conexiones parcial: ${connections.length} vs ${techo} habituales`,
+      { extra: { accountId: cmd.account_id, scraped: connections.length, techo } }).catch(() => {})
+  }
+  if (!degraded && !truncado) {
     const { error: stampErr } = await supabase.from('linkedin_accounts')
       .update({ last_connections_ingest_at: new Date().toISOString() })
       .eq('id', cmd.account_id)
