@@ -4860,7 +4860,7 @@ function _normForFilter(s) {
 // canónica). Ahora se puntúa por SEGUIDORES: la duplicada tiene decenas, la real
 // millones.
 const COMPANY_URN_RE = /urn:li:(?:fsd_company|organization|company):(\d+)/
-const CONTENT_VERSION = '0.10.32'
+const CONTENT_VERSION = '0.10.33'
 const DISTINCTIVE_HIT = 10   // puntaje de un token distintivo: el umbral de "sí es esta empresa"
 const FOLLOWERS_RE = /([\d][\d.,\s]*)\s*(mil|k|m|millones)?\s*(?:de\s+)?(?:seguidores|followers)/
 
@@ -5787,6 +5787,26 @@ function salesNavDebugProbe() {
 
 // Extrae profile cards del DOM en la página de search results.
 // Port directo de search.js extractProfilesFromPage adaptado a content.js.
+// (21-ago-2026) Aísla la tarjeta de UN resultado de personas. Hermana de
+// `_companyResultCard`: sube mientras el ancestro siga conteniendo un solo perfil distinto
+// (la foto y el nombre del mismo resultado apuntan al mismo /in/, así que cuentan como uno).
+// Sustituye a la subida ciega de 4 niveles, que aterrizaba fuera del card cuando LinkedIn
+// mete un nivel de más — de ahí los leads que llegaban sin puesto NI ubicación.
+function _personResultCard(anchor) {
+  const slugOf = (el) => (el.getAttribute('href') ?? '').match(/\/in\/([^/?#]+)/)?.[1]
+  let card = anchor
+  let el = anchor.parentElement
+  while (el && el !== document.body) {
+    const slugs = new Set(
+      Array.from(el.querySelectorAll('a[href*="/in/"]')).map(slugOf).filter(Boolean)
+    )
+    if (slugs.size > 1) break   // ya abarca otro resultado → nos quedamos con el anterior
+    card = el
+    el = el.parentElement
+  }
+  return card
+}
+
 function extractProfilesFromPage() {
   const NOISE_RE = /^[•·]\s*\d|conectar|connect|mensaje|message|seguir|follow|pendiente|contactos? más en común|other mutual connections|mutual connection/i
   const seen = new Set()
@@ -5817,8 +5837,17 @@ function extractProfilesFromPage() {
     seen.add(profileUrl)
     const name = nameFromNodes
 
-    // Walk up 4 levels para encontrar card container
-    let card = link.parentElement?.parentElement?.parentElement?.parentElement || null
+    // (21-ago-2026) Antes se subían 4 niveles A CIEGAS. Si el DOM de LinkedIn trae un
+    // nivel de más o de menos —y varía con el ancho de ventana, el tipo de resultado y sus
+    // A/B tests— se aterrizaba fuera del card: `card.querySelectorAll('p')` devolvía nada
+    // (lead sin puesto NI ubicación) o los <p> del resultado de al lado. Medido: 137 de
+    // 232 perfiles sin headline tampoco traían location, y con la MISMA build Wal fallaba
+    // 0% mientras Café 57 fallaba 33% y Josh-free 58% — el patrón ambiental que delata que
+    // el problema es la FORMA del DOM, no el código.
+    // Mismo bug y misma cura que `_companyResultCard` (v0.10.5, ver arriba): subir mientras
+    // el ancestro siga conteniendo un solo perfil distinto. Agnóstico al layout — no
+    // depende de <li> ni de clases de LinkedIn, que cambian sin avisar.
+    let card = _personResultCard(link)
 
     // Estrategia preferida: clases LinkedIn explícitas para primary/secondary subtitle
     // primary-subtitle = headline (Director, CTO, etc.)
@@ -5840,7 +5869,14 @@ function extractProfilesFromPage() {
             .filter(t =>
               t &&
               t !== name &&
-              t.length < 100 &&
+              // (21-ago-2026) El tope era 100 y LinkedIn permite 220 en el headline. La
+              // distribución lo delataba: 62 leads entre 80 y 100 caracteres y solo 2 por
+              // encima de 100 — un corte en seco, no una cola natural. Los headlines
+              // largos ("Purchasing Manager / Director North America, Investment
+              // Specialist, Strategic Sourcing & MRO") se descartaban enteros, y sin
+              // headline el lead pierde también la empresa (tryEnrichCompanies la saca de
+              // ahí). 240 = 220 + margen para el separador que a veces mete el DOM.
+              t.length <= 240 &&
               !NOISE_RE.test(t) &&
               !t.includes(name.split(' ')[0])
             )
