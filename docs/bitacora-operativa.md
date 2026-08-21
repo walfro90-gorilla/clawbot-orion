@@ -18,6 +18,56 @@
 
 ## ✅ Resuelto
 
+### 🔥 Tercera caída de Supabase: CPU del tier Nano agotado (6h)  [19-ago-2026, 00:56 CDMX]
+**Aviso**: Healthchecks `clawbot-orion-box` DOWN a las **00:56:09 -0600** (06:56 UTC). El check mide la infra COMPLETA (DB incluida), no solo la caja — por eso disparó con el servidor perfectamente sano.
+
+**No fue la caja ni fuimos nosotros**: Upcloud con uptime 1d22h, load 0.03, 45 GB libres, sin reboot. Tráfico nuestro en la hora previa al corte: **2.264 req/h = 0,63 req/s**. La instancia se cayó con carga trivial. Ningún job propio corre a medianoche (el digest va por la mañana). Sin incidente de DB declarado en status.supabase.com.
+
+**Timeline (postgres_logs, UTC)** — el corte es limpio:
+- `06:53:53` último checkpoint sano: `wrote 10 buffers; write=1.018 s, total=1.050 s`
+- **`06:56:29` primer síntoma**: `autovacuum worker took too long to start; canceled`
+- `06:57:10` arranca la cascada de `canceling statement due to statement timeout` (6h seguidas)
+- `07:19:08` PostgREST: `SSL SYSCALL error: EOF detected` — Postgres le corta la conexión
+- `07:20:17` `archive command failed with exit code 1` (el WAL ya no se archiva)
+- `08:10 → 08:11` checkpoint agónico: **`wrote 3 buffers (0.0%); write=64.961 s, total=71.069 s`**
+- después de `08:41`, **ningún checkpoint más**: el checkpointer bloqueado
+
+**24 KB en 65 segundos.** Esa línea es el diagnóstico entero.
+
+⚠️ **Corrección de la hipótesis inicial** (la evidencia del panel manda sobre la inferencia de los logs): se leyó como *créditos de I/O de disco agotados*. El panel Infrastructure dice **COMPUTE 99% · CPU 99% · MEMORY 54% · DISK IO 62%**, y **disco al 4%** (DB 52,2 MB / WAL 128 MB / system 167,8 MB). Lo que estaba al tope era **CPU**, no disco, y no había ni asomo de disco lleno. El I/O estrangulado que se midió era real pero era *consecuencia*: sin créditos de CPU la Nano cae a un baseline mínimo y el checkpointer no consigue scheduler, así que escribir 3 buffers tarda un minuto. Síntoma correcto, capa equivocada.
+
+**Y el panel enseña lo que los logs no**: la curva de CPU **sube desde el 12-ago**, no es un pico de esa noche. Se venían quemando créditos más rápido de lo que se recargan durante una semana; el 19-ago fue el día en que se acabaron.
+
+**Diferencia con el 17-ago: esta vez el restart del dashboard SÍ hizo falta.** A las 13:05 Postgres directo ya respondía a ratos (y volvía a colgarse), pero **PostgREST seguía en `http=000` a 30 s**. Al reconectar tiene que recargar su schema cache, que es justo la operación cara que no cabía en el CPU disponible. El operador reinició el proyecto (Settings → General → Restart project); Postgres arrancó a las `13:20:45` y PostgREST pasó a **200 en 0,16 s**.
+
+⚠️ **La API de control mintió todo el incidente**: `get_project` devolvía `ACTIVE_HEALTHY` con la base inservible. Mira que el contenedor exista, no que Postgres atienda. **No usarla para descartar una caída.**
+
+**Los arreglos del 17-ago (`b3e922e`) funcionaron como se diseñaron**: cero lockouts (`Auth NO verificable … Sin lockout; reintenta`) y el circuit breaker bajó el tráfico de 2.264 a ~250 req/h él solo. Contuvo el daño; no puede resucitar la instancia — y confirmó que **parar los pollers a mano ya no aporta** (la receta de §3 de la memoria del 17-ago quedó obsoleta: la carga ya estaba recortada 10× y aun así no levantó en 6h).
+
+**Recuperación verificada**: REST 200/0,16 s · auth 200/1,2 s · `pm2 restart prometheus-scheduler extension-bridge` · las 4 cuentas reautenticadas · tick de las **07:30 CDMX despachando trabajo real** (2 búsquedas, 2 invites, follow-ups, `check_sent_invites` de Wal).
+
+**¿Queda fuga que optimizar? Se midió el mismo día — NO en lo que se sospechaba.** El operador puso la objeción correcta ("no quiero irme a Pro y que no arreglemos la fuga"), así que se midió en vez de opinar:
+
+| Sospechoso | Medición | Veredicto |
+|---|---|---|
+| Fuga de WAL | `pg_stat_wal`: **5.082 kB reales en 37 min** ⇒ ~195 MB/día | ❌ normal |
+| Churn de datos / bucle | ~900 operaciones de fila en 37 min en TODA la instancia | ❌ minúsculo |
+| Slot de replicación colgado | `pg_replication_slots` vacío | ❌ |
+| `REPLICA IDENTITY FULL` (dobla el WAL) | ninguna tabla | ❌ |
+| Dashboard machacando la instancia | **10 queries lentas en 24h**, 5 suyas | ❌ irrelevante |
+
+⚠️ **Autocorrección — los "49 MB de WAL cada 5 min" eran un ARTEFACTO DE MEDICIÓN.** Se estimaron restando LSN (`pg_wal_lsn_diff`), pero **`archive_timeout=120`** fuerza un cambio de segmento WAL cada 2 min y cada salto avanza el LSN **16 MB enteros sin escribir datos**. Por eso el `distance=49152 kB` de los checkpoints salía clavado siempre: son 3 segmentos de rotación, no carga. El WAL real (`pg_stat_wal.wal_bytes`) es **195 MB/día sobre una base de 38 MB** — perfectamente sano. **⇒ La sospecha del TOAST de `extension_commands` queda DESCARTADA**; se estuvo a punto de "optimizar" algo que no existía. **Para medir WAL usar `pg_stat_wal`, NUNCA diffs de LSN en una base con `archive_timeout` agresivo.**
+
+🎯 **El dato que zanja la pregunta**: la instancia cayó a las **00:56 CDMX**, y en esa franja horaria el sistema genera **7 comandos en 7 días** (1 por día) — su hora **más muerta**; la punta está a las 14h con 301/semana. Y el primer síntoma fue `autovacuum worker took too long to start`. **Cayó haciendo prácticamente nada, tumbada por su propio mantenimiento.** Optimizar la aplicación no mueve esa aguja: el 17-ago ya se recortó lo caro (índice + vista LATERAL, `-663ms` en el CRM) y **cayó igual dos días después**.
+
+**Correlación estructural**: la 4ª cuenta (Rosy, Aduanas Infinity) se creó el **12-ago 22:12**, el día exacto en que la curva de CPU del panel empieza a subir. 299 comandos/día con 3 cuentas → ~340 con 4. Cada cliente nuevo empuja hacia arriba; la Nano no tiene a dónde crecer.
+
+🟡 **PENDIENTE (20-ago)**: única pieza sin medir, el **reparto de CPU en estado estacionario**. `pg_stat_statements` se resetea con el restart y a los 40 min seguía dominado por el arranque de la plataforma (`pg_backup_stop`, schema cache de PostgREST, migrations, `pgbouncer.get_auth`) — 56% plataforma vs 25% nuestro, pero **sesgado y no concluyente**. Dejarlo acumular 24h y mirar el reparto real: si >30% es nuestro y optimizable, optimizar primero; si es baseline + plataforma, el tier es el techo.
+
+🐛 **Bug menor destapado de paso**: el backoff del scheduler **nunca completa**. Tras un fallo espera 600 s, pero su propio detector de "hung" lo mata a los ~635-656 s (`WATCHDOG: scheduler hung — sin tick desde hace 656s`) ⇒ **35 reinicios en 6h**. No causa daño (al arrancar reintenta igual) pero el backoff largo es decorativo y ensucia el log. Arreglo: que el detector de hung no cuente el tiempo de backoff deliberado.
+
+🔴 **Conclusión que no se mueve: TERCERA caída por lo mismo, y el techo es el tier.** Ver [`ops-config-ago2026`] — Pro (~$25/mes) sigue siendo el P0, ahora con evidencia dura de que no se arregla optimizando: 24 KB en 65 s no es una query lenta.
+
 ### 🔗 Accept-detection rota en silencio: 3 fallos encadenados  [18-ago-2026, `81a9464` + `b4bfe65`, ext 0.10.30]
 **Síntoma**: Josh con **207 invitaciones esperando y 1 solo accept detectado en 72h**, mientras Café (228 esperando) llevaba 16. Sus `check_connections`: **16 timeouts seguidos** con `content_died_mid_work`.
 
