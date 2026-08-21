@@ -7,6 +7,7 @@
 // --dry-run/--send-to sí (importan daily-digest.js dinámicamente → supabase).
 import assert from 'node:assert/strict'
 import { groupRows, buildDigestHtml, startOfYesterdayIso } from '../lib/digest-format.js'
+import { resolveBcc } from '../lib/send-email.js'
 
 // ── Asserts puros ────────────────────────────────────────────────────────────
 const mkRow = (label, camp, over = {}) => ({
@@ -116,6 +117,15 @@ assert.ok(html.includes('a &amp; b'))
 // La cuenta aparece en el eyebrow del encabezado
 html = buildDigestHtml(groupRows([mkRow('Wal', 'Fintech')]), { dateLabel: 'x', total: 1 })
 assert.ok(html.includes('WAL'), 'la cuenta va en el eyebrow, en mayúsculas')
+
+// BCC del operador: se añade, se dedup contra To (Resend da 422 si se repite y
+// se perdería el email entero, no solo la copia) y es no-op si no está configurado.
+assert.deepEqual(resolveBcc('walfre.am@gmail.com', ['cliente@x.com']), ['walfre.am@gmail.com'])
+assert.deepEqual(resolveBcc('walfre.am@gmail.com', ['a@x.com', 'WALFRE.AM@gmail.com']), [])
+assert.deepEqual(resolveBcc('  a@x.com , b@y.com ', ['c@z.com']), ['a@x.com', 'b@y.com'])
+assert.deepEqual(resolveBcc('', ['a@x.com']), [])
+assert.deepEqual(resolveBcc(undefined, ['a@x.com']), [])
+assert.deepEqual(resolveBcc('a@x.com', 'a@x.com'), [], 'to puede venir como string')
 
 // startOfYesterdayIso: instante válido, entre 24h y 49h atrás (medianoche local de ayer)
 const since = new Date(startOfYesterdayIso('America/Mexico_City')).getTime()

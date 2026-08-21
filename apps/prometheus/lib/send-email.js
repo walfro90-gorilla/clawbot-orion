@@ -11,19 +11,38 @@
 //                     sin Reply-To, un cliente que contesta "me interesa" se come un rebote.
 //                     Opcional: sin la var, el header no se manda y el comportamiento es el
 //                     de siempre.
+//   DIGEST_BCC      — (20-ago-2026) copia oculta de TODO email que salga por aquí, para que
+//                     el operador sepa qué se envía y qué deja de enviarse. Va en BCC y no
+//                     en To a propósito: en To, el cliente vería el correo personal del
+//                     operador en la cabecera. Coma-separado. Se omite si el destinatario ya
+//                     está en To (Resend rechaza duplicados entre To y Bcc).
 
 const SEND_TIMEOUT_MS = 10_000
+
+/**
+ * Destinatarios de BCC, quitando los que ya van en To (Resend rechaza el duplicado
+ * con 422 y perdería el email entero, no solo la copia). Pura → self-check.
+ */
+export function resolveBcc(bcc, to) {
+  const inTo = new Set((Array.isArray(to) ? to : [to])
+    .filter(Boolean).map(a => String(a).trim().toLowerCase()))
+  return String(bcc ?? '').split(',').map(s => s.trim()).filter(Boolean)
+    .filter(a => !inTo.has(a.toLowerCase()))
+}
 
 /**
  * Envía un email por Resend. Nunca lanza.
  * @param {{to: string[]|string, subject: string, html: string, from?: string, replyTo?: string}} params
  * @returns {Promise<{ok: true, id: string} | {ok: false, error: string}>}
  */
-export async function sendEmail({ to, subject, html, from = process.env.DIGEST_FROM, replyTo = process.env.DIGEST_REPLY_TO }) {
+export async function sendEmail({ to, subject, html, from = process.env.DIGEST_FROM, replyTo = process.env.DIGEST_REPLY_TO, bcc = process.env.DIGEST_BCC }) {
   const apiKey = process.env.RESEND_API_KEY || ''
   if (!apiKey) return { ok: false, error: 'RESEND_API_KEY no configurada' }
   if (!from) return { ok: false, error: 'DIGEST_FROM no configurado' }
   if (!to || (Array.isArray(to) && to.length === 0)) return { ok: false, error: 'sin destinatarios' }
+
+  const toList = (Array.isArray(to) ? to : [to]).filter(Boolean)
+  const bccList = resolveBcc(bcc, toList)
 
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), SEND_TIMEOUT_MS)
@@ -31,7 +50,11 @@ export async function sendEmail({ to, subject, html, from = process.env.DIGEST_F
     const res = await fetch('https://api.resend.com/emails', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-      body:    JSON.stringify({ from, to, subject, html, ...(replyTo ? { reply_to: replyTo } : {}) }),
+      body:    JSON.stringify({
+        from, to: toList, subject, html,
+        ...(replyTo ? { reply_to: replyTo } : {}),
+        ...(bccList.length ? { bcc: bccList } : {}),
+      }),
       signal:  ctrl.signal,
     })
     if (!res.ok) {
