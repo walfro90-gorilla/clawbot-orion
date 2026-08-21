@@ -25,6 +25,7 @@ import dotenv from 'dotenv'
 import { checkAndKillLeadIfStuck, checkAccountHealthAndPause, dispatchInvite, LEAD_FAULT_ERRORS } from './lib/extension-dispatch.js'
 import { isSystemLinkedInAccount } from './lib/system-accounts.js'
 import { notifyOps } from './lib/notify-ops.js'
+import { sanitizeForJsonb } from './lib/jsonb-sanitize.js'
 import { isGroupConversationName } from './lib/group-conversation.js'
 import { applyLeadAttemptOutcome, isNonFaultError } from './lib/lead-failure.js'
 import { noteDbResult, dbCircuitOpen } from './lib/db-circuit.js'
@@ -421,9 +422,16 @@ async function handleCommandResult(msg) {
   // result null MIENTRAS el ingest sí había corrido — el sistema se contradecía a sí mismo
   // y desde fuera parecía "la extensión miente". Mismo patrón que el auth del 17-ago: un
   // fallo de infraestructura leído como dato válido.
+  // Postgres RECHAZA el carácter NUL dentro de jsonb (y los surrogates sueltos rompen el encoding):
+  // PostgREST lo devuelve como "Empty or invalid json", que suena a body vacío y despista.
+  // Los nombres/headlines scrapeados de LinkedIn traen de todo, así que se limpia SIEMPRE
+  // antes de escribir. Es lo que impedía guardar los check_connections de Josh.
+  const { value: safeResult, stripped } = sanitizeForJsonb(result ?? null)
+  if (stripped) console.warn(`[bridge] ${commandId.slice(0,8)} (${action}): ${stripped} string(s) con caracteres que jsonb no acepta — saneadas`)
+
   const persist = () => supabase.from('extension_commands').update({
     status:       isError ? 'error' : 'completed',
-    result:       result ?? null,
+    result:       safeResult,
     error:        isError ? (result?.error ?? result?.reason ?? 'unknown') : null,
     completed_at: new Date().toISOString(),
   }).eq('id', commandId)
