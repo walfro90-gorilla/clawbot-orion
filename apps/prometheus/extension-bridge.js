@@ -24,6 +24,7 @@ import { supabase } from './lib/supabase.js'
 import dotenv from 'dotenv'
 import { checkAndKillLeadIfStuck, checkAccountHealthAndPause, dispatchInvite, LEAD_FAULT_ERRORS } from './lib/extension-dispatch.js'
 import { isSystemLinkedInAccount } from './lib/system-accounts.js'
+import { notifyOps } from './lib/notify-ops.js'
 import { isGroupConversationName } from './lib/group-conversation.js'
 import { applyLeadAttemptOutcome, isNonFaultError } from './lib/lead-failure.js'
 import { noteDbResult, dbCircuitOpen } from './lib/db-circuit.js'
@@ -414,14 +415,36 @@ async function handleCommandResult(msg) {
   // se persistían como 'completed' con error=null, generando métricas fantasma.
   // Ahora cualquier de los dos shapes cuenta como error.
   const isError = result?.ok === false || result?.status === 'error'
-  await supabase.from('extension_commands').update({
+  // (21-ago-2026) El error de este UPDATE se descartaba y el log de abajo cantaba "→ OK"
+  // igual. Con los `result` grandes de check_connections (~60 kB, 400 conexiones) contra
+  // una instancia al límite, una escritura que timeoutea dejaba la fila en `timeout` con
+  // result null MIENTRAS el ingest sí había corrido — el sistema se contradecía a sí mismo
+  // y desde fuera parecía "la extensión miente". Mismo patrón que el auth del 17-ago: un
+  // fallo de infraestructura leído como dato válido.
+  const persist = () => supabase.from('extension_commands').update({
     status:       isError ? 'error' : 'completed',
     result:       result ?? null,
     error:        isError ? (result?.error ?? result?.reason ?? 'unknown') : null,
     completed_at: new Date().toISOString(),
   }).eq('id', commandId)
 
-  console.log(`[bridge] Command ${commandId.slice(0,8)} (${action}) → ${isError ? `ERROR (${result?.error ?? result?.status ?? 'unknown'})` : 'OK'}`)
+  let { error: wErr } = await persist()
+  if (wErr) {
+    // Un reintento: el modo de fallo observado es un timeout puntual, no un dato inválido.
+    console.warn(`[bridge] persist ${commandId.slice(0,8)} (${action}) falló (${wErr.message}) — reintento`)
+    await new Promise(r => setTimeout(r, 1500))
+    ;({ error: wErr } = await persist())
+  }
+  if (wErr) {
+    // Sin fila persistida el trabajo igual se ingiere abajo, pero el estado queda mintiendo.
+    // Que se vea en el log y en las alertas en vez de morir en silencio.
+    console.error(`[bridge] ❌ RESULTADO PERDIDO ${commandId.slice(0,8)} (${action}): ${wErr.message} — la fila queda sin result`)
+    notifyOps('command_result_persist_failed',
+      `no se pudo guardar el resultado de ${action}: ${wErr.message}`,
+      { extra: { commandId, action } }).catch(() => {})
+  }
+
+  console.log(`[bridge] Command ${commandId.slice(0,8)} (${action}) → ${isError ? `ERROR (${result?.error ?? result?.status ?? 'unknown'})` : 'OK'}${wErr ? ' (NO PERSISTIDO)' : ''}`)
 
   // daily_activity.errors (17-jul): contar el error para el tile por cuenta — SOLO si NO es un
   // lead-fault benigno (not_first_degree, etc.). Así el contador (que llevaba en 0 desde siempre)
@@ -965,7 +988,7 @@ async function handleCommandResult(msg) {
   // check_connections ingest — accept-detection POSITIVA (presencia en la lista de conexiones)
   if (!isError && action === 'check_connections' && result?.status === 'ok' && Array.isArray(result?.connections)) {
     try {
-      await ingestCheckConnections(commandId, result.connections)
+      await ingestCheckConnections(commandId, result.connections, result.degraded === true)
     } catch (err) {
       console.error(`[bridge] ingest check_connections failed:`, err.message)
     }
@@ -1188,7 +1211,18 @@ async function ingestCheckSentInvites(commandId, pending, statedTotal = null) {
   // con status ok: antes bastaba count>0 para dar la accept-detection por viva, asi que los
   // accepts se buscaban solo entre esos 10 Y ADEMAS se desactivaba esta red de seguridad.
   // Peor que no tener scan. La ext marca `degraded` cuando rounds===0 && hiddenWaits>0.
-  const connectionsHealthy = (recentConnScan ?? []).some(c =>
+  // (21-ago-2026) La salud se decide por el HECHO de haber ingerido conexiones, no por el
+  // estado de la fila del comando. Josh ingería 396 conexiones en 18 de 20 scans y aun así
+  // esta función daba `false`, porque su fila expiraba antes de persistir el result y
+  // quedaba en `timeout`: el filtro status='completed' la descartaba. Resultado: caía al
+  // fallback por ausencia y fabricaba conexiones falsas. El sello lo pone
+  // ingestCheckConnections y NO lo ponen los scans degradados.
+  const { data: acct } = await supabase
+    .from('linkedin_accounts').select('last_connections_ingest_at')
+    .eq('id', cmd.account_id).maybeSingle()
+  const ingestFresh = acct?.last_connections_ingest_at
+    && (Date.now() - new Date(acct.last_connections_ingest_at).getTime()) < 24 * 3_600_000
+  const connectionsHealthy = ingestFresh || (recentConnScan ?? []).some(c =>
     (c.result?.connections?.length ?? 0) > 0 && c.result?.degraded !== true)
   if (connectionsHealthy) {
     const absent = invitedLeads.filter(l => l.sent_at && !isPending(l)).length
@@ -1240,12 +1274,27 @@ async function ingestCheckSentInvites(commandId, pending, statedTotal = null) {
 // timing). La presencia positiva OVERRIDE el flag detected_not_first_degree (si de verdad
 // conectó, era un falso revert). Solo AÑADE marks connected → seguro ante scrape parcial (marca
 // menos, nunca falsos-accept masivos como el modo ausencia).
-async function ingestCheckConnections(commandId, connections) {
+async function ingestCheckConnections(commandId, connections, degraded = false) {
   const { data: cmd } = await supabase.from('extension_commands').select('account_id').eq('id', commandId).single()
   if (!cmd?.account_id) return
   if (!Array.isArray(connections) || connections.length === 0) {
     console.warn(`[bridge] check_connections: 0 conexiones scrapeadas → nada que marcar (posible parser fail)`)
     return
+  }
+
+  // (21-ago-2026) Sello del HECHO, no del estado de la fila. Caso Josh: su scan
+  // terminaba e ingería 396 conexiones, pero tardaba más que el TTL del comando, así que
+  // `cleanupExpired` ya lo había marcado `timeout` y el result nunca quedó persistido.
+  // `connectionsHealthy` exigía status='completed' ⇒ 18 de 20 scans daban la
+  // accept-detection por muerta ⇒ fallback a la inferencia por ausencia, que es el bug de
+  // conexiones falsas cerrado el 15-ago (6e0b586). Efecto visible para el cliente: leads
+  // marcados como conectados sin serlo y follow-ups con `lead_not_first_degree`.
+  // Un scan DEGRADADO no sella: ahí el lazy-load no corrió y solo se vieron ~10 perfiles.
+  if (!degraded) {
+    const { error: stampErr } = await supabase.from('linkedin_accounts')
+      .update({ last_connections_ingest_at: new Date().toISOString() })
+      .eq('id', cmd.account_id)
+    if (stampErr) console.error(`[bridge] sello last_connections_ingest_at falló: ${stampErr.message}`)
   }
   const { data: invitedLeads } = await supabase
     .from('leads')
