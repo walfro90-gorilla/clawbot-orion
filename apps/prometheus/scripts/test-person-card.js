@@ -1,5 +1,7 @@
 // Self-check del aislamiento de la tarjeta de un resultado de personas
-// (ext 0.10.33, 21-ago-2026).
+// (ext 0.10.35, 21-ago-2026). Conserva los casos de la v1 (subida ciega de 4 niveles) y
+// añade abajo los de la v2, que es la que corre hoy: la v1 se estrenó en 0.10.33 y
+// RESULTÓ SER UNA REGRESIÓN — ver el bloque "v2".
 // (copia fiel de `_personResultCard` de content.js: es una función de la extensión, que no
 //  se puede importar desde Node. Si cambias una, cambia la otra.)
 //
@@ -106,6 +108,87 @@ const _card3 = (() => {
 })()
 assert.notEqual(_card3, body3, 'para en el body, no lo devuelve')
 assert.ok(_card3.descendants().includes(solo.p))
+
+
+// ── v2: el card lleva CONTACTOS EN COMÚN, y eso rompía la v1 ───────────────
+// La v1 subía "mientras haya un solo perfil distinto". Como la tarjeta incluye enlaces a
+// los contactos en común, el segundo perfil aparece DENTRO del propio resultado: el bucle
+// rompía al primer nivel y devolvía casi el <a>. Diagnosticado con telemetría en vivo
+// (nLeaves=0, nPs=0) tras ver a Wal pasar de 0% a 58% de perfiles sin puesto.
+// Criterio v2: subir al PRIMER ancestro que ya contenga texto de subtítulo.
+class El2 {
+  constructor(tag, href = null, text = '') { this.tag = tag; this.href = href; this.text = text; this.children = []; this.parentElement = null }
+  add(...kids) { for (const k of kids) { k.parentElement = this; this.children.push(k) } return this }
+  getAttribute(n) { return n === 'href' ? this.href : null }
+  get textContent() { return this.text || this.children.map(c => c.textContent).join(' ') }
+  descendants() { return this.children.flatMap(c => [c, ...c.descendants()]) }
+  querySelector(sel) { return this.querySelectorAll(sel)[0] ?? null }
+  querySelectorAll(sel) {
+    const tags = sel.split(',').map(s => s.trim())
+    return this.descendants().filter(e => tags.includes(e.tag))
+  }
+  closest(tag) { let e = this.parentElement; while (e) { if (e.tag === tag) return e; e = e.parentElement } return null }
+}
+function cardHasText(el, name) {
+  if (!el) return false
+  const first = (name ?? '').split(' ')[0]
+  return Array.from(el.querySelectorAll('p, span, div'))
+    .filter(e => !e.querySelector('p, span, div'))
+    .some(e => { const t = (e.textContent || '').replace(/\s+/g, ' ').trim()
+      return t.length > 4 && t !== name && !(first && t.includes(first)) })
+}
+function personCardV2(anchor, name) {
+  const li = anchor.closest('li')
+  if (li && cardHasText(li, name)) return li
+  let el = anchor.parentElement
+  for (let i = 0; i < 8 && el && el.tag !== 'body'; i++) {
+    if (cardHasText(el, name)) return el
+    el = el.parentElement
+  }
+  let f = anchor
+  for (let i = 0; i < 4 && f.parentElement; i++) f = f.parentElement
+  return f
+}
+
+// Resultado REAL: nombre + puesto + ubicación + contactos en común (con SUS enlaces).
+const b = new El2('body')
+const li2 = new El2('li')
+const wrap = new El2('div')
+const aName = new El2('a', '/in/ana-perez/', 'Ana Pérez')
+const subt = new El2('span', null, 'Directora de Logística en Acme')
+const loc = new El2('span', null, 'Monterrey, Nuevo León, México')
+const mutual = new El2('div')
+const m1 = new El2('a', '/in/otro-contacto/', 'Otro Contacto')   // <- lo que rompía la v1
+const m2 = new El2('a', '/in/tercero/', 'Tercero')
+mutual.add(m1, m2)
+wrap.add(aName, subt, loc, mutual)
+li2.add(wrap)
+b.add(li2)
+
+const card2 = personCardV2(aName, 'Ana Pérez')
+assert.ok(cardHasText(card2, 'Ana Pérez'), 'el card DEBE contener texto de subtítulo')
+assert.ok(card2.descendants().includes(subt), 'incluye el puesto pese a los contactos en común')
+
+// El fallo que delató la telemetría: la v1 devolvía algo SIN texto.
+const cardV1 = (() => {
+  const slugOf = (el) => (el.getAttribute('href') ?? '').match(/\/in\/([^/?#]+)/)?.[1]
+  let c = aName, el = aName.parentElement
+  while (el && el.tag !== 'body') {
+    const s = new Set(Array.from(el.querySelectorAll('a')).map(slugOf).filter(Boolean))
+    if (s.size > 1) break
+    c = el; el = el.parentElement
+  }
+  return c
+})()
+assert.equal(cardHasText(cardV1, 'Ana Pérez'), false, 'la v1 se quedaba sin texto: la regresión')
+
+// Sin <li> (layout alternativo) también encuentra el card por contenido.
+const b3 = new El2('body')
+const d1 = new El2('div'); const d2 = new El2('div')
+const aN = new El2('a', '/in/luis/', 'Luis Vega')
+const sub = new El2('span', null, 'Gerente de Compras')
+d2.add(aN, sub); d1.add(d2); b3.add(d1)
+assert.ok(cardHasText(personCardV2(aN, 'Luis Vega'), 'Luis Vega'), 'sin <li> también')
 
 // ── El tope de longitud del headline (era 100; LinkedIn permite 220) ───────
 const pasa = (t) => t.length <= 240

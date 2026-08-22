@@ -4860,7 +4860,7 @@ function _normForFilter(s) {
 // canónica). Ahora se puntúa por SEGUIDORES: la duplicada tiene decenas, la real
 // millones.
 const COMPANY_URN_RE = /urn:li:(?:fsd_company|organization|company):(\d+)/
-const CONTENT_VERSION = '0.10.34'
+const CONTENT_VERSION = '0.10.35'
 const DISTINCTIVE_HIT = 10   // puntaje de un token distintivo: el umbral de "sí es esta empresa"
 const FOLLOWERS_RE = /([\d][\d.,\s]*)\s*(mil|k|m|millones)?\s*(?:de\s+)?(?:seguidores|followers)/
 
@@ -5787,24 +5787,42 @@ function salesNavDebugProbe() {
 
 // Extrae profile cards del DOM en la página de search results.
 // Port directo de search.js extractProfilesFromPage adaptado a content.js.
-// (21-ago-2026) Aísla la tarjeta de UN resultado de personas. Hermana de
-// `_companyResultCard`: sube mientras el ancestro siga conteniendo un solo perfil distinto
-// (la foto y el nombre del mismo resultado apuntan al mismo /in/, así que cuentan como uno).
-// Sustituye a la subida ciega de 4 niveles, que aterrizaba fuera del card cuando LinkedIn
-// mete un nivel de más — de ahí los leads que llegaban sin puesto NI ubicación.
-function _personResultCard(anchor) {
-  const slugOf = (el) => (el.getAttribute('href') ?? '').match(/\/in\/([^/?#]+)/)?.[1]
-  let card = anchor
+// (21-ago-2026) Aísla la tarjeta de UN resultado de personas.
+// v2 — la v1 subía "mientras el ancestro contenga un solo perfil distinto", copiando a
+// `_companyResultCard`. NO vale aquí: la tarjeta de una persona lleva enlaces a los
+// CONTACTOS EN COMÚN, así que el segundo perfil aparece dentro del propio resultado, el
+// bucle rompía al primer nivel y devolvía casi el <a>. Diagnosticado con la telemetría
+// `_dbg`: nLeaves=0, nPs=0, hadPrimary=false — el card no contenía NI UN texto. Wal pasó
+// de 0% a 58% de perfiles sin puesto: regresión introducida por esa v1.
+//
+// Criterio nuevo: subir hasta el PRIMER ancestro que ya contenga texto de subtítulo. Es lo
+// que define un card útil, y al quedarnos con el más pequeño que lo cumple no se invade al
+// vecino. `closest('li')` va primero porque es lo que LinkedIn usa por resultado y es el
+// que ya funciona en SalesNav (0% de fallo).
+function _cardHasText(el, name) {
+  if (!el) return false
+  const first = (name ?? '').split(' ')[0]
+  return Array.from(el.querySelectorAll('p, span, div'))
+    .filter(e => !e.querySelector('p, span, div'))
+    .some(e => {
+      const t = (e.textContent || '').replace(/\s+/g, ' ').trim()
+      return t.length > 4 && t !== name && !(first && t.includes(first))
+    })
+}
+
+function _personResultCard(anchor, name) {
+  const li = anchor.closest('li')
+  if (li && _cardHasText(li, name)) return li
   let el = anchor.parentElement
-  while (el && el !== document.body) {
-    const slugs = new Set(
-      Array.from(el.querySelectorAll('a[href*="/in/"]')).map(slugOf).filter(Boolean)
-    )
-    if (slugs.size > 1) break   // ya abarca otro resultado → nos quedamos con el anterior
-    card = el
+  for (let i = 0; i < 8 && el && el !== document.body; i++) {
+    if (_cardHasText(el, name)) return el
     el = el.parentElement
   }
-  return card
+  // Sin texto en ningún ancestro: se devuelve el equivalente al comportamiento histórico
+  // (4 niveles) para no empeorar respecto a antes de 0.10.33.
+  let f = anchor
+  for (let i = 0; i < 4 && f.parentElement; i++) f = f.parentElement
+  return f
 }
 
 function extractProfilesFromPage() {
@@ -5847,7 +5865,7 @@ function extractProfilesFromPage() {
     // Mismo bug y misma cura que `_companyResultCard` (v0.10.5, ver arriba): subir mientras
     // el ancestro siga conteniendo un solo perfil distinto. Agnóstico al layout — no
     // depende de <li> ni de clases de LinkedIn, que cambian sin avisar.
-    let card = _personResultCard(link)
+    let card = _personResultCard(link, name)
 
     // Estrategia preferida: clases LinkedIn explícitas para primary/secondary subtitle
     // primary-subtitle = headline (Director, CTO, etc.)
