@@ -4860,7 +4860,7 @@ function _normForFilter(s) {
 // canónica). Ahora se puntúa por SEGUIDORES: la duplicada tiene decenas, la real
 // millones.
 const COMPANY_URN_RE = /urn:li:(?:fsd_company|organization|company):(\d+)/
-const CONTENT_VERSION = '0.10.35'
+const CONTENT_VERSION = '0.10.36'
 const DISTINCTIVE_HIT = 10   // puntaje de un token distintivo: el umbral de "sí es esta empresa"
 const FOLLOWERS_RE = /([\d][\d.,\s]*)\s*(mil|k|m|millones)?\s*(?:de\s+)?(?:seguidores|followers)/
 
@@ -5787,44 +5787,6 @@ function salesNavDebugProbe() {
 
 // Extrae profile cards del DOM en la página de search results.
 // Port directo de search.js extractProfilesFromPage adaptado a content.js.
-// (21-ago-2026) Aísla la tarjeta de UN resultado de personas.
-// v2 — la v1 subía "mientras el ancestro contenga un solo perfil distinto", copiando a
-// `_companyResultCard`. NO vale aquí: la tarjeta de una persona lleva enlaces a los
-// CONTACTOS EN COMÚN, así que el segundo perfil aparece dentro del propio resultado, el
-// bucle rompía al primer nivel y devolvía casi el <a>. Diagnosticado con la telemetría
-// `_dbg`: nLeaves=0, nPs=0, hadPrimary=false — el card no contenía NI UN texto. Wal pasó
-// de 0% a 58% de perfiles sin puesto: regresión introducida por esa v1.
-//
-// Criterio nuevo: subir hasta el PRIMER ancestro que ya contenga texto de subtítulo. Es lo
-// que define un card útil, y al quedarnos con el más pequeño que lo cumple no se invade al
-// vecino. `closest('li')` va primero porque es lo que LinkedIn usa por resultado y es el
-// que ya funciona en SalesNav (0% de fallo).
-function _cardHasText(el, name) {
-  if (!el) return false
-  const first = (name ?? '').split(' ')[0]
-  return Array.from(el.querySelectorAll('p, span, div'))
-    .filter(e => !e.querySelector('p, span, div'))
-    .some(e => {
-      const t = (e.textContent || '').replace(/\s+/g, ' ').trim()
-      return t.length > 4 && t !== name && !(first && t.includes(first))
-    })
-}
-
-function _personResultCard(anchor, name) {
-  const li = anchor.closest('li')
-  if (li && _cardHasText(li, name)) return li
-  let el = anchor.parentElement
-  for (let i = 0; i < 8 && el && el !== document.body; i++) {
-    if (_cardHasText(el, name)) return el
-    el = el.parentElement
-  }
-  // Sin texto en ningún ancestro: se devuelve el equivalente al comportamiento histórico
-  // (4 niveles) para no empeorar respecto a antes de 0.10.33.
-  let f = anchor
-  for (let i = 0; i < 4 && f.parentElement; i++) f = f.parentElement
-  return f
-}
-
 function extractProfilesFromPage() {
   const NOISE_RE = /^[•·]\s*\d|conectar|connect|mensaje|message|seguir|follow|pendiente|contactos? más en común|other mutual connections|mutual connection/i
   const seen = new Set()
@@ -5855,17 +5817,8 @@ function extractProfilesFromPage() {
     seen.add(profileUrl)
     const name = nameFromNodes
 
-    // (21-ago-2026) Antes se subían 4 niveles A CIEGAS. Si el DOM de LinkedIn trae un
-    // nivel de más o de menos —y varía con el ancho de ventana, el tipo de resultado y sus
-    // A/B tests— se aterrizaba fuera del card: `card.querySelectorAll('p')` devolvía nada
-    // (lead sin puesto NI ubicación) o los <p> del resultado de al lado. Medido: 137 de
-    // 232 perfiles sin headline tampoco traían location, y con la MISMA build Wal fallaba
-    // 0% mientras Café 57 fallaba 33% y Josh-free 58% — el patrón ambiental que delata que
-    // el problema es la FORMA del DOM, no el código.
-    // Mismo bug y misma cura que `_companyResultCard` (v0.10.5, ver arriba): subir mientras
-    // el ancestro siga conteniendo un solo perfil distinto. Agnóstico al layout — no
-    // depende de <li> ni de clases de LinkedIn, que cambian sin avisar.
-    let card = _personResultCard(link, name)
+    // Walk up 4 levels para encontrar card container
+    let card = link.parentElement?.parentElement?.parentElement?.parentElement || null
 
     // Estrategia preferida: clases LinkedIn explícitas para primary/secondary subtitle
     // primary-subtitle = headline (Director, CTO, etc.)
@@ -5879,38 +5832,19 @@ function extractProfilesFromPage() {
       if (secondaryEl) locationStr = (secondaryEl.textContent || '').replace(/\s+/g, ' ').trim()
     }
 
-    // Fallback: parsing por texto del card con heurísticas.
-    // (21-ago-2026) Antes solo se miraban los <p>. Medido en vivo tras el fix del card:
-    // Café 57 seguía con 8 de 18 perfiles sin puesto NI ubicación, con la pestaña
-    // confirmada en 0.10.33 — así que el card ya era el correcto y el texto simplemente
-    // NO estaba en <p>. LinkedIn sirve variantes del resultado (A/B, ancho de ventana) que
-    // ponen el subtítulo en <div>/<span> y sin las clases `*-subtitle`. Ahora se leen las
-    // HOJAS de texto del card, sea cual sea la etiqueta: es lo único que no depende de un
-    // markup que cambia sin avisar.
+    // Fallback: parsing por <p> con heurísticas mejoradas
     if (!headline) {
-      const leafTexts = card
-        ? Array.from(card.querySelectorAll('p, span, div'))
-            // solo hojas: si el nodo contiene otro contenedor, su texto es la concatenación
-            // de los hijos y duplicaría (o pegaría el nombre al puesto).
-            .filter(el => !el.querySelector('p, span, div'))
-            .map(el => (el.textContent || '').replace(/\s+/g, ' ').trim())
-        : []
-      // Dedup preservando orden: el mismo texto suele aparecer en la copia accesible.
-      const paras = [...new Set(leafTexts)]
+      const paras = card
+        ? Array.from(card.querySelectorAll('p'))
+            .map(p => (p.textContent || '').replace(/\s+/g, ' ').trim())
             .filter(t =>
               t &&
               t !== name &&
-              // (21-ago-2026) El tope era 100 y LinkedIn permite 220 en el headline. La
-              // distribución lo delataba: 62 leads entre 80 y 100 caracteres y solo 2 por
-              // encima de 100 — un corte en seco, no una cola natural. Los headlines
-              // largos ("Purchasing Manager / Director North America, Investment
-              // Specialist, Strategic Sourcing & MRO") se descartaban enteros, y sin
-              // headline el lead pierde también la empresa (tryEnrichCompanies la saca de
-              // ahí). 240 = 220 + margen para el separador que a veces mete el DOM.
-              t.length <= 240 &&
+              t.length < 100 &&
               !NOISE_RE.test(t) &&
               !t.includes(name.split(' ')[0])
             )
+        : []
 
       // Detector de "esto es location": 2+ comas, palabras de geografía, sin verbo/rol
       const looksLikeLocation = (t) => {
@@ -6001,15 +5935,12 @@ function extractProfilesFromPage() {
       if (!locationStr) locationStr = paras.find(p => p !== headline && looksLikeLocation(p)) ?? null
     }
 
-    // (21-ago-2026) Telemetría SOLO cuando se pierde el puesto: sin esto hay que adivinar
-    // si el card salió vacío, si el texto no estaba donde se buscaba, o si las heurísticas
-    // lo descartaron. Va en el perfil para que viaje en el result y se pueda consultar
-    // desde la DB en vez de pedirle capturas al operador.
+    // Telemetría del 0.10.34, que se conserva: es lo único que permitió diagnosticar sin
+    // pedir capturas. Solo se emite cuando se pierde el puesto.
     if (!headline) {
-      const nLeaves = card ? Array.from(card.querySelectorAll('p, span, div')).filter(e => !e.querySelector('p, span, div')).length : -1
       results.push({ profileUrl, name, headline, location: locationStr, _dbg: {
-        nLeaves,
         nPs: card ? card.querySelectorAll('p').length : -1,
+        nLeaves: card ? Array.from(card.querySelectorAll('p, span, div')).filter(e => !e.querySelector('p, span, div')).length : -1,
         hadPrimary: !!card?.querySelector('[class*="primary-subtitle"]'),
         sample: card ? Array.from(card.querySelectorAll('p, span, div'))
           .filter(e => !e.querySelector('p, span, div'))
