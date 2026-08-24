@@ -846,6 +846,23 @@ function coreCompanyName(name) {
   return kept.join(' ')
 }
 
+// v0.10.37 — el slug va TAL CUAL a la URL. Ya viene URL-encoded del href de LinkedIn
+// cuando el nombre trae acentos (ver `_slugWords` en content.js), así que pasarlo por
+// encodeURIComponent convertía cada '%' en '%25' y apuntaba a una página inexistente:
+//   thyssenkrupp-presta-de-m%C3%A9xico → thyssenkrupp-presta-de-m%25C3%25A9xico → 404
+// Sin página no hay link "ver todos los empleados", así que el URN volvía null y la
+// empresa quedaba 'unresolved' → búsqueda degradada por texto libre.
+//
+// Medido sobre las empresas intentadas DESPUÉS del fix 0.10.31: slug ASCII 505/513
+// (98.4%) resueltas, slug con acento 0/7. Duele justo donde más importa — media lista
+// mexicana lleva "México"/"Querétaro"/"Fábricas".
+//
+// Función PURA para poder testearla sin DOM. Su gemela vive en
+// scripts/test-company-urn.js — si cambias una, cambia la otra.
+function companyPageUrl(slug) {
+  return `https://www.linkedin.com/company/${slug}/`
+}
+
 async function resolveCompanies(commandId, payload) {
   const companies = Array.isArray(payload.companies) ? payload.companies : []
   const resolved = []
@@ -879,7 +896,7 @@ async function resolveCompanies(commandId, payload) {
   // búsqueda. Solo se hace si hace falta: una navegación extra por empresa nueva, nunca
   // para las que ya resolvieron.
   const urnFromCompanyPage = async (slug) => {
-    const tab = await navigateTabAndWait(`https://www.linkedin.com/company/${encodeURIComponent(slug)}/`, 20000)
+    const tab = await navigateTabAndWait(companyPageUrl(slug), 20000)
     const r = await sendMessageWithRetry(tab.id, {
       type: 'orion_command', commandId, action: 'resolve_company_urn', payload: { slug },
     }, 3)
