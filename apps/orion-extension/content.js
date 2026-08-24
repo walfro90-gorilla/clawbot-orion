@@ -4860,7 +4860,7 @@ function _normForFilter(s) {
 // canónica). Ahora se puntúa por SEGUIDORES: la duplicada tiene decenas, la real
 // millones.
 const COMPANY_URN_RE = /urn:li:(?:fsd_company|organization|company):(\d+)/
-const CONTENT_VERSION = '0.10.36'
+const CONTENT_VERSION = '0.10.38'
 const DISTINCTIVE_HIT = 10   // puntaje de un token distintivo: el umbral de "sí es esta empresa"
 const FOLLOWERS_RE = /([\d][\d.,\s]*)\s*(mil|k|m|millones)?\s*(?:de\s+)?(?:seguidores|followers)/
 
@@ -5443,6 +5443,35 @@ async function commentOnPost(payload = {}) {
   return { action: 'comment_on_post', status: 'posted', postUrn: payload.postUrn ?? null, postedAt: new Date().toISOString() }
 }
 
+// ── v0.10.38 — Límite mensual de búsquedas (Commercial Use Limit) ────────────
+// LinkedIn free corta las búsquedas de perfiles al llegar a un tope MENSUAL: difumina
+// los resultados y muestra un upsell a Premium. El scraper veía 0 links /in/ y devolvía
+// `no_results_found`, o sea "busqué bien y no hay nadie" — indistinguible de una empresa
+// sin gente en ese puesto. Rosy pasó días así (22-ago-2026).
+//
+// Guard contra falso positivo: LinkedIn ofrece Premium por TODA la interfaz, así que la
+// frase de upsell sola no basta. Solo cuenta como límite si además NO hay un solo perfil
+// en la página; con resultados visibles es un banner, no un bloqueo. Un falso positivo
+// pausa las búsquedas de una cuenta 24h, así que se pide señal doble.
+//
+// Función PURA para poder testearla sin DOM. Su gemela vive en
+// scripts/test-search-limit.js — si cambias una, cambia la otra.
+const SEARCH_LIMIT_RE = [
+  // ES: "Has llegado al límite mensual de búsquedas de perfiles"
+  /l[íi]mite\s+(mensual|comercial)[^.]{0,60}(b[úu]squeda|perfil)/i,
+  /l[íi]mite\s+de\s+uso\s+comercial/i,
+  // EN: "You've reached the monthly limit for profile searches" / "commercial use limit"
+  /commercial\s+use\s+limit/i,
+  /(monthly|search)\s+limit[^.]{0,60}(search|profile)/i,
+  /reached\s+the\s+monthly\s+limit/i,
+]
+function detectSearchLimit(bodyText, profileLinkCount) {
+  // Con perfiles en pantalla NO es bloqueo: es el upsell de siempre.
+  if ((profileLinkCount ?? 0) > 0) return false
+  const t = String(bodyText ?? '')
+  return SEARCH_LIMIT_RE.some(re => re.test(t))
+}
+
 async function searchLeads(payload = {}) {
   const targetCount = Math.min(payload.targetCount ?? 25, 200)
   const maxPages = Math.min(payload.maxPages ?? 10, 20)
@@ -5572,6 +5601,19 @@ async function searchLeads(payload = {}) {
         ]
         const noResultsText = noResultsSignals.some(s => bodyTxt.includes(s))
         if (broadProfileLinks === 0 || noResultsText) {
+          // v0.10.38 — "cero resultados" tapaba DOS causas opuestas: la empresa no
+          // tiene a nadie con ese puesto (avanzar, todo bien) y la cuenta agotó el
+          // límite mensual de búsquedas de LinkedIn (parar y avisar). Sin separarlas,
+          // Rosy pasó días buscando contra una pared mientras el sistema reportaba
+          // búsquedas sanas. Mismo error que ya se pagó del lado de invites: hasta
+          // 0.10.17 un send bloqueado devolvía 'sent' a ciegas.
+          if (detectSearchLimit(bodyTxt, broadProfileLinks)) {
+            return {
+              action: 'search', status: 'error', error: 'search_limit_reached',
+              currentUrl: location.href,
+              debugSample: { broadProfileLinks, bodyTextSnippet: bodyTxt.slice(0, 300) },
+            }
+          }
           return {
             action: 'search', status: 'ok', profiles: [], pagesScraped: 1,
             totalFound: 0, stopReason: 'no_results_found',

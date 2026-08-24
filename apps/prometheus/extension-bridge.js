@@ -612,6 +612,41 @@ async function handleCommandResult(msg) {
     }
   }
 
+  // v0.10.38 — Límite MENSUAL de búsquedas de perfiles (Commercial Use Limit de LinkedIn,
+  // detección en content.js: frase de límite + cero perfiles en la página). Pausa SOLO
+  // búsquedas 24h (searches_paused_until); invites/FU/inbox siguen — con el tope de
+  // búsqueda agotado esas rutas están perfectamente sanas y apagarlas costaría negocio.
+  //
+  // 24h y no "hasta el día 1" aunque el límite sea mensual: si la detección se equivoca,
+  // un error de 24h es barato y se cura solo; uno de 30 días apaga a un cliente. Al
+  // expirar, la siguiente búsqueda re-sondea y renueva la pausa si el límite sigue.
+  // Mismo criterio de auto-probe que weekly_invite_limit.
+  if (result?.error === 'search_limit_reached') {
+    try {
+      const { data: cmdRow } = await supabase
+        .from('extension_commands').select('account_id').eq('id', commandId).single()
+      const acctId = cmdRow?.account_id
+      if (acctId) {
+        const until = new Date(Date.now() + 24 * 3_600_000).toISOString()
+        const { error: upErr } = await supabase.from('linkedin_accounts')
+          .update({ searches_paused_until: until }).eq('id', acctId)
+        if (upErr) console.error(`[bridge] search_limit_reached pause failed: ${upErr.message}`)
+        const { error: alErr } = await supabase.from('account_alerts').insert({
+          linkedin_account_id: acctId,
+          alert_type: 'search_limit_reached',
+          severity: 'warning',
+          message: `LinkedIn: límite MENSUAL de búsquedas de perfiles agotado. Búsquedas pausadas 24h hasta ${until} (invites/FU/inbox siguen). El tope se reinicia el día 1 del mes; hasta entonces esta cuenta no puede prospectar gente nueva.`,
+          details: { commandId },
+          auto_paused: true,
+        })
+        if (alErr) console.error(`[bridge] search_limit_reached alert insert failed: ${alErr.message}`)
+        console.warn(`[bridge] 🚫 search_limit_reached account=${acctId.slice(0, 8)} → búsquedas pausadas hasta ${until}`)
+      }
+    } catch (err) {
+      console.error(`[bridge] search_limit_reached handler failed:`, err.message)
+    }
+  }
+
   // Ingestion: si fue exitoso y la acción tiene ingest definido, procesamos
   if (!isError && action === 'check_inbox' && result?.conversations) {
     try {

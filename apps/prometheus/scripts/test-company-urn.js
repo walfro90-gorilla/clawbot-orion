@@ -82,4 +82,32 @@ assert.deepEqual(pickCompanyUrn({}), { urn: null, source: 'none' })
 assert.equal(
   pickCompanyUrn({ html: 'urn:li:fsd_company:42 urn:li:organization:42 urn:li:company:42' }).urn, '42')
 
-console.log('✅ company-urn OK (link de empleados gana; ambiguo NO resuelve)')
+// ── URL del segundo salto (ext 0.10.37) ─────────────────────────────────────
+// (copia fiel de `companyPageUrl` de background.js — misma regla que arriba)
+function companyPageUrl(slug) {
+  return `https://www.linkedin.com/company/${slug}/`
+}
+
+// El bug que esto fija: el slug YA viene URL-encoded del href de LinkedIn cuando el
+// nombre trae acentos. Pasarlo por encodeURIComponent volvía cada '%' en '%25' y la URL
+// apuntaba a una página inexistente → 404 → sin link de empleados → urn null.
+// Medido en vivo: slug ASCII 505/513 resueltas, slug con acento 0/7.
+assert.equal(
+  companyPageUrl('thyssenkrupp-presta-de-m%C3%A9xico'),
+  'https://www.linkedin.com/company/thyssenkrupp-presta-de-m%C3%A9xico/',
+  'el slug acentuado debe viajar TAL CUAL, no re-encodeado',
+)
+assert.ok(
+  !companyPageUrl('mazda-m%C3%A9xico').includes('%25'),
+  'un %25 en la URL significa que el slug se encodeó dos veces',
+)
+// Con '&' en el slug (Klöckner & Co SE) tampoco se toca: es un segmento de path, no una
+// query string, así que el '&' es literal y encodearlo a %26 rompería la página.
+assert.equal(
+  companyPageUrl('kl%C3%B6ckner-&-co-se'),
+  'https://www.linkedin.com/company/kl%C3%B6ckner-&-co-se/',
+)
+// ASCII puro: el caso que SÍ funcionaba (por eso el bug pasó desapercibido).
+assert.equal(companyPageUrl('continental'), 'https://www.linkedin.com/company/continental/')
+
+console.log('✅ company-urn OK (link de empleados gana; ambiguo NO resuelve; slug sin doble encode)')

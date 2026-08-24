@@ -344,6 +344,14 @@ async function trySearchForCampaign(campaign, account) {
     return { skipped: true, reason: 'search_paused' }
   }
 
+  // v0.10.38 — la cuenta agotó el tope MENSUAL de búsquedas de LinkedIn. Seguir
+  // buscando no devuelve nada y gasta navegaciones contra una pared. El bridge pone
+  // la fecha al detectarlo (24h, con re-sondeo al expirar); esto es lo que la respeta.
+  // Ojo: pausa SOLO búsquedas — invites, FU e inbox de esta cuenta siguen su curso.
+  if (account?.searches_paused_until && new Date(account.searches_paused_until) > new Date()) {
+    return { skipped: true, reason: 'search_limit_reached', until: account.searches_paused_until }
+  }
+
   // ── Modo company-scoped (v0.10.0) ──────────────────────────────────────────
   // Requiere ext ≥0.10.0: una ext vieja ignora companyUrn y buscaría por título en
   // TODO LinkedIn (el bug que reportó Josh). Sin la versión, degradamos a title-only.
@@ -2602,7 +2610,7 @@ async function tick() {
       gemini_system_prompt, target_audience, ai_tone, ai_sender_persona, ai_company_context,
       linkedin_account_id,
       linkedin_accounts (
-        id, label, status, daily_connection_limit, invites_paused_until,
+        id, label, status, daily_connection_limit, invites_paused_until, searches_paused_until,
         warmup_status, warmup_started_at,
         inbox_gap_min, inbox_paused, last_inbox_check_at,
         sent_invites_gap_min, last_sent_invites_check_at, last_connections_check_at,
