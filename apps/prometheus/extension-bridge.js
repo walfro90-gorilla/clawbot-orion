@@ -1115,7 +1115,12 @@ async function ingestContactInfo(commandId, result, isError) {
     if (result?.email) contactInfo.email = String(result.email).slice(0, 200)
     const phones = Array.isArray(result?.phones) ? result.phones.filter(Boolean).map(p => String(p).slice(0, 40)).slice(0, 5) : []
     if (phones.length) contactInfo.phones = phones
-    const websites = Array.isArray(result?.websites) ? result.websites.filter(Boolean).map(w => String(w).slice(0, 200)).slice(0, 5) : []
+    // LinkedIn sufija el TIPO al valor y la lista de tipos no es cerrada: la ext 0.10.40
+    // recorta (personal)/(trabajo)/… pero dejó pasar "dsbelmex.com (empresa)". Se limpia
+    // también aquí —server-side, sin depender de la versión de la extensión— con una regla
+    // genérica: " (una-palabra)" al final. Una URL real no termina así.
+    const stripType = v => String(v).replace(/\s+\(\p{L}{1,12}\)\s*$/u, '').trim()
+    const websites = Array.isArray(result?.websites) ? result.websites.filter(Boolean).map(w => stripType(w).slice(0, 200)).filter(Boolean).slice(0, 5) : []
     if (websites.length) contactInfo.websites = websites
     if (result?.birthday) contactInfo.birthday = String(result.birthday).slice(0, 60)
     if (result?.address) contactInfo.address = String(result.address).slice(0, 200)
