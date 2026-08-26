@@ -1094,9 +1094,21 @@ async function ingestContactInfo(commandId, result, isError) {
     console.warn(`[bridge] get_contact_info ${commandId.slice(0, 8)} sin related_lead_id — skip`)
     return
   }
+  // (26-ago-2026) MERGE, no reemplazo. Este UPDATE machacaba el objeto entero, así que:
+  //   · un re-scrape que encuentra teléfono pero no email BORRABA el email que ya había
+  //     (medido en vivo con Ricardo Pelcastre: su email venía del texto del perfil, no del
+  //     overlay, y el overlay no lo trae — el dato era bueno y se perdió);
+  //   · un exec_hard_timeout dejaba {error} encima de datos buenos.
+  // El overlay manda sobre lo que trae; lo que NO trae se conserva. El `error` viejo se
+  // descarta al primer scrape bueno para que no quede pegado como centinela eterno.
+  const { data: prevRow } = await supabase
+    .from('leads').select('contact_info').eq('id', cmd.related_lead_id).maybeSingle()
+  const prevCi = (prevRow?.contact_info && typeof prevRow.contact_info === 'object') ? prevRow.contact_info : {}
+  const { error: _prevError, ...prevData } = prevCi
+
   let contactInfo
   if (isError || result?.status === 'error') {
-    contactInfo = { error: String(result?.error ?? 'scrape_failed').slice(0, 80) }
+    contactInfo = { ...prevData, error: String(result?.error ?? 'scrape_failed').slice(0, 80) }
   } else {
     // Solo campos con valor; todo vacío → {} (centinela "visitado, sin datos")
     contactInfo = {}
@@ -1106,6 +1118,8 @@ async function ingestContactInfo(commandId, result, isError) {
     const websites = Array.isArray(result?.websites) ? result.websites.filter(Boolean).map(w => String(w).slice(0, 200)).slice(0, 5) : []
     if (websites.length) contactInfo.websites = websites
     if (result?.birthday) contactInfo.birthday = String(result.birthday).slice(0, 60)
+    if (result?.address) contactInfo.address = String(result.address).slice(0, 200)
+    contactInfo = { ...prevData, ...contactInfo }
   }
   const { error } = await supabase.from('leads').update({
     contact_info: contactInfo,
@@ -1114,7 +1128,8 @@ async function ingestContactInfo(commandId, result, isError) {
   if (error) {
     console.error(`[bridge] contact_info update failed:`, error.message)
   } else {
-    const got = [contactInfo.email && 'email', contactInfo.phones && 'tel', contactInfo.websites && 'web']
+    const got = [contactInfo.email && 'email', contactInfo.phones && 'tel', contactInfo.websites && 'web',
+                 contactInfo.address && 'dir', contactInfo.birthday && 'bday']
       .filter(Boolean).join('+') || (contactInfo.error ? `error:${contactInfo.error}` : 'sin datos')
     console.log(`[bridge] 📇 contact_info lead ${cmd.related_lead_id.slice(0, 8)} → ${got}`)
   }

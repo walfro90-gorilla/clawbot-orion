@@ -4860,7 +4860,7 @@ function _normForFilter(s) {
 // canónica). Ahora se puntúa por SEGUIDORES: la duplicada tiene decenas, la real
 // millones.
 const COMPANY_URN_RE = /urn:li:(?:fsd_company|organization|company):(\d+)/
-const CONTENT_VERSION = '0.10.39'
+const CONTENT_VERSION = '0.10.40'
 const DISTINCTIVE_HIT = 10   // puntaje de un token distintivo: el umbral de "sí es esta empresa"
 const FOLLOWERS_RE = /([\d][\d.,\s]*)\s*(mil|k|m|millones)?\s*(?:de\s+)?(?:seguidores|followers)/
 
@@ -6278,6 +6278,9 @@ async function scrapeContactInfo(payload = {}) {
     if (cand && EMAIL_RE.test(cand)) email = clean(cand).toLowerCase()
   }
 
+  // LinkedIn sufija el TIPO al valor: "+52 81 2875 0541 (trabajo)", "aoads.com.mx (personal)"
+  const stripType = v => String(v).replace(/\s*\((?:personal|trabajo|work|home|mobile|m[oó]vil|celular|otro|other)\)\s*$/i, '').trim()
+
   // Teléfonos: href tel: (raro) + etiqueta "Teléfono" (lo normal: texto plano)
   const PHONE_RE = /[+(]?\d[\d\s().-]{6,}\d/
   const phones = dedup([
@@ -6285,13 +6288,19 @@ async function scrapeContactInfo(payload = {}) {
     ...valuesFor(/^(tel[eé]fono|phone|m[oó]vil|mobile|celular)s?$/i).map(v => (v.match(PHONE_RE) ?? [])[0]),
   ])
 
-  // Websites: links http del overlay fuera de linkedin.com (el item "Perfil de X" es
-  // linkedin.com → se filtra solo)
-  const websites = dedup([...root.querySelectorAll('a[href^="http"]')]
-    .map(a => a.getAttribute('href'))
-    .filter(h => { try { return !new URL(h).hostname.endsWith('linkedin.com') } catch { return false } }))
+  // Websites: links http del overlay (el item "Perfil de X" es linkedin.com → se filtra
+  // solo) + etiqueta "Sitio web", que LinkedIn pinta como TEXTO PLANO sin <a> — medido en
+  // vivo: "aoads.com.mx (personal)" no se recogía con solo mirar los href.
+  const websites = dedup([
+    ...[...root.querySelectorAll('a[href^="http"]')]
+      .map(a => a.getAttribute('href'))
+      .filter(h => { try { return !new URL(h).hostname.endsWith('linkedin.com') } catch { return false } }),
+    ...valuesFor(/^(sitios? web|websites?|p[aá]gina web)$/i).map(stripType),
+  ])
 
   const birthday = valuesFor(/^(cumplea[nñ]os|birthday)$/i)[0] ?? null
+  // El digest ya pinta la dirección en itálica; solo faltaba que alguien la trajera.
+  const address = valuesFor(/^(direcci[oó]n|address)$/i)[0] ?? null
 
   const result = {
     action: 'get_contact_info',
@@ -6301,9 +6310,10 @@ async function scrapeContactInfo(payload = {}) {
     phones,
     websites,
     birthday,
+    address,
     ...debugBlob(),
   }
-  console.log(`[Orion content] contact-info: email=${email ?? '—'} phones=${phones.length} webs=${websites.length} bday=${birthday ?? '—'}`)
+  console.log(`[Orion content] contact-info: email=${email ?? '—'} phones=${phones.length} webs=${websites.length} bday=${birthday ?? '—'} addr=${address ?? '—'}`)
   return result
 }
 

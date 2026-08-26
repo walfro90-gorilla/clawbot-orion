@@ -24,6 +24,8 @@ const FIXTURE = `
   <div><svg id="phone-handset-small"></svg><div><p>Teléfono</p><p><span>+56 9 68371316</span><span> </span>(móvil)</p></div></div>
   <div><svg id="envelope-medium"></svg><div><p>Email</p><p><a href="mailto:esteban.espinosa@hotmail.com" target="_blank">esteban.espinosa@hotmail.com</a></p></div></div>
   <div><svg id="calendar-medium"></svg><div><p>Cumpleaños</p><p>24 de abril</p></div></div>
+  <div><svg id="link-medium"></svg><div><p>Sitio web</p><p>aoads.com.mx (personal)</p></div></div>
+  <div><svg id="location-medium"></svg><div><p>Dirección</p><p>Monterrey, Nuevo León, México</p></div></div>
   <div><svg id="people-medium"></svg><div><p>Contacto desde</p><p>19 jun. 2026</p></div></div>
 </div>`
 
@@ -31,7 +33,10 @@ const FIXTURE = `
 const LABEL_PHONE = /^(tel[eé]fono|phone|m[oó]vil|mobile|celular)s?$/i
 const LABEL_BDAY  = /^(cumplea[nñ]os|birthday)$/i
 const LABEL_EMAIL = /^(email|e-mail|correo( electr[oó]nico)?)$/i
+const LABEL_WEB   = /^(sitios? web|websites?|p[aá]gina web)$/i
+const LABEL_ADDR  = /^(direcci[oó]n|address)$/i
 const PHONE_RE    = /[+(]?\d[\d\s().-]{6,}\d/
+const STRIP_TYPE  = /\s*\((?:personal|trabajo|work|home|mobile|m[oó]vil|celular|otro|other)\)\s*$/i
 
 // innerText de cada <p> del fixture, en orden de documento
 const ps = [...FIXTURE.matchAll(/<p>([\s\S]*?)<\/p>/g)]
@@ -52,6 +57,12 @@ ok('saca el cumpleaños', valuesFor(LABEL_BDAY)[0] === '24 de abril')
 // 2) Lo que ya funcionaba, que no se rompa
 ok('saca el email por etiqueta', valuesFor(LABEL_EMAIL)[0] === 'esteban.espinosa@hotmail.com')
 
+// 2b) Sitio web y dirección: LinkedIn los pinta como TEXTO PLANO, sin <a>. Mirar solo los
+//     href los dejaba fuera (medido en vivo con Ricardo Pelcastre, 26-ago).
+ok('saca el sitio web sin el sufijo de tipo',
+  valuesFor(LABEL_WEB)[0].replace(STRIP_TYPE, '') === 'aoads.com.mx')
+ok('saca la dirección', valuesFor(LABEL_ADDR)[0] === 'Monterrey, Nuevo León, México')
+
 // 3) Falsos positivos: una fecha NO es un teléfono
 ok('"19 jun. 2026" no matchea como teléfono', !PHONE_RE.test('19 jun. 2026'))
 ok('"24 de abril" no matchea como teléfono', !PHONE_RE.test('24 de abril'))
@@ -61,12 +72,19 @@ ok('el valor del teléfono no matchea la etiqueta', !LABEL_PHONE.test('+56 9 683
 
 // 5) Drift: las regex deben seguir siendo las mismas en content.js
 const content = readFileSync(CONTENT_JS, 'utf-8')
-for (const [name, re] of [['teléfono', LABEL_PHONE], ['cumpleaños', LABEL_BDAY], ['email', LABEL_EMAIL], ['PHONE_RE', PHONE_RE]]) {
+for (const [name, re] of [['teléfono', LABEL_PHONE], ['cumpleaños', LABEL_BDAY], ['email', LABEL_EMAIL],
+                          ['sitio web', LABEL_WEB], ['dirección', LABEL_ADDR], ['PHONE_RE', PHONE_RE]]) {
   ok(`content.js sigue usando la regex de ${name}`, content.includes(re.source))
 }
 
 // 6) El acotado de la raíz: sin él, root era <div id="root"> = la página entera
 ok('content.js acota la raíz al overlay (isScoped)', content.includes('isScoped') && content.includes('data-sdui-screen'))
 ok('content.js verifica que la página sea la del lead', content.includes("fail('wrong_page')"))
+
+// 7) El ingest MERGEA en vez de reemplazar: un re-scrape sin email no debe borrar el que
+//    ya había (le pasó a Ricardo Pelcastre), y un timeout no debe tapar datos buenos.
+const bridge = readFileSync(join(here, '../extension-bridge.js'), 'utf-8')
+ok('extension-bridge mergea el contact_info previo', bridge.includes('...prevData, ...contactInfo'))
+ok('un error conserva los datos que ya había', bridge.includes('...prevData, error:'))
 
 console.log(`contact-info parse: ${n}/${n} OK`)

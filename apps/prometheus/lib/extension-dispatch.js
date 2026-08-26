@@ -16,7 +16,7 @@ const ACTION_MIN_VERSION = {
   check_connections: '0.9.15',
   resolve_companies: '0.10.0',
   reload_extension:  '0.10.4',
-  get_contact_info:  '0.10.39',
+  get_contact_info:  '0.10.40',
   withdraw_invites:  '0.10.18',
   withdraw_invite_profile: '0.10.23',
 }
@@ -29,7 +29,7 @@ export const COMPANY_SCOPED_MIN_VERSION = '0.10.0'
 // v0.10.13: scraping del overlay de contact-info (email/tel de conexiones 1er grado)
 // para el digest diario. El scheduler pre-checa esta versión para skippear en
 // silencio (sin generar la alerta extension_outdated en cada tick).
-export const CONTACT_INFO_MIN_VERSION = '0.10.39'
+export const CONTACT_INFO_MIN_VERSION = '0.10.40'
 
 // ⛔ DESHABILITADO 14-ago-2026 (gate imposible a propósito). Veredicto del hard-test
 // en producción: LinkedIn exige eventos isTrusted para retirar invitaciones en TODAS
