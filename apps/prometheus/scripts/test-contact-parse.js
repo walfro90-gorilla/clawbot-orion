@@ -87,4 +87,12 @@ const bridge = readFileSync(join(here, '../extension-bridge.js'), 'utf-8')
 ok('extension-bridge mergea el contact_info previo', bridge.includes('...prevData, ...contactInfo'))
 ok('un error conserva los datos que ya había', bridge.includes('...prevData, error:'))
 
+// 8) El sufijo de tipo del sitio web: la lista de tipos NO es cerrada. La ext recorta los
+//    conocidos, el bridge aplica la regla genérica " (una-palabra)" — "dsbelmex.com (empresa)"
+//    se coló con la lista cerrada, medido en vivo.
+const stripTypeSrv = v => String(v).replace(/\s+\(\p{L}{1,12}\)\s*$/u, '').trim()
+ok('el bridge recorta "(empresa)"', stripTypeSrv('dsbelmex.com (empresa)') === 'dsbelmex.com')
+ok('el bridge NO toca una URL con paréntesis', stripTypeSrv('https://x.com/a_(b)') === 'https://x.com/a_(b)')
+ok('el bridge lleva la regla genérica', bridge.includes('\\p{L}{1,12}'))
+
 console.log(`contact-info parse: ${n}/${n} OK`)
