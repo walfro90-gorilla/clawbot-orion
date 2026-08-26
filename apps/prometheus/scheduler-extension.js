@@ -1792,14 +1792,27 @@ async function tryContactInfoScrape(account) {
       .gt('created_at', new Date(Date.now() - 86_400_000).toISOString())
     if ((today ?? 0) >= cap) return { skipped: true, reason: 'daily_cap' }
 
-    // elegible: lead conectado de esta cuenta sin contact_info (NULL = nunca visitado)
-    const { data: lead } = await supabase.from('leads')
+    // elegible: lead conectado de esta cuenta sin contact_info (NULL = nunca visitado).
+    // (26-ago-2026) Si no hay ninguno, se reintenta UNO de los que quedaron en {error}
+    // hace más de 24 h: un exec_hard_timeout transitorio marcaba al lead PARA SIEMPRE
+    // (la query solo miraba NULL) y así se quedaron 57 leads sin dato. Los frescos
+    // siguen teniendo prioridad — el retry solo usa el cupo que sobra.
+    const candidates = () => supabase.from('leads')
       .select('id, full_name, linkedin_url, campaigns!inner(linkedin_account_id)')
       .eq('campaigns.linkedin_account_id', account.id)
-      .is('contact_info', null).not('connected_at', 'is', null)
+      .not('connected_at', 'is', null)
       .not('linkedin_url', 'is', null)
       .order('connected_at', { ascending: false })
-      .limit(1).maybeSingle()
+      .limit(1)
+    let { data: lead } = await candidates().is('contact_info', null).maybeSingle()
+    if (!lead) {
+      const retryBefore = new Date(Date.now() - 86_400_000).toISOString()
+      ;({ data: lead } = await candidates()
+        .not('contact_info->>error', 'is', null)
+        .lt('contact_info_at', retryBefore)
+        .maybeSingle())
+      if (lead) console.log(`[SCH-EXT]   📇 retry contact-info de ${lead.full_name} (quedó en error hace >24h)`)
+    }
     if (!lead) return { skipped: true, reason: 'no_candidates' }
 
     const cmdId = await dispatchCommand(account.id, 'get_contact_info',

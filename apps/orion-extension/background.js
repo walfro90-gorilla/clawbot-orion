@@ -1166,8 +1166,9 @@ async function navigateTabAndWait(targetUrl, timeoutMs = 15000) {
   console.log(`[Orion] Navegando tab ${tabId}: ${tab.url} → ${targetUrl}`)
 
   // Update + esperar
+  const fromUrl = tab.url
   chrome.tabs.update(tabId, { url: targetUrl }).catch(err => console.warn('tabs.update err:', err.message))
-  await waitForTabComplete(tabId, timeoutMs)
+  await waitForTabComplete(tabId, timeoutMs, fromUrl)
   await sleep(2500)  // hidratación React
   return await chrome.tabs.get(tabId)
 }
@@ -1260,7 +1261,13 @@ async function sendMessageWithRetry(tabId, message, maxAttempts = 6) {
 
 // Espera a que la tab llegue a status=complete. Si ya está en complete y la URL
 // no cambia más, resuelve rápido. Polling cada 500ms con timeout.
-async function waitForTabComplete(tabId, timeoutMs) {
+// fromUrl = URL de ANTES del tabs.update. (26-ago-2026) Sin ese dato, la primera vuelta
+// del poll veía el documento VIEJO ya en status:'complete' con su URL estable y daba la
+// navegación por terminada: el comando corría sobre la página anterior. En contact-info
+// eso le colgó a 4 leads de Café 57 el email del lead scrapeado 5 min antes, y ese email
+// salió en el digest del cliente. Solo pasa en máquinas lentas (LinkedIn tarda >1,5 s en
+// commitear) — por eso Café y no Josh. Mientras la URL siga siendo la de antes, no cuenta.
+async function waitForTabComplete(tabId, timeoutMs, fromUrl = null) {
   const start = Date.now()
   let lastUrl = ''
   let stableCount = 0
@@ -1268,7 +1275,9 @@ async function waitForTabComplete(tabId, timeoutMs) {
     try {
       const t = await chrome.tabs.get(tabId)
       if (t.status === 'complete') {
-        if (t.url === lastUrl) {
+        if (fromUrl && t.url === fromUrl) {
+          stableCount = 0  // la navegación aún no commiteó
+        } else if (t.url === lastUrl) {
           stableCount++
           if (stableCount >= 2) return  // URL estable 1 sec → cargado
         } else {
