@@ -94,8 +94,8 @@ function leadBlock(r, num) {
   const company = prettyCompany(clean(ci.company) || clean(pd.currentCompany) || clean(pd.targetCompany)) || '—'
   const name    = clean(r.full_name) || '—'
   const role    = clean(pd.headline)
-  // phones/address no los produce el scraper hoy (contact_info trae email/websites),
-  // pero el reporte los pinta en cuanto existan. ponytail: sin columna vacía.
+  // phones/address ya los produce el scraper desde ext 0.10.40 (pares etiqueta→valor del
+  // overlay). `ci.phone` en singular se mantiene por si alguna fila vieja lo trae.
   const phones  = Array.isArray(ci.phones) ? ci.phones.filter(Boolean) : (clean(ci.phone) ? [clean(ci.phone)] : [])
   const email   = clean(ci.email)
   const address = clean(ci.address)
@@ -105,7 +105,9 @@ function leadBlock(r, num) {
     : esc(name)
 
   const contactBits = [
-    ...phones.map(p => `${esc(p)}&nbsp;&nbsp;<span style="color:#999">(móvil)</span>`),
+    // El tipo ("(móvil)"/"(trabajo)") lo quita el scraper, así que NO lo demos por móvil:
+    // el primer teléfono real que llegó era de trabajo.
+    ...phones.map(p => esc(p)),
     email ? `<a href="mailto:${esc(email)}" style="color:#333;text-decoration:none">${esc(email)}</a>` : '',
   ].filter(Boolean)
 
