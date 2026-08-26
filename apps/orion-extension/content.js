@@ -4860,7 +4860,7 @@ function _normForFilter(s) {
 // canónica). Ahora se puntúa por SEGUIDORES: la duplicada tiene decenas, la real
 // millones.
 const COMPANY_URN_RE = /urn:li:(?:fsd_company|organization|company):(\d+)/
-const CONTENT_VERSION = '0.10.38'
+const CONTENT_VERSION = '0.10.39'
 const DISTINCTIVE_HIT = 10   // puntaje de un token distintivo: el umbral de "sí es esta empresa"
 const FOLLOWERS_RE = /([\d][\d.,\s]*)\s*(mil|k|m|millones)?\s*(?:de\s+)?(?:seguidores|followers)/
 
@@ -6129,48 +6129,87 @@ async function checkConnections(payload = {}) {
 
 // ── get_contact_info — scrape del overlay /in/<vanity>/overlay/contact-info/ ──
 // (0.10.13) Email/teléfono/webs de una conexión de 1er grado para el digest diario.
-// background.js ya navegó al overlay (o al perfil como fallback). Extracción por
-// TIPO de dato (mailto:/tel:/headers de sección), NO por clases ofuscadas.
-// Resultado SIEMPRE status:'ok' salvo fallo duro: un perfil sin overlay o sin datos
-// devuelve campos vacíos → el bridge guarda {} (centinela "visitado, sin datos").
+// background.js ya navegó al overlay (o al perfil como fallback).
+//
+// (0.10.39, 26-ago-2026) REESCRITO con el DOM real en la mano (captura debug sobre un
+// lead de Josh). LinkedIn sirve el overlay con SDUI:
+//   <dialog data-testid="dialog"> → <div data-testid="dialog-content"
+//        data-sdui-screen="com.linkedin.sdui.flagshipnav.profile.ProfileContactDetailsOverlay">
+// y CADA dato es un par etiqueta→valor en <p>, sin <section> y sin <h3>:
+//   <div><svg id="phone-handset-small"/><div><p>Teléfono</p><p><span>+56 9 68371316</span> (móvil)</p></div></div>
+// Dos fallos medidos que esto arregla:
+//   · TELÉFONO Y CUMPLEAÑOS NUNCA SE EXTRAJERON (1 teléfono en 650 scrapes): la búsqueda
+//     vieja exigía una <section> con header "Teléfono", que este markup no tiene.
+//   · El contenedor viejo (ancestro que tuviera heading + mailto) escalaba hasta
+//     <div id="root"> = LA PÁGINA ENTERA → los "websites" eran anuncios del feed
+//     (tribuu.com/minsait con li_fat_id) y el email podía salir de cualquier mailto.
+// Regla nueva: raíz ACOTADA al overlay (isScoped corta la página entera). Sin raíz
+// acotada NO se inventa nada — se devuelve error retryable, no {} definitivo.
 async function scrapeContactInfo(payload = {}) {
   const debug = payload.debug === true
   console.log(`[Orion content] scrapeContactInfo currentUrl=${location.href} debug=${debug}`)
 
-  // Contenedor de contact-info. El hard-load a /overlay/contact-info/ NO monta
-  // [role=dialog] (dialogs:0) y las clases van OFUSCADAS (`_7fac4bf7`), así que no
-  // sirve buscar por dialog/clase. (0.10.15 falló: sin exigir "heading + datos juntos",
-  // el heading renderiza antes que el mailto y matcheaba solo el <header> del título,
-  // sin el email.) Regla: el contenedor bueno es el ancestro (partiendo del heading o
-  // del mailto) que tiene A LA VEZ el heading de contacto Y datos (mailto/tel/email-text).
-  // El poll exige strict=true ⇒ espera a que el email renderice. strict=false = degradado.
+  const fail = error => ({ action: 'get_contact_info', status: 'error', leadId: payload.leadId, error })
+
+  // Guard de identidad. Si la navegación no commiteó todavía, este content script corre
+  // sobre el DOM del lead ANTERIOR — mismo documento, misma URL vieja. Pasó 4 veces en
+  // Café 57: el email del lead previo quedó colgado de otra persona y viajó al cliente en
+  // el digest. background.js también espera el cambio de URL (0.10.39); esto es el cinturón.
+  const want = decodeURIComponent((String(payload.profileUrl ?? '').match(/\/in\/([^/?#]+)/) ?? [])[1] ?? '').toLowerCase()
+  if (want) {
+    let onTarget = false
+    for (let i = 0; i < 20 && !onTarget; i++) {
+      onTarget = decodeURIComponent(location.pathname).toLowerCase().includes(`/in/${want}`)
+      if (!onTarget) await sleep(500)
+    }
+    if (!onTarget) {
+      console.warn(`[Orion content] contact-info: la página NO es la del lead (${location.pathname}) — abortando`)
+      return fail('wrong_page')
+    }
+  }
+
   const CONTACT_HEAD_RE = /informaci[oó]n de contacto|contact info/i
-  const EMAIL_RE = /[\w.+-]+@[\w-]+\.\w{2,}/
+  const EMAIL_RE = /[\w.+-]+@[\w-]+\.[\w.]{2,}/
+
+  // Una raíz que contenga la navegación global (o media página de texto) ES la página
+  // entera, no el overlay. Preferimos no scrapear antes que colgarle a un lead el dato
+  // de otro: eso ya salió por email a un cliente.
+  const isScoped = el => !!el && el !== document.body && el !== document.documentElement
+    && el.id !== 'root' && !el.querySelector('nav') && (el.innerText ?? '').length < 2000
+
   const findContactRoot = (strict = true) => {
+    // 1) SDUI — markup vigente (26-ago-2026)
+    const sdui = document.querySelector('[data-sdui-screen*="ContactDetails" i]')
+    if (isScoped(sdui)) return sdui
+    // 2) El diálogo cuyo encabezado es "Información de contacto". OJO: el markup nuevo usa
+    //    <dialog> NATIVO sin role="dialog" — por eso el debug cantaba dialogs:0 con el
+    //    modal montado. Se buscan las dos formas.
+    for (const d of document.querySelectorAll('dialog[open], dialog, [role="dialog"], .artdeco-modal')) {
+      if (!CONTACT_HEAD_RE.test(d.innerText ?? '')) continue
+      const body = d.querySelector('[data-testid="dialog-content"]') ?? d
+      if (isScoped(body)) return body
+    }
+    // 3) Heurístico viejo (cubre SalesNav y la variante full-page), ahora con isScoped
+    //    como techo para que no vuelva a devolver la página entera.
     const anchor = document.querySelector('a[href^="mailto:"], a[href^="tel:"]')
     let head = null
     for (const h of document.querySelectorAll('h1, h2, h3, h4')) {
       const t = (h.innerText ?? '').trim()
       if (CONTACT_HEAD_RE.test(t) && t.length < 40) { head = h; break }
     }
-    const base = head || anchor
-    if (!base) return null
-    let el = base
+    let el = head || anchor
     for (let i = 0; i < 10 && el; i++) {
       const txt = el.innerText ?? ''
       const hasData = !!el.querySelector('a[href^="mailto:"], a[href^="tel:"]') || EMAIL_RE.test(txt)
-      if (CONTACT_HEAD_RE.test(txt) && hasData) return el  // heading + datos → contenedor completo
+      if (CONTACT_HEAD_RE.test(txt) && hasData && isScoped(el)) return el
       el = el.parentElement
     }
-    if (strict) return null  // en poll: no aceptar contenedor a medio render
-    // degradado post-timeout: lo que haya
-    if (anchor) return anchor.closest('section') || anchor.parentElement?.parentElement || anchor.parentElement
-    return head ? (head.closest('section') || head.parentElement) : null
+    if (strict) return null
+    const loose = anchor ? (anchor.closest('section') ?? anchor.parentElement) : null
+    return isScoped(loose) ? loose : null
   }
 
-  // 1) Poll ~16s por el contenedor COMPLETO (heading + datos ya renderizados). En
-  //    máquinas lentas (Wal/Café) el email aparece después del heading; exigir ambos
-  //    evita cerrar antes de tiempo sobre el <header> del título sin datos.
+  // 1) Poll ~16s: el cuerpo del overlay renderiza DESPUÉS del encabezado.
   let root = null
   for (let i = 0; i < 32 && !root; i++) {
     root = findContactRoot(true)
@@ -6192,81 +6231,79 @@ async function scrapeContactInfo(payload = {}) {
     }
   }
 
-  // 3) Degradado: si nunca juntó heading+datos, toma lo que haya (mejor que nada)
+  // 3) Degradado: lo que haya, siempre que siga acotado
   if (!root) root = findContactRoot(false)
 
   const debugBlob = () => {
     if (!debug) return {}
-    const anyDialog = document.querySelector('[role="dialog"], .artdeco-modal')
+    const anyDialog = document.querySelector('dialog, [role="dialog"], .artdeco-modal')
     const target = root || anyDialog
     return { _debug: {
       url: location.href,
-      dialogs: document.querySelectorAll('[role="dialog"], .artdeco-modal').length,
+      dialogs: document.querySelectorAll('dialog, [role="dialog"], .artdeco-modal').length,
       rootMatched: !!root,
       openerFound: !!document.querySelector('a[href*="overlay/contact-info"], button[aria-label*="ontact"]'),
       pageMailto: document.querySelectorAll('a[href^="mailto:"]').length,
       pageTel: document.querySelectorAll('a[href^="tel:"]').length,
-      headings: target ? [...target.querySelectorAll('h1,h2,h3')].map(h => (h.innerText || '').trim().slice(0, 50)).filter(Boolean).slice(0, 15) : [],
+      labels: root ? [...root.querySelectorAll('p')].map(p => (p.innerText || '').trim().slice(0, 40)).filter(Boolean).slice(0, 20) : [],
       html: target ? (target.outerHTML || '').slice(0, 9000) : (document.body.innerText || '').slice(0, 1500),
     } }
   }
 
   if (!root) {
-    return { action: 'get_contact_info', status: 'ok', leadId: payload.leadId, email: null, phones: [], websites: [], birthday: null, note: 'overlay_not_found', ...debugBlob() }
+    // Retryable A PROPÓSITO: antes esto se guardaba como {} ("visitado, sin datos") y el
+    // lead quedaba marcado para siempre aunque el overlay simplemente no hubiese montado.
+    return { ...fail('overlay_not_found'), ...debugBlob() }
   }
   await sleep(800)  // dejar terminar el render del contenido
 
+  const clean = s => String(s ?? '').replace(/\s+/g, ' ').trim()
   const dedup = arr => [...new Set(arr.filter(Boolean))].slice(0, 5)
 
-  // 3a) Emails: por href mailto:
+  // Pares etiqueta→valor: <p>Teléfono</p><p>+56 9 68371316 (móvil)</p>. En orden de
+  // documento el valor es SIEMPRE el <p> siguiente a la etiqueta. Las etiquetas se
+  // anclan con ^…$ para que el valor no matchee como etiqueta.
+  const ps = [...root.querySelectorAll('p')]
+  const valuesFor = re => ps
+    .map((p, i) => (re.test(clean(p.innerText)) ? clean(ps[i + 1]?.innerText) : ''))
+    .filter(Boolean)
+
+  // Emails: mailto del overlay → etiqueta "Email" → regex sobre el texto del overlay
   const emails = dedup([...root.querySelectorAll('a[href^="mailto:"]')]
     .map(a => decodeURIComponent(a.getAttribute('href').slice(7).split('?')[0]).trim().toLowerCase()))
-
-  // 3b) Teléfonos: href tel: + secciones cuyo header hable de teléfono (LinkedIn suele
-  //     mostrarlos como texto plano, sin link)
-  const phones = [...root.querySelectorAll('a[href^="tel:"]')]
-    .map(a => decodeURIComponent(a.getAttribute('href').slice(4)).trim())
-  const PHONE_RE = /[+(]?\d[\d\s().-]{6,}\d/g
-  for (const section of root.querySelectorAll('section')) {
-    const header = section.querySelector('h3, h2')?.innerText ?? ''
-    if (/tel[eé]fono|phone|m[oó]vil|mobile/i.test(header)) {
-      phones.push(...((section.innerText.match(PHONE_RE)) ?? []).map(s => s.trim()))
-    }
+  let email = emails[0] ?? null
+  if (!email) {
+    const cand = valuesFor(/^(email|e-mail|correo( electr[oó]nico)?)$/i)[0]
+      ?? (root.innerText.match(EMAIL_RE) ?? [])[0]
+    if (cand && EMAIL_RE.test(cand)) email = clean(cand).toLowerCase()
   }
 
-  // 3c) Websites: links http del contenedor fuera de linkedin.com
+  // Teléfonos: href tel: (raro) + etiqueta "Teléfono" (lo normal: texto plano)
+  const PHONE_RE = /[+(]?\d[\d\s().-]{6,}\d/
+  const phones = dedup([
+    ...[...root.querySelectorAll('a[href^="tel:"]')].map(a => decodeURIComponent(a.getAttribute('href').slice(4)).trim()),
+    ...valuesFor(/^(tel[eé]fono|phone|m[oó]vil|mobile|celular)s?$/i).map(v => (v.match(PHONE_RE) ?? [])[0]),
+  ])
+
+  // Websites: links http del overlay fuera de linkedin.com (el item "Perfil de X" es
+  // linkedin.com → se filtra solo)
   const websites = dedup([...root.querySelectorAll('a[href^="http"]')]
     .map(a => a.getAttribute('href'))
     .filter(h => { try { return !new URL(h).hostname.endsWith('linkedin.com') } catch { return false } }))
 
-  // 3d) Cumpleaños
-  let birthday = null
-  for (const section of root.querySelectorAll('section')) {
-    const header = section.querySelector('h3, h2')?.innerText ?? ''
-    if (/cumplea|birthday/i.test(header)) {
-      birthday = (section.innerText.replace(header, '').trim().split('\n')[0] || null)
-      break
-    }
-  }
-
-  // 4) Red final: si secciones/links no dieron nada, regex sobre el texto completo
-  let email = emails[0] ?? null
-  if (!email) {
-    const m = (root.innerText.match(/[\w.+-]+@[\w-]+\.[\w.]{2,}/) ?? [])[0]
-    if (m) email = m.toLowerCase()
-  }
+  const birthday = valuesFor(/^(cumplea[nñ]os|birthday)$/i)[0] ?? null
 
   const result = {
     action: 'get_contact_info',
     status: 'ok',
     leadId: payload.leadId,
     email,
-    phones: dedup(phones),
+    phones,
     websites,
     birthday,
     ...debugBlob(),
   }
-  console.log(`[Orion content] contact-info: email=${email ?? '—'} phones=${result.phones.length} webs=${websites.length}`)
+  console.log(`[Orion content] contact-info: email=${email ?? '—'} phones=${phones.length} webs=${websites.length} bday=${birthday ?? '—'}`)
   return result
 }
 
