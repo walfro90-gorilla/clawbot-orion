@@ -95,4 +95,11 @@ ok('el bridge recorta "(empresa)"', stripTypeSrv('dsbelmex.com (empresa)') === '
 ok('el bridge NO toca una URL con paréntesis', stripTypeSrv('https://x.com/a_(b)') === 'https://x.com/a_(b)')
 ok('el bridge lleva la regla genérica', bridge.includes('\\p{L}{1,12}'))
 
+// 9) Dirección que en realidad es un email: pasa porque el lead la escribió así en
+//    LinkedIn (caso real Carla A. Soto). El dato es fiel pero no es una dirección.
+const ADDR_IS_EMAIL = /^[\w.+-]+@[\w-]+\.[\w.]{2,}$/
+ok('descarta una dirección que es un email', ADDR_IS_EMAIL.test('carlatejeda9@gmail.com'))
+ok('conserva una dirección de verdad', !ADDR_IS_EMAIL.test('Monterrey, Nuevo León, México'))
+ok('el bridge filtra la dirección-email', bridge.includes('contactInfo.address = addr'))
+
 console.log(`contact-info parse: ${n}/${n} OK`)

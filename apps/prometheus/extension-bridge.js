@@ -1123,7 +1123,12 @@ async function ingestContactInfo(commandId, result, isError) {
     const websites = Array.isArray(result?.websites) ? result.websites.filter(Boolean).map(w => stripType(w).slice(0, 200)).filter(Boolean).slice(0, 5) : []
     if (websites.length) contactInfo.websites = websites
     if (result?.birthday) contactInfo.birthday = String(result.birthday).slice(0, 60)
-    if (result?.address) contactInfo.address = String(result.address).slice(0, 200)
+    // Hay gente que escribe su EMAIL en el campo Dirección de LinkedIn (caso real: Carla
+    // A. Soto — LinkedIn hasta le arma el link de Apple Maps con el correo). El scrape es
+    // fiel, pero "Dirección: alguien@gmail.com" en el reporte del cliente se lee como bug
+    // nuestro. No es dato de dirección: se descarta.
+    const addr = result?.address ? String(result.address).slice(0, 200) : ''
+    if (addr && !/^[\w.+-]+@[\w-]+\.[\w.]{2,}$/.test(addr)) contactInfo.address = addr
     contactInfo = { ...prevData, ...contactInfo }
   }
   const { error } = await supabase.from('leads').update({
