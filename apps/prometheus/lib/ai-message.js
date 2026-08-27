@@ -19,7 +19,13 @@ const GEMINI_MODEL = 'gemini-2.5-flash'
 // el MISMO Llama 3.3 70B desde una empresa DISTINTA → fallback sin cambio de tono ni de familia
 // de modelo, resiliencia real (no depende del uptime de un solo proveedor). Ver lib/*/resolveProvider.
 const OPENAI_COMPAT = {
-  groq:       { baseUrl: 'https://api.groq.com/openai/v1', keyEnv: 'GROQ_API_KEY',       model: process.env.GROQ_MODEL       || 'llama-3.3-70b-versatile' },
+  // Groq (24-ago-2026). Su catálogo ya NO tiene modelos instruct sin razonamiento:
+  // solo gpt-oss (120b/20b) y qwen3.6 (que filtra <think>). Con gpt-oss el razonamiento
+  // se come el presupuesto: `max_tokens: 500` daba finish_reason=length y `content`
+  // VACÍO — medido 233 fallos de 233 intentos, o sea el primario de PAGA llevaba 3 días
+  // muerto y la cadena caía a los gratuitos. Los dos campos atacan la misma causa y cada
+  // uno basta por separado (6/6 limpias en vivo); juntos, 8/8.
+  groq:       { baseUrl: 'https://api.groq.com/openai/v1', keyEnv: 'GROQ_API_KEY',       model: process.env.GROQ_MODEL       || 'openai/gpt-oss-120b', tokenMultiplier: 4, reasoningEffort: 'low' },
   cerebras:   { baseUrl: 'https://api.cerebras.ai/v1',     keyEnv: 'CEREBRAS_API_KEY',   model: process.env.CEREBRAS_MODEL   || 'llama-3.3-70b' },
   openrouter: { baseUrl: 'https://openrouter.ai/api/v1',   keyEnv: 'OPENROUTER_API_KEY', model: process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct' },
   together:   { baseUrl: 'https://api.together.xyz/v1',    keyEnv: 'TOGETHER_API_KEY',   model: process.env.TOGETHER_MODEL   || 'meta-llama/Llama-3.3-70B-Instruct-Turbo' },
@@ -59,13 +65,37 @@ export function hasLeftoverPlaceholder(text) {
 }
 
 // Detecta output que NO es un mensaje: veredicto del clasificador del propio modelo
-// ("User Safety: safe.") o encabezado meta ("Respuesta:", "Output:") en vez del texto.
-// Ver GUARD ANTI-META en callProvider.
+// ("User Safety: safe."), encabezado meta ("Respuesta:", "Output:"), o la CADENA DE
+// RAZONAMIENTO en vez de la respuesta. Ver GUARD ANTI-META en callProvider.
 const META_OUTPUT_RE = /^\s*(user\s+safety|safety|assistant|system|output|input|respuesta|mensaje|message|note)\s*:/i
+
+// (24-ago-2026) Cuatro leads reales recibieron el razonamiento del modelo — "We need to
+// produce a single response (max 320 characters…)", "Vamos a analizar la situación paso a
+// paso. 1. **Historial…**". Venían de `openrouter/free`, que NO es un modelo sino un alias
+// que rutea a un modelo gratis DISTINTO en cada llamada; varios vuelcan su análisis en
+// `content`. Estas frases son deliberadamente específicas: un DM legítimo no discute su
+// propio límite de caracteres ni llama "the lead"/"el usuario" a su destinatario.
+const REASONING_RE = [
+  /^\s*(okay|alright)\b[,\s]/i,
+  /^\s*(let me|i need to|i should|i'll|we need to|we should|let's)\b/i,
+  /^\s*(vamos a analizar|analicemos|primero[,:]\s|el usuario\b|the user\b)/i,
+  /\bm[áa]x(imum|imo)?\s+\d{2,4}\s+(characters|caracteres)\b/i,
+  /\b(plain text|no placeholders|no quotes|sin placeholders|sin comillas)\b/i,
+  /\b(the lead|el lead)('s)?\s+(statement|message|reply|mensaje|respuesta)\b/i,
+  /\bsystem prompt\b/i,
+  /<\/?think>/i,
+]
+
+// LinkedIn NO renderiza markdown: unas **negritas** o un "1. **Título:**" en un DM son
+// estructura de análisis, jamás un mensaje redactado para una persona.
+const MARKDOWN_RE = /\*\*[^*\n]+\*\*/
 
 export function isMetaOutput(text) {
   const t = String(text ?? '').trim()
-  return t.length < 30 || META_OUTPUT_RE.test(t)
+  if (t.length < 30) return true
+  if (META_OUTPUT_RE.test(t)) return true
+  if (MARKDOWN_RE.test(t)) return true
+  return REASONING_RE.some(re => re.test(t))
 }
 
 const TYPE_RULES = {
@@ -481,6 +511,9 @@ async function callOpenAICompatRaw(providerName, systemPrompt, userPrompt, opts,
     temperature: cfg.fixedTemperature ?? opts.temperature ?? (json ? 0.2 : 0.85),
     max_tokens: (json ? 300 : 500) * (cfg.tokenMultiplier ?? 1),
   }
+  // Solo para proveedores que lo declaran (ver OPENAI_COMPAT). Un modelo sin razonamiento
+  // puede rechazar el parámetro, por eso NO se manda por defecto.
+  if (cfg.reasoningEffort) body.reasoning_effort = cfg.reasoningEffort
   if (json) body.response_format = { type: 'json_object' }
   const resp = await fetch(`${cfg.baseUrl}/chat/completions`, {
     method: 'POST',
@@ -558,6 +591,16 @@ async function callProvider(provider, systemPrompt, userPrompt, maxChars, opts) 
         text = text.slice(1, -1).trim()
       }
       if (!text) { lastError = 'empty_response'; continue }
+      // 🛡️ GUARD ANTI-META — sobre el texto CRUDO, ANTES de truncar. El orden es el fix:
+      // truncar primero FABRICA un mensaje de aspecto legítimo a partir del razonamiento.
+      // Se queda con la CABEZA (el análisis) y tira la respuesta real que venía detrás; lo
+      // que sale termina en punto, cabe en el cap y no tiene placeholders, así que pasa
+      // TODOS los guards de abajo. Eso fue lo que recibieron 4 leads el 23/24-ago-2026.
+      if (isMetaOutput(text)) {
+        lastError = `meta_output: ${text.slice(0, 40)}`
+        if (attempt < retries) { await new Promise(r => setTimeout(r, 600)); continue }
+        return { error: 'meta_output' }
+      }
       if (text.length > maxChars) {
         // Truncación inteligente: SOLO en final de oración completa (. ? ! \n).
         // Evita cortar a mitad de pregunta como "...invertir 20" sin "minutos?".
@@ -597,16 +640,6 @@ async function callProvider(provider, systemPrompt, userPrompt, maxChars, opts) 
       // Última guardia: si termina con número o palabra sin puntuación, agrega cierre
       if (!/[.?!…]$/.test(text)) {
         text = text + (text.includes('?') || text.startsWith('¿') ? '?' : '.')
-      }
-      // 🛡️ GUARD ANTI-META: el LLM a veces devuelve el veredicto de su clasificador
-      // interno ("User Safety: safe." — Groq/llama, 17-ago-2026, se envió crudo a un
-      // lead) o un encabezado tipo "Respuesta:" en vez del mensaje. Pasaba TODOS los
-      // demás guards: sin placeholders, ≤maxChars, termina en punto. El piso de 30
-      // chars es seguro — el mensaje legítimo más corto del historial pasa de 45.
-      if (isMetaOutput(text)) {
-        lastError = `meta_output: ${text.slice(0, 40)}`
-        if (attempt < retries) { await new Promise(r => setTimeout(r, 600)); continue }
-        return { error: 'meta_output' }
       }
       // 🛡️ GUARD ANTI-PLACEHOLDER: el AI a veces deja instrucciones de relleno
       // literales ("[menciona algo de su perfil]", "[Nombre]", "{nombre}", "[CAL_URL]")
