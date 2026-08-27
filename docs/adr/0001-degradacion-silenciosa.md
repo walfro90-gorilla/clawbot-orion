@@ -7,7 +7,7 @@
 
 Este sistema depende de cosas que **no controlamos y cambian sin avisar**: el DOM de LinkedIn, sus cuotas, su markup. Cuando una de esas dependencias se cae, el código casi nunca falla — **degrada**. Y hasta hoy degradaba en silencio, con una cara indistinguible de la de funcionar bien.
 
-Los cinco incidentes de agosto son el mismo incidente:
+Los incidentes de agosto son el mismo incidente:
 
 | Fecha | Qué se rompió | Qué mostró el sistema |
 |---|---|---|
@@ -17,8 +17,9 @@ Los cinco incidentes de agosto son el mismo incidente:
 | 17 ago | Un carácter NUL tiraba el `result` en jsonb | accept-detection "muerta" → conexiones inferidas por ausencia |
 | 22 ago | Cuenta sin cuota mensual de búsqueda | `status: ok`, `stopReason: no_results_found` |
 | 21-23 ago | El fix del URN doble-encodeaba los slugs con acento → 404 | `urnSource: null`, empresa `unresolved`, búsqueda degradada |
+| 21-24 ago | Groq devolvía `content` vacío (233/233) y la cadena caía a un modelo gratis al azar | mensajes "generados"; 4 leads recibieron el razonamiento del modelo |
 
-En los cinco casos la avería fue barata y **el silencio fue caro**: días de operación quemada antes de que un humano lo notara mirando una pantalla.
+En todos los casos la avería fue barata y **el silencio fue caro**: días de operación quemada antes de que un humano lo notara mirando una pantalla.
 
 ## Decisión
 
@@ -71,6 +72,25 @@ La prueba que lo cierra estaba en la base todo el tiempo — dos filas con el **
 
 **Regla**: al verificar en vivo, elegir el caso por su peso en producción (acentos, nombres largos, multinacionales), no por el que esté a mano. Y si el fix tiene una señal de diagnóstico —aquí `urnSource`— mirar su **distribución**, no un solo éxito.
 
+### 6. Una cadena de fallback degrada la CALIDAD, no solo la disponibilidad
+
+`LLM_PROVIDERS=groq,moonshot,gemini,openrouter` se diseñó para que un proveedor caído no rompiera la generación. Cumplió su objetivo y creó otro problema: **nadie se enteró de que el primario llevaba tres días muerto**, porque siempre contestaba alguien.
+
+Lo medido el 24-ago: Groq falló **233 de 233** llamadas (`empty_response` — `gpt-oss-120b` razona y `max_tokens: 500` se le acababa antes de escribir). Moonshot tapó 135. Las otras **50 las contestó `openrouter/free`**, que no es un modelo sino un alias que rutea a un modelo gratis **distinto en cada llamada**; varios vuelcan su cadena de pensamiento en `content`. Cuatro leads reales recibieron ese análisis en vez de un mensaje.
+
+Dos lecciones separadas:
+
+- **El fallback necesita su propia alarma.** Caer al respaldo es un evento, no un detalle: si el primario falla el 100% de las veces, eso tiene que gritar. Un `console.warn` por llamada no es una alarma — hubo 233 y nadie los vio.
+- **El último eslabón define el piso de calidad.** Un respaldo que puede mandar basura a un cliente es peor que no tener respaldo: el FU cae a template verbatim y el auto-reply se salta, y ambas son salidas dignas. **Callar es una opción válida; publicar basura no.**
+
+### 7. El orden de los guards puede fabricar basura con cara de mensaje
+
+El texto que llegó a los leads pasó **todos** los guards: sin placeholders, dentro del cap, terminado en punto. No porque el modelo lo redactara así, sino porque **la truncación corría antes del guard anti-meta**.
+
+El modelo devolvía razonamiento y luego (a veces) la respuesta. Truncar a `maxChars` se quedaba con la **cabeza** —el análisis— y tiraba la respuesta real. Lo que salía de ahí era sintácticamente impecable.
+
+**Regla**: los guards de contenido se corren sobre el texto **crudo del proveedor**, antes de cualquier normalización. Normalizar primero destruye justo las señales por las que se reconoce la basura.
+
 ## Caminos descartados — no reintroducir
 
 La razón por la que este archivo existe. Cada uno se probó, dañó a un cliente real y se eliminó:
@@ -82,6 +102,7 @@ La razón por la que este archivo existe. Cada uno se probó, dañó a un client
 | **Grupo booleano `("A" OR "B")` en buscador free** | LinkedIn lo lee como texto literal → cero resultados | 31-jul |
 | **Copiar URNs del catálogo entre empresas de nombre parecido** | `alfa` apuntaba al slug `alfa-laval`: son empresas distintas. Atar la empresa equivocada es el peor resultado posible | 21-ago |
 | **Escribir `currentCompany` sin facet** | Inventa el dato. Regla `NO_INVENT_COMPANY_RULE` | 27-jul |
+| **`openrouter/free` en la cadena LLM** | No es un modelo: rutea a un modelo gratis distinto por llamada. Varios vuelcan su razonamiento en `content` y 4 leads lo recibieron | 24-ago |
 | **Filtro de geo naive en el ingest** | Tiró 40 leads mexicanos válidos. El que quedó descarta solo país extranjero explícito | 11-ago |
 
 **La búsqueda degradada por `"nombre exacto"` NO está en esta lista, a propósito.** Sigue siendo on-list y es la única alternativa a no buscar. Es contención, no cura — con ~92% de descarte — pero es deliberada. Confundirla con el title-only descartado es el error de lectura más fácil de cometer aquí.
