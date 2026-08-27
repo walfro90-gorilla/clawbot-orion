@@ -68,6 +68,7 @@ export const FIELDS: ConfigField[] = [
   { key: "search_2nd_degree_only", store: "campaign", type: "bool", tab: "busqueda", label: "Solo 2do grado" },
   { key: "title_whitelist", store: "campaign", type: "list", tab: "busqueda", label: "Whitelist de títulos (coma)" },
   { key: "title_blacklist", store: "campaign", type: "list", tab: "busqueda", label: "Blacklist de títulos (coma)" },
+  { key: "title_preferred", store: "campaign", type: "list", tab: "busqueda", label: "Preferidos — suben en la fila, no filtran (coma)" },
 
   // ── Seguimientos ───────────────────────────────────────────────────────────
   { key: "follow_up_paused", store: "campaign", type: "bool", tab: "seguimientos", label: "Pausar seguimientos" },

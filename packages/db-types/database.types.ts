@@ -10,7 +10,7 @@ export type Database = {
   // Allows to automatically instantiate createClient with right options
   // instead of createClient<Database, { PostgrestVersion: 'XX' }>(URL, KEY)
   __InternalSupabase: {
-    PostgrestVersion: "14.4"
+    PostgrestVersion: "14.17"
   }
   public: {
     Tables: {
@@ -728,6 +728,7 @@ export type Database = {
           search_paused: boolean
           target_audience: string | null
           title_blacklist: string[] | null
+          title_preferred: string[] | null
           title_whitelist: string[] | null
         }
         Insert: {
@@ -794,6 +795,7 @@ export type Database = {
           search_paused?: boolean
           target_audience?: string | null
           title_blacklist?: string[] | null
+          title_preferred?: string[] | null
           title_whitelist?: string[] | null
         }
         Update: {
@@ -860,6 +862,7 @@ export type Database = {
           search_paused?: boolean
           target_audience?: string | null
           title_blacklist?: string[] | null
+          title_preferred?: string[] | null
           title_whitelist?: string[] | null
         }
         Relationships: [
@@ -1421,6 +1424,7 @@ export type Database = {
           last_followup3_at: string | null
           last_followup4_at: string | null
           last_followup5_at: string | null
+          lead_score: number | null
           linkedin_url: string
           lockout_skip_count: number | null
           meeting_at: string | null
@@ -1430,6 +1434,7 @@ export type Database = {
           quarantined_at: string | null
           replied_at: string | null
           retry_count: number
+          score_reasons: Json | null
           scraped_at: string | null
           sent_at: string | null
           source: string | null
@@ -1467,6 +1472,7 @@ export type Database = {
           last_followup3_at?: string | null
           last_followup4_at?: string | null
           last_followup5_at?: string | null
+          lead_score?: number | null
           linkedin_url: string
           lockout_skip_count?: number | null
           meeting_at?: string | null
@@ -1476,6 +1482,7 @@ export type Database = {
           quarantined_at?: string | null
           replied_at?: string | null
           retry_count?: number
+          score_reasons?: Json | null
           scraped_at?: string | null
           sent_at?: string | null
           source?: string | null
@@ -1513,6 +1520,7 @@ export type Database = {
           last_followup3_at?: string | null
           last_followup4_at?: string | null
           last_followup5_at?: string | null
+          lead_score?: number | null
           linkedin_url?: string
           lockout_skip_count?: number | null
           meeting_at?: string | null
@@ -1522,6 +1530,7 @@ export type Database = {
           quarantined_at?: string | null
           replied_at?: string | null
           retry_count?: number
+          score_reasons?: Json | null
           scraped_at?: string | null
           sent_at?: string | null
           source?: string | null
@@ -1659,6 +1668,7 @@ export type Database = {
           invites_paused_until: string | null
           label: string | null
           last_connections_check_at: string | null
+          last_connections_ingest_at: string | null
           last_inbox_check_at: string | null
           last_sent_invites_check_at: string | null
           li_at_cookie: string
@@ -1673,6 +1683,7 @@ export type Database = {
           reply_delay_max: number | null
           reply_delay_min: number | null
           search_mode: string
+          searches_paused_until: string | null
           sent_invites_gap_min: number
           status: string | null
           timezone: string
@@ -1702,6 +1713,7 @@ export type Database = {
           invites_paused_until?: string | null
           label?: string | null
           last_connections_check_at?: string | null
+          last_connections_ingest_at?: string | null
           last_inbox_check_at?: string | null
           last_sent_invites_check_at?: string | null
           li_at_cookie: string
@@ -1716,6 +1728,7 @@ export type Database = {
           reply_delay_max?: number | null
           reply_delay_min?: number | null
           search_mode?: string
+          searches_paused_until?: string | null
           sent_invites_gap_min?: number
           status?: string | null
           timezone?: string
@@ -1745,6 +1758,7 @@ export type Database = {
           invites_paused_until?: string | null
           label?: string | null
           last_connections_check_at?: string | null
+          last_connections_ingest_at?: string | null
           last_inbox_check_at?: string | null
           last_sent_invites_check_at?: string | null
           li_at_cookie?: string
@@ -1759,6 +1773,7 @@ export type Database = {
           reply_delay_max?: number | null
           reply_delay_min?: number | null
           search_mode?: string
+          searches_paused_until?: string | null
           sent_invites_gap_min?: number
           status?: string | null
           timezone?: string
@@ -3599,6 +3614,7 @@ export type Database = {
           last_followup3_at: string | null
           last_followup4_at: string | null
           last_followup5_at: string | null
+          lead_score: number | null
           linkedin_url: string
           lockout_skip_count: number | null
           meeting_at: string | null
@@ -3608,6 +3624,7 @@ export type Database = {
           quarantined_at: string | null
           replied_at: string | null
           retry_count: number
+          score_reasons: Json | null
           scraped_at: string | null
           sent_at: string | null
           source: string | null

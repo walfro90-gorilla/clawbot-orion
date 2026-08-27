@@ -30,6 +30,7 @@ import { isGroupConversationName } from './lib/group-conversation.js'
 import { applyLeadAttemptOutcome, isNonFaultError } from './lib/lead-failure.js'
 import { noteDbResult, dbCircuitOpen } from './lib/db-circuit.js'
 import { headlineNamesCompany } from './lib/company-match.js'
+import { scoreLead } from './lib/lead-score.js'
 
 dotenv.config()
 
@@ -1582,8 +1583,9 @@ async function ingestSearch(commandId, result) {
 
   // (10-ago) FILTRO DE GEO: descarta empleados fuera del país de la campaña (multinacionales
   // de la lista surfacean gente de Brasil/Alemania/etc. porque company-scoped tira el geoUrn).
-  const { data: camp } = await supabase.from('campaigns').select('search_location').eq('id', campaignId).maybeSingle()
+  const { data: camp } = await supabase.from('campaigns').select('search_location, title_preferred').eq('id', campaignId).maybeSingle()
   const geoRaw = camp?.search_location ?? ''
+  const preferred = camp?.title_preferred ?? []   // whitelist BLANDA: sube el score, nunca rechaza
   let droppedGeo = 0
   let profiles = rawProfiles.filter(p => {
     if (matchesCampaignGeo(p.location, geoRaw)) return true
@@ -1601,23 +1603,44 @@ async function ingestSearch(commandId, result) {
   // Infinity, 46 de 104 leads trabajaban en otra empresa (BWI, Sensata, Dana, Degas Café,
   // ISUZU, Samsung…) y al cliente le llegaron invitaciones fuera de su lista.
   // Chokepoint hermano de matchesCampaignGeo: cubre free Y SalesNav sin tocar los scrapers.
+  //
+  // (26-ago) TRES estados en vez de dos. `headlineNamesCompany` devuelve false por dos
+  // razones muy distintas y las trataba igual: el headline que nombra OTRA empresa es
+  // EVIDENCIA EN CONTRA (rechazar está bien), pero el headline AUSENTE no es evidencia de
+  // nada — y ese también se descartaba, en silencio y sin dejar rastro. Con el bug abierto
+  // del scraper (~33-44% de los perfiles de Café 57 salen sin headline) eso es mucha gente
+  // desapareciendo sin que nadie pueda auditarlo. Ahora el caso "sin evidencia" se GUARDA
+  // para revisión en vez de evaporarse.
+  //
+  // ponytail: se reusa el status `disqualified` + `disqualification_reason` en vez de un
+  // status nuevo porque `leads_status_check` no incluye 'needs_review' y añadirlo obliga a
+  // auditar cada consumidor que ramifica por status. Quedan fuera del pool invitable
+  // (`tryInvitesForCampaign` filtra `status='scraped'`) y salen en el CRM. Si algún día
+  // hace falta bandeja propia, el upgrade es el status nuevo + el CHECK.
+  let toDefer = []
   if (targetCompanyName && !companyIsCertain) {
     let droppedCompany = 0
-    profiles = profiles.filter(p => {
-      if (headlineNamesCompany(p.headline, targetCompanyName)) return true
-      droppedCompany++; return false
-    })
+    const kept = []
+    for (const p of profiles) {
+      if (headlineNamesCompany(p.headline, targetCompanyName)) { kept.push(p); continue }
+      if (!(p.headline ?? '').trim()) { toDefer.push(p); continue }  // sin evidencia → difiere
+      droppedCompany++                                               // evidencia en contra → rechaza
+    }
+    profiles = kept
     if (droppedCompany > 0) {
       console.log(`[bridge] search ${commandId.slice(0,8)}: 🏢 ${droppedCompany} perfiles que NO trabajan en "${targetCompanyName}" descartados (búsqueda degradada sin URN)`)
     }
-    if (profiles.length === 0) {
+    if (toDefer.length > 0) {
+      console.log(`[bridge] search ${commandId.slice(0,8)}: ❓ ${toDefer.length} perfiles SIN headline guardados para revisión (no se puede verificar "${targetCompanyName}")`)
+    }
+    if (profiles.length === 0 && toDefer.length === 0) {
       await bumpDrySearchStreak(campaignId, 0)
       return
     }
   }
 
   // Dedupe contra leads existentes en la campaña por linkedin_url
-  const urls = profiles.map(p => p.profileUrl).filter(Boolean)
+  const urls = [...profiles, ...toDefer].map(p => p.profileUrl).filter(Boolean)
   const { data: existing } = await supabase
     .from('leads')
     .select('linkedin_url')
@@ -1625,34 +1648,61 @@ async function ingestSearch(commandId, result) {
     .in('linkedin_url', urls)
   const existingSet = new Set((existing ?? []).map(l => l.linkedin_url))
 
+  // Fila base compartida por los dos buckets — solo cambia el status/razón.
+  const baseRow = (p) => ({
+    campaign_id:  campaignId,
+    linkedin_url: p.profileUrl,
+    full_name:    p.name ?? null,
+    profile_data: {
+      headline: p.headline, location: p.location, source: 'extension_search',
+      // v0.10.0: empresa objetivo de la que salió el lead.
+      ...(targetCompanyName ? { targetCompany: targetCompanyName } : {}),
+      // Con facet es dato DURO (lo filtró LinkedIn) → mejor que la inferencia del LLM
+      // desde el headline, y ahorra ese pass.
+      ...(companyIsCertain ? { currentCompany: targetCompanyName } : {}),
+    },
+    source:     'extension_search',
+    scraped_at: new Date().toISOString(),
+  })
+
   const toInsert = profiles
     .filter(p => p.profileUrl && !existingSet.has(p.profileUrl))
+    .map(p => {
+      // (26-ago) Puntuación con lo que YA está en la mano aquí: cero llamadas LLM, cero
+      // navegación extra. El picker la usa para gastar las ~25 invitaciones diarias en los
+      // mejores. Ver lib/lead-score.js — `fromList` NO entra al número a propósito.
+      const { score, reasons } = scoreLead({ headline: p.headline, companyIsCertain, preferred })
+      return { ...baseRow(p), status: 'scraped', lead_score: score, score_reasons: reasons }
+    })
+
+  const deferRows = toDefer
+    .filter(p => p.profileUrl && !existingSet.has(p.profileUrl))
     .map(p => ({
-      campaign_id:  campaignId,
-      linkedin_url: p.profileUrl,
-      full_name:    p.name ?? null,
-      profile_data: {
-        headline: p.headline, location: p.location, source: 'extension_search',
-        // v0.10.0: empresa objetivo de la que salió el lead.
-        ...(targetCompanyName ? { targetCompany: targetCompanyName } : {}),
-        // Con facet es dato DURO (lo filtró LinkedIn) → mejor que la inferencia del LLM
-        // desde el headline, y ahorra ese pass.
-        ...(companyIsCertain ? { currentCompany: targetCompanyName } : {}),
-      },
-      status:       'scraped',
-      source:       'extension_search',
-      scraped_at:   new Date().toISOString(),
+      ...baseRow(p),
+      status: 'disqualified',
+      disqualification_reason: `needs_review:sin_headline_empresa_no_verificable:${targetCompanyName}`,
     }))
 
-  if (toInsert.length === 0) {
-    console.log(`[bridge] search ${commandId.slice(0,8)}: ${profiles.length} perfiles, todos duplicados`)
+  const allRows = [...toInsert, ...deferRows]
+  if (allRows.length === 0) {
+    console.log(`[bridge] search ${commandId.slice(0,8)}: ${profiles.length + toDefer.length} perfiles, todos duplicados`)
     await bumpDrySearchStreak(campaignId, 0)
     return
   }
 
-  const { error } = await supabase.from('leads').insert(toInsert)
+  const { error } = await supabase.from('leads').insert(allRows)
   if (error) {
     console.error(`[bridge] search insert leads error:`, error.message)
+    return
+  }
+  if (deferRows.length > 0) {
+    console.log(`[bridge] search ${commandId.slice(0,8)}: ❓ ${deferRows.length} guardados para revisión (disqualified/needs_review)`)
+  }
+
+  // Los diferidos NO cuentan como cosecha: no son invitables. Si contaran, una racha de
+  // perfiles sin headline apagaría la válvula anti-sequía haciendo creer que hubo leads.
+  if (toInsert.length === 0) {
+    await bumpDrySearchStreak(campaignId, 0)
     return
   }
 

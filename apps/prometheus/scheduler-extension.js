@@ -20,7 +20,7 @@ import {
   isExtensionOnline, getConnectedAccountIds,
   getEffectiveDailyCap, getDailyActivityToday, getPendingLeadsCount,
   hasInFlightCommand, wasMessageRecentlySent,
-  passesTitleFilters, seniorityRank,
+  passesTitleFilters,   // seniorityRank ya no se usa aquí: vive dentro de lib/lead-score.js
   dispatchSearch, dispatchInvite, dispatchCheckInbox, dispatchCheckSentInvites, dispatchCheckConnections, dispatchFollowup,
   dispatchCommand, dispatchResolveCompanies, COMPANY_SCOPED_MIN_VERSION, CONTACT_INFO_MIN_VERSION, WITHDRAW_INVITES_MIN_VERSION, meetsVersion,
   checkCampaignActiveGates,
@@ -33,6 +33,7 @@ import { uploadGeneratedImage } from './lib/gemini-image.js'
 import { isSystemLinkedInAccount } from './lib/system-accounts.js'
 import { isGroupConversationName } from './lib/group-conversation.js'
 import { sweepQuarantineTimeout } from './lib/lead-failure.js'
+import { scoreLeadRow } from './lib/lead-score.js'
 import { maybeSendDailyDigest, maybeSendCampaignDigests } from './lib/daily-digest.js'
 
 dotenv.config()
@@ -617,7 +618,7 @@ async function tryInvitesForCampaign(campaign, account) {
   const nowIsoForCooldown = new Date().toISOString()
   const { data: candidates } = await supabase
     .from('leads')
-    .select('id, full_name, linkedin_url, profile_data, scraped_at, consecutive_failures, cooldown_until, quarantined_at, last_attempt_at')
+    .select('id, full_name, linkedin_url, profile_data, scraped_at, consecutive_failures, cooldown_until, quarantined_at, last_attempt_at, lead_score')
     .eq('campaign_id', campaign.id)
     .eq('status', 'scraped')
     .not('linkedin_url', 'is', null)
@@ -655,12 +656,21 @@ async function tryInvitesForCampaign(campaign, account) {
   // por título de hace semanas no puede quitarle el turno al Director de Estafeta.
   // Dentro de cada grupo manda el peso de responsabilidad. Sin lista de empresas
   // configurada, fromList es false para todos y el orden queda idéntico al anterior.
+  //
+  // (26-ago) `rank` pasa de ser seniorityRank suelto a `leads.lead_score` (0..100), que ya
+  // trae la responsabilidad MÁS la empresa confirmada por facet y los términos preferidos
+  // de la campaña. `fromList` sigue siendo la llave PRIMARIA — el score mide calidad del
+  // perfil, no pertenencia a la lista, así que el orden garantizado arriba no cambia.
+  // El fallback importa: los leads anteriores a esta feature (y los importados por CSV)
+  // tienen lead_score NULL, y sin él quedarían con rank 0 para siempre. scoreLeadRow los
+  // puntúa al vuelo con la MISMA función, así que no hace falta backfill.
   const listMode = Array.isArray(campaign.search_company_names)
     && campaign.search_company_names.filter(Boolean).length > 0
+  const preferred = campaign.title_preferred ?? []
   const ranked = whitelisted
     .map(l => ({
       l,
-      rank: seniorityRank(l.profile_data?.headline ?? ''),
+      rank: l.lead_score ?? scoreLeadRow(l, preferred).score,
       fromList: listMode && !!l.profile_data?.targetCompany,
     }))
     .sort((a, b) => (Number(b.fromList) - Number(a.fromList)) || (b.rank - a.rank))
@@ -715,7 +725,8 @@ async function tryInvitesForCampaign(campaign, account) {
       withNote: !!message,
       messageLength: message?.length ?? 0,
       capUsage: `${invitesToday + 1}/${cap}`,
-      seniorityRank: pick.rank,
+      leadScore: pick.rank,
+      scoreWasPersisted: lead.lead_score != null,  // false = puntuado al vuelo (lead viejo)
       fromTargetList: pick.fromList,
       company: lead.profile_data?.targetCompany ?? lead.profile_data?.currentCompany ?? null,
     },
@@ -2605,7 +2616,7 @@ async function tick() {
       search_paused, batch_paused, follow_up_paused,
       search_keywords, search_location, search_count, search_2nd_degree_only,
       search_company_names, search_min_employees,
-      title_whitelist, title_blacklist,
+      title_whitelist, title_blacklist, title_preferred,
       invite_with_note,
       auto_reply_mode, auto_reply_delay_min, auto_reply_delay_max,
       fm1_example_reply, fm2_example_reply, fm3_example_reply,

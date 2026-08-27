@@ -180,7 +180,15 @@ Flujo por tick (`trySearchForCampaign` → `lib/extension-dispatch.js` → ext):
 
 > ⚠️ **(17-ago) En modo degradado el scoping de empresa es DECORATIVO — hay que verificar en el ingest** (`f4c892f`). Sin URN el nombre viaja como **texto libre** en la query y LinkedIn lo matchea tan laxo que devuelve a cualquiera que cuadre con puesto+geo. Medido en Aduanas Infinity: de 104 leads con empresa objetivo, **46 trabajaban en otra** (BWI, Sensata, Dana, Astemo, ISUZU, Samsung, hasta un gerente de Degas Café) y solo 43 en la pedida. `ingestSearch` ya calculaba `companyIsCertain` desde el 27-jul pero **solo lo usaba para decidir si estampaba `currentCompany`, no descartaba nada**. Ahora `headlineNamesCompany` (`lib/company-match.js`) filtra cuando `targetCompany && !companyIsCertain` — chokepoint hermano de `matchesCampaignGeo`. Exige **TODOS** los tokens significativos: con `some`, "ISUZU **Motors** de México" pasaba como "General **Motors** de México". Sin headline se descarta (en degradado no hay otra evidencia). Con URN el filtro ni corre. Self-check `scripts/test-company-match.js` con los casos reales.
 
-Pendiente (Fase 2): invitar por **peso de responsabilidad** dentro de la empresa (hoy `tryInvitesForCampaign` toma random del top-5 del pool filtrado por whitelist, sin ranking de seniority ni agrupar por empresa).
+✅ **Fase 2 HECHA** (27-jul, y ampliada el 26-ago). `tryInvitesForCampaign` ordena `fromList > lead_score > FIFO`, corta al **top-3** y elige random dentro (humanizar). `leads.lead_score` (0..100, `lib/lead-score.js`) se persiste en `ingestSearch` con lo que ya está en la mano — `seniorityRank*15` + empresa confirmada por facet (10) + `campaigns.title_preferred` (15). Cero llamadas LLM.
+
+⚠️ **`fromList` NO entra al score, a propósito**: en el picker es la llave PRIMARIA y el score solo desempata dentro de ella. Sumarlo como puntos rompía la garantía del flujo congelado — un CEO fuera de la lista le ganaba a un coordinador de la lista. El score mide **calidad del perfil**; la pertenencia a la lista es **targeting**. Los leads previos (`lead_score` NULL) los puntúa al vuelo `scoreLeadRow` — no hubo backfill (evitar el UPDATE masivo en Free tier es deliberado).
+
+**`campaigns.title_preferred` = whitelist BLANDA** (sube el score, NUNCA rechaza), al lado de `title_whitelist` que sigue siendo la dura. Es el arreglo estructural del caso Infinity: la dura compara por substring, así que escribir cargos completos dejaba pasar 20 de 225 leads (9%) sin que nada lo delatara. Con la blanda, ese error de config cuesta **orden**, no **volumen**.
+
+**Triaje de 3 estados en `ingestSearch` (26-ago)**: `headlineNamesCompany` devolvía false por dos razones distintas y las trataba igual. Nombrar OTRA empresa es evidencia en contra ⇒ se rechaza; **headline AUSENTE no es evidencia de nada** y antes se descartaba igual, en silencio. Ahora entra como `disqualified` + `disqualification_reason='needs_review:*'` (status nuevo NO: `leads_status_check` no lo incluye). Queda fuera del pool invitable, del digest y de la válvula anti-sequía. Self-checks: `test-lead-score.js`, `test-ingest-triage.js`.
+
+Pendiente: agrupar por empresa al invitar (hoy el top-3 puede caer todo en la misma).
 
 ### Tipos en código
 ```ts
