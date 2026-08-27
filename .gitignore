@@ -23,3 +23,6 @@ apps/prometheus/*.png
 .DS_Store
 *.log
 .turbo/
+
+# Artefacto del CLI de Supabase (supabase gen types) — no es código
+packages/db-types/supabase/

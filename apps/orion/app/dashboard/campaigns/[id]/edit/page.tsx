@@ -34,6 +34,7 @@ async function saveCampaign(formData: FormData): Promise<{ error: string } | voi
     search_count:          Number(formData.get("search_count") || 25),
     title_whitelist:       parseList("title_whitelist"),
     title_blacklist:       parseList("title_blacklist"),
+    title_preferred:       parseList("title_preferred"),
     search_company_names:  parseList("search_company_names"),
     search_min_employees:  formData.get("search_min_employees")
       ? Number(formData.get("search_min_employees")) || null
@@ -462,6 +463,13 @@ export default async function CampaignEditPage({ params }: { params: Promise<{ i
                   <TagPreview value={toComma(c.title_blacklist)} color="red" />
                 </Field>
               </div>
+
+              <Field label="⭐ Preferidos — Cargos que van PRIMERO (opcional)"
+                hint="No filtran nada: quien los tenga sube en la fila de invitaciones. Como solo se invitan ~25 al día por cuenta (tope anti-baneo), esto decide en quién se gastan. Úsalo para lo que te encantaría tener sin arriesgarte a quedarte sin leads.">
+                <input name="title_preferred" defaultValue={toComma(c.title_preferred)}
+                  placeholder="director, compras, comercio exterior" className={inp} />
+                <TagPreview value={toComma(c.title_preferred)} color="green" />
+              </Field>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <Field label="🏢 Empresas específicas (opcional)"
