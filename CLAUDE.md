@@ -84,7 +84,7 @@ npm run types        # regenera packages/db-types/database.types.ts (supabase ge
 npm run types
 ```
 
-- **No hay framework de tests, y es deliberado** ([ADR-0008](docs/adr/0008-sin-framework-de-tests.md)). Hay dos capas nativas: `npm test` (`node --test`, funciones puras) y `npm run check -w apps/prometheus` (18 self-checks, cada uno con los datos reales de la avería que lo motivó). **Lógica nueva no trivial deja su self-check y se encadena a `check`.** No instales Jest/Vitest.
+- **No hay framework de tests, y es deliberado** ([ADR-0008](docs/adr/0008-sin-framework-de-tests.md)). Dos capas nativas: `npm test` (`node --test`, funciones puras) y `npm run check -w apps/prometheus` (19 self-checks herméticos, cada uno con los datos reales de la avería que lo motivó). Las corre el CI en cada push y PR (`.github/workflows/checks.yml`), no la memoria de nadie. **Lógica nueva no trivial deja su self-check y se encadena a `check`** — si te lo saltas, `test-adr-integrity.js` falla. Lo que necesite `.env`, DB o red no es un self-check: va a `scripts/diagnostics/`. No instales Jest/Vitest.
 - **DB**: inspecciona y consulta con el **MCP de Supabase** (`list_tables`, `execute_sql`, `get_advisors`, `get_logs`). Project id: `cjbvutiugmehrhdnfeta`.
 - **Extensión**: tras editar `apps/orion-extension/{background,content}.js` o `manifest.json`, hay que **recargar la extensión** en `chrome://extensions` y recargar la pestaña LinkedIn por cada cuenta.
 

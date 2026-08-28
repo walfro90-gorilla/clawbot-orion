@@ -1,0 +1,39 @@
+# Los self-checks existían desde jul-2026 y NADIE los ejecutaba: ni CI, ni hooks de git.
+# Dependían de que un humano o un agente se acordara. El 28-ago-2026 un agente commiteó y
+# pusheó sin correrlos — pasaron por suerte, no por diseño. Esto cierra ese hueco.
+#
+# Se eligió Actions y no un hook pre-push a propósito: un hook se salta con --no-verify y
+# no cubre a los agentes que trabajan desde otras máquinas o en la nube. Ver ADR-0008.
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # historia completa: test-adr-integrity.js verifica con `git cat-file` que los
+          # SHA citados en los ADR existan. Con un clon superficial daría falsos negativos.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # Playwright sigue como dependencia (código muerto de la era 1, ver ADR-0002); nada
+      # de lo que se prueba aquí lo usa, así que no se descargan los navegadores.
+      - run: npm ci
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+
+      - name: self-checks (19 eslabones)
+        run: npm run check -w apps/prometheus
+
+      - name: seatbelt de funciones puras
+        run: npm test -w apps/prometheus

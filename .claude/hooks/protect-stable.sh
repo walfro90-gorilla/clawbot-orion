@@ -37,11 +37,11 @@ CONGELADOS = {
 
 TITULOS = {
     '0001': 'Nada degrada en silencio',
-    '0002': 'Las acciones se ejecutan en la sesión y la IP del usuario',
+    '0002': 'Las acciones de LinkedIn se ejecutan en la sesión y la IP del usuario',
     '0003': 'En modo empresa nunca se busca por título suelto',
     '0004': 'Una conexión se confirma por presencia, nunca por ausencia',
     '0005': 'Matar un lead para siempre solo si el contacto nos eliminó',
-    '0006': 'La empresa y la geografía se verifican al ingerir',
+    '0006': 'La empresa y la geografía se verifican al ingerir, no en la URL de búsqueda',
     '0007': 'El picker de invitaciones ordena; filtrar es otra cosa',
 }
 
