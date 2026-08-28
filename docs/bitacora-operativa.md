@@ -18,6 +18,52 @@
 
 ## ✅ Resuelto
 
+### 🔍 P1 Infinity "el 2.º seguimiento nunca sale" — el motor está sano; los leads estaban pausados a propósito  [28-ago-2026, solo-diagnóstico]
+
+**Reporte** (Asana `ORION · Bugs 🐛`): *"Aduanas Infiniter no ha llegado al segundo seguimiento, está puesto para el 3er día y estos prospectos ya llevan más de 10 días"*.
+
+**Veredicto: no hay bug en el motor de follow-ups.** Las cuatro hipótesis de la tarea se descartan con datos.
+
+**Query de línea base** — leads cuyo siguiente paso YA venció, separando los pausados:
+
+```sql
+select count(*) filter (where not l.automation_paused) as vencidos_de_verdad,
+       count(*) filter (where l.automation_paused)     as pausados_a_proposito
+from leads l
+join campaign_followups f
+  on f.campaign_id = l.campaign_id and f.step = l.followup_step + 1 and f.enabled
+where l.campaign_id = '781d93ae-4703-42b5-981a-f173469e21b5'   -- Aduanas Infinity
+  and l.status in ('connected','follow_up_sent')
+  and now() - coalesce(l.last_followup_at, l.connected_at)
+      > (f.delay_value::int * (case f.delay_unit when 'days'  then interval '1 day'
+                                                 when 'hours' then interval '1 hour' end));
+```
+
+Resultado 28-ago: **`vencidos_de_verdad = 0`**, `pausados_a_proposito = 3`. Ningún lead activo está esperando de más.
+
+| Hipótesis | Veredicto | Evidencia |
+|---|---|---|
+| H1 starvation (el fix de FU1 no cubrió FU2) | ❌ descartada | 12 leads en `followup_step=2`, con FU enviados **hoy mismo**. El motor avanza |
+| H2 cadencia (override no leído) | ❌ descartada | 7 pasos configurados y habilitados: 0d, 2d, 3d, 5d, 7d, 9d, 11d. No cae a ningún default |
+| H3 estado equivocado (siguen en `invite_sent`) | ❌ descartada | Los leads del reporte están en `follow_up_sent` con `followup_step=2`, no en `invite_sent` |
+| H4 ventana horaria | ❌ descartada | `schedule_start_hour=7`, `schedule_end_hour=21`. Ventana amplia |
+
+**Causa real.** Los dos leads que el cliente vio atorados —Sócrates Hernández y Amaro Morales, conectados el 15-ago, último FU el 17-ago, **279 h esperando**— tienen `automation_paused=true` con `last_failure_reason='off_list_company'`.
+
+Son parte de un lote de **10 leads pausados el 17-ago-2026**, el mismo día que se desplegó `f4c892f` (verificar la empresa en el ingest cuando la búsqueda va degradada). Ese fix encontró leads ya en el pipeline que trabajaban en empresas fuera de la lista del cliente y los pausó — que es exactamente lo que manda [ADR-0005](adr/0005-escalera-de-severidad-del-lead.md): empresa equivocada se **pausa**, no se mata, porque el error fue de targeting y el lead puede ser válido después.
+
+Dos de ellos ya habían recibido FU1 y FU2 antes de que el filtro existiera. Por eso se ven como "la secuencia se cortó a la mitad": se cortó, y a propósito.
+
+**El defecto real es de observabilidad, no del motor.** La pausa no se ve en ningún lado. El cliente abrió conversaciones a mano, encontró leads sin seguimiento y reportó un bug del motor de FU. Nada dice *"este lead está pausado porque trabaja en una empresa fuera de tu lista"*. Es [ADR-0001](adr/0001-degradacion-silenciosa.md) §2 —*toda degradación tiene nombre, se persiste y se ve*— aplicado a una pausa deliberada: el motivo se persiste (`last_failure_reason`) pero no se muestra, y un estado correcto acabó pareciendo una avería. Costó un P1 y una investigación.
+
+**Hallazgo secundario, sí accionable**: **Antonio Huerta** está `automation_paused` desde el 26-ago con `last_failure_reason = NULL`. Una pausa sin motivo registrado no se puede auditar ni revertir con criterio. Hay al menos una ruta que pausa sin dejar rastro.
+
+**Recomendación** (no ejecutada — el alcance de la tarea era solo-diagnóstico):
+1. Que las vistas de leads y conversaciones muestren `automation_paused` con su motivo. Es un fix de frontend acotado y elimina esta clase entera de falso positivo.
+2. Encontrar y cerrar la ruta que pausa sin escribir `last_failure_reason`.
+3. Decidir qué hacer con los 10 leads de `off_list_company`: siguen pausados y son recuperables. Es decisión de negocio, no técnica.
+
+
 ### 🧨 "Mi Orion miente": un carácter NUL tiraba los check_connections de Josh  [21-ago-2026, `e5dfce8` + `fc81042`]
 **Queja del cliente, repetida durante días**: la extensión mostraba información incorrecta. Tenía razón, y no era la extensión: era el servidor.
 
