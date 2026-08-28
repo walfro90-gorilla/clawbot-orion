@@ -16,11 +16,11 @@ Registra **qué se eligió, qué se descartó y qué pasó cuando se intentó lo
 | ADR | Decisión | Estado | Gobierna |
 |---|---|---|---|
 | [0001](0001-degradacion-silenciosa.md) | Nada degrada en silencio | aceptado 22-ago-2026 | `lib/ai-message.js`, `content.js`, todo camino a LinkedIn |
-| [0002](0002-ejecutar-en-la-sesion-del-usuario.md) | Las acciones se ejecutan en la sesión y la IP del usuario | aceptado jun-2026 | `orion-extension/*`, `scheduler-extension.js`, `extension-bridge.js` |
+| [0002](0002-ejecutar-en-la-sesion-del-usuario.md) | Las acciones de LinkedIn se ejecutan en la sesión y la IP del usuario | aceptado jun-2026 | `orion-extension/*`, `scheduler-extension.js`, `extension-bridge.js` |
 | [0003](0003-nunca-title-only-en-company-scoped.md) | En modo empresa nunca se busca por título suelto | aceptado 10-ago-2026 | `scheduler-extension.js`, `lib/extension-dispatch.js` |
 | [0004](0004-accepts-por-presencia.md) | Una conexión se confirma por presencia, nunca por ausencia | aceptado 15-ago-2026 | `extension-bridge.js` |
 | [0005](0005-escalera-de-severidad-del-lead.md) | Matar un lead para siempre solo si el contacto nos eliminó | aceptado 4-jul-2026 | `extension-bridge.js` |
-| [0006](0006-verificar-en-el-ingest.md) | La empresa y la geografía se verifican al ingerir | aceptado 11-ago-2026 | `extension-bridge.js`, `lib/company-match.js` |
+| [0006](0006-verificar-en-el-ingest.md) | La empresa y la geografía se verifican al ingerir, no en la URL de búsqueda | aceptado 11-ago-2026 | `extension-bridge.js`, `lib/company-match.js` |
 | [0007](0007-el-picker-ordena-no-filtra.md) | El picker de invitaciones ordena; filtrar es otra cosa | aceptado 26-ago-2026 | `lib/lead-score.js`, `scheduler-extension.js` |
 | [0008](0008-sin-framework-de-tests.md) | Sin framework de tests: seatbelt nativo y un self-check por incidente | aceptado 6-jul-2026 | `package.json`, `scripts/test-*.js`, `test/*.test.mjs` |
 
