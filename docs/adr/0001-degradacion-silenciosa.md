@@ -19,6 +19,7 @@ Los incidentes de agosto son el mismo incidente:
 | 22 ago | Cuenta sin cuota mensual de búsqueda | `status: ok`, `stopReason: no_results_found` |
 | 21-23 ago | El fix del URN doble-encodeaba los slugs con acento → 404 | `urnSource: null`, empresa `unresolved`, búsqueda degradada |
 | 21-24 ago | Groq devolvía `content` vacío (233/233) y la cadena caía a un modelo gratis al azar | mensajes "generados"; 4 leads recibieron el razonamiento del modelo |
+| 17-28 ago | 10 leads pausados a propósito por `off_list_company` | conversaciones sin seguimiento, sin motivo visible → se reportó como P1 del motor de FU |
 
 En todos los casos la avería fue barata y **el silencio fue caro**: días de operación quemada antes de que un humano lo notara mirando una pantalla.
 
@@ -43,6 +44,14 @@ Tratarlas igual es lo que dejó a Rosy buscando contra una pared. Cuando el DOM 
 Un fallback es una decisión de producto, no un detalle. Si el sistema decide operar en modo peor, eso se escribe (`urnSource`, `stopReason`, `error`) y **sale en una vista de salud**, no solo en un `console.log` que nadie lee a las 3 a.m.
 
 Regla práctica: **si hay que correr un query a mano para saber si algo lleva días degradado, falta observabilidad.**
+
+**Corolario (28-ago-2026): persistir no es mostrar, y esto vale también para las pausas
+deliberadas.** `leads.last_failure_reason` guardaba `off_list_company` desde el 17-ago y
+ninguna vista lo enseñaba. El cliente encontró conversaciones sin seguimiento, no halló
+explicación en pantalla y abrió un P1 contra el motor de follow-ups — que estaba sano: la
+consulta de leads vencidos daba cero. **Un estado correcto pero invisible cuesta lo mismo
+que una avería**, y además gasta la confianza en el sistema. Ver
+[ADR-0005](0005-escalera-de-severidad-del-lead.md) §4.
 
 ### 3. Un gate de versión por capacidad, no uno global
 

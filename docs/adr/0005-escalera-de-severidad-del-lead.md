@@ -36,6 +36,25 @@ Es el camino barato y reversible. Solo aplica a falsos positivos.
 
 Se usó pausa **a propósito**: es reversible y no da el lead por perdido. Un Director de Compras de otra automotriz puede seguir siendo prospecto válido para una agencia aduanal — el error fue de targeting, no del lead.
 
+### 4. Una pausa automática lleva su motivo, y el motivo se ve
+
+Añadido el 28-ago-2026, después de que esta misma decisión generara un P1 falso.
+
+Pausar es correcto, pero **una pausa silenciosa es indistinguible de una avería**. Diez
+leads de Aduanas Infinity se pausaron el 17-ago por `off_list_company`; dos ya habían
+recibido FU1 y FU2. Once días después el cliente los vio sin seguimiento, no encontró en
+ninguna pantalla por qué, y reportó *"el segundo seguimiento nunca sale"* como bug del
+motor. El motor estaba sano: la consulta de leads vencidos daba **cero**.
+
+Dos exigencias, y las dos son parte de la decisión:
+
+- **`last_failure_reason` es obligatorio al pausar.** Sin motivo, la pausa no se puede
+  auditar ni revertir con criterio. Hoy hay al menos una ruta que lo incumple: Antonio
+  Huerta, pausado el 26-ago con el campo en `NULL`.
+- **El motivo tiene que llegar a la UI.** Se persiste desde hace tiempo y no se muestra en
+  ninguna vista de leads ni de conversaciones. Persistir sin mostrar no cumple
+  [ADR-0001](0001-degradacion-silenciosa.md) §2.
+
 ## Caminos descartados — no reintroducir
 
 | Camino | Por qué se descartó | Dónde murió |
@@ -44,17 +63,20 @@ Se usó pausa **a propósito**: es reversible y no da el lead por perdido. Un Di
 | **Marcar `dead` al lead de empresa equivocada** | Lo da por perdido siendo un prospecto sano. El fallo fue del filtro, no suyo | `f4c892f` (17-ago) |
 | **Unificar los dos caminos "porque hacen casi lo mismo"** | Hacen lo contrario. Se parecen en el síntoma y difieren en la causa | — (no hacer) |
 | **Confiar solo en `status=dead` sin `automation_paused`** | Cualquier consulta futura que filtre por pausa y no por estado vuelve a tocarlo | `bb91b7f` |
+| **Pausar sin escribir el motivo** | La pausa se vuelve indistinguible de una avería del motor. Costó un P1 falso el 28-ago-2026 | 28-ago-2026 |
 
 ## Consecuencias
 
 **A favor**: nunca se vuelve a escribir a alguien que nos sacó de su red. Los errores de targeting son recuperables sin intervención manual.
 
-**En contra**: desde fuera parece severidad arbitraria — dos leads con el mismo síntoma acaban uno muerto y otro pausado, y no hay nada en la fila que lo explique salvo el `dead_reason`. Y la cobertura es **incompleta a sabiendas**: solo la ruta compose dispara el guard (el de InMail actúa antes de enviar); la ruta thread, la de los seguimientos multi-paso, necesita el check de grado en la extensión y está pendiente.
+**En contra**: desde fuera parece severidad arbitraria — dos leads con el mismo síntoma acaban uno muerto y otro pausado, y no hay nada en la fila que lo explique salvo el `dead_reason`. **Y eso ya se cobró una factura**: el 28-ago-2026 un lote de pausas correctas se reportó como un P1 del motor de follow-ups (ver `docs/bitacora-operativa.md`). Mientras el motivo no se muestre, cada pausa masiva es un falso positivo esperando. Y la cobertura es **incompleta a sabiendas**: solo la ruta compose dispara el guard (el de InMail actúa antes de enviar); la ruta thread, la de los seguimientos multi-paso, necesita el check de grado en la extensión y está pendiente.
 
 ## Cómo se aplica
 
 1. ¿Vas a cambiar el estado de un lead por un fallo de mensajería? Pregunta primero `wasGenuinelyConnected()`. La respuesta decide la severidad.
 2. `dead` irreversible es **solo** para `disconnected_by_contact`. Cualquier otro motivo que se te ocurra: pausa.
 3. Si añades una ruta nueva que descarta leads, deja escrito por qué eligió matar en vez de pausar.
+4. ¿Tu código pausa un lead? Escribe `last_failure_reason` en la misma operación. Una pausa sin motivo es un bug que se descubre semanas después, desde el lado del cliente.
+5. Antes de investigar "el motor no manda seguimientos", corre la consulta de leads vencidos de `docs/bitacora-operativa.md` (entrada del 28-ago). Separa los vencidos de verdad de los pausados a propósito, y suele no quedar nada que arreglar.
 
 Relacionado: [ADR-0004](0004-accepts-por-presencia.md) (de dónde salen los falsos positivos), [ADR-0006](0006-verificar-en-el-ingest.md) (de dónde salen los de empresa equivocada)
