@@ -15,13 +15,13 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # historia completa: test-adr-integrity.js verifica con `git cat-file` que los
           # SHA citados en los ADR existan. Con un clon superficial daría falsos negativos.
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: npm
