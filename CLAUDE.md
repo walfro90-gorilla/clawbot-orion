@@ -63,7 +63,7 @@ Flujo de un comando (ej. `send_invite`):
 | `ai.js` + `lib/ai-message.js` (Gemini) | `inbox.js` (lectura inbox vía Voyager GraphQL) |
 | `lib/*` (extension-dispatch, supabase, lead-failure, etc.) | `followup.js` (legacy) |
 
-> El `package.json` de prometheus aún declara `main: worker.js` y scripts `start/batch/search` que apuntan a código muerto. **No los uses.** El proceso real corre `scheduler-extension.js`.
+> El `package.json` de prometheus ya apunta a la ruta viva (`main`/`start` = `scheduler-extension.js`, corregido 28-ago-2026; `search`/`batch` eliminados). Los archivos muertos siguen en disco por historia ([ADR-0002](docs/adr/0002-ejecutar-en-la-sesion-del-usuario.md)).
 
 ---
 
@@ -267,7 +267,7 @@ Auth: Supabase Auth + RLS. Roles `god_admin > admin > user`. Proxy de Next prote
 
 ## 10. Trampas conocidas
 
-1. **`package.json` de prometheus engaña**: `main`/scripts apuntan a código muerto (`worker.js`/`batch.js`/`search.js`). El proceso real es `scheduler-extension.js`.
+1. **(corregido 28-ago-2026)** El `package.json` de prometheus ya apunta a `scheduler-extension.js` (`main`/`start`; `search`/`batch` eliminados). Los `.js` muertos siguen en disco por historia (ADR-0002) — no los uses como referencia.
 2. **`ecosystem.config.cjs` stale** (ver §4) — usa `pm2 resurrect`.
 3. **Fixes de la extensión** no aplican hasta recargarla en `chrome://extensions` por cada cuenta. ⚠️ **Y `git pull` NO actualiza la extensión**: Chrome carga una **copia** (`~/.orion/extension`), no la carpeta del repo. El operador actualiza con `curl -fsSL http://209.50.63.149/download/install.sh | bash` (Windows: `irm .../install.ps1 | iex`) y DESPUÉS recarga en `chrome://extensions`. En prod, el hook `post-merge` de `/root/clawbot` republica el bundle en cada pull (`apps/orion-extension/publish.sh`). Lección 29-jul-2026: 3 cuentas se quedaron en v0.9.26 un día entero — el endpoint servía un tarball de 12 días atrás y "recargar" solo recargaba código viejo. Verificación real = `linkedin_accounts.ext_version`.
 4. **`currentCompany`**: la regex `headlineCompany` (`worker.js`) sigue **MUERTA**, pero **(jul-2026) el pass vivo `tryEnrichCompanies` YA puebla `currentCompany`** extrayendo la empresa del headline con el LLM (gate anti-alucinación; `''` = sin empresa → fallback `'tu empresa'`). La regla "no inventes empresa / no uses el título como empresa" (`NO_INVENT_COMPANY_RULE`) sigue vigente en la extracción y en la redacción. Ver §7.

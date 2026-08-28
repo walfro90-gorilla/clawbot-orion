@@ -56,7 +56,7 @@ el servidor sí salvó fue la planificación, los reintentos y la telemetría.
 
 ⚠️ **La evidencia física del repo contradice este ADR.** Antes de "arreglar" nada de lo que sigue, léelo dos veces:
 
-- `apps/prometheus/package.json` declara `"main": "worker.js"` y `"start": "node worker.js"`.
+- ~~`apps/prometheus/package.json` declara `"main": "worker.js"` y `"start": "node worker.js"`~~ — corregido 28-ago-2026: `main`/`start` apuntan a `scheduler-extension.js` y los scripts `search`/`batch` se eliminaron.
 - `playwright`, `playwright-extra` y `puppeteer-extra-plugin-stealth` siguen como dependencias.
 - `worker.js`, `batch.js`, `search.js`, `scheduler.js`, `inbox.js`, `followup.js` y `ai.js` siguen en disco.
 

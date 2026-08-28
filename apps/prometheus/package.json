@@ -2,18 +2,16 @@
   "name": "@clawbot/prometheus",
   "version": "1.0.0",
   "type": "module",
-  "main": "worker.js",
+  "main": "scheduler-extension.js",
   "scripts": {
-    "start": "node worker.js",
-    "search": "node search.js",
-    "batch": "node batch.js",
+    "start": "node scheduler-extension.js",
     "test": "node --test --test-force-exit test/*.test.mjs",
     "check": "node scripts/test-company-name-scoring.js && node scripts/test-company-title-cursor.js && node scripts/test-seniority-rank.js && node scripts/test-geo-filter.js && node scripts/test-digest.js && node scripts/test-db-circuit.js && node scripts/test-notify-ops.js && node scripts/test-reply-guards.js && node scripts/test-company-match.js && node scripts/test-email-wall.js && node scripts/test-contact-parse.js && node scripts/test-company-urn.js && node scripts/test-search-limit.js && node scripts/test-profile-fields.js && node scripts/test-jsonb-sanitize.js && node scripts/test-scan-truncated.js && node scripts/test-lead-score.js && node scripts/test-ingest-triage.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "CLAWBOT — LinkedIn stealth worker",
+  "description": "CLAWBOT — orquestador Smart Hybrid (scheduler + extension bridge)",
   "dependencies": {
     "@google/genai": "^1.48.0",
     "@supabase/supabase-js": "^2.101.1",
