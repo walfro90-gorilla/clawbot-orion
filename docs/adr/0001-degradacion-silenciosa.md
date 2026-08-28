@@ -47,7 +47,8 @@ Regla práctica: **si hay que correr un query a mano para saber si algo lleva d�
 
 **Corolario (28-ago-2026): persistir no es mostrar, y esto vale también para las pausas
 deliberadas.** `leads.last_failure_reason` guardaba `off_list_company` desde el 17-ago y
-ninguna vista lo enseñaba. El cliente encontró conversaciones sin seguimiento, no halló
+ninguna vista lo enseñaba — el CRM pinta un badge de "pausada" sin decir por qué, y la
+pantalla que sí traduce motivos filtra por `quarantined_at`, que en estos leads es NULL. El cliente encontró conversaciones sin seguimiento, no halló
 explicación en pantalla y abrió un P1 contra el motor de follow-ups — que estaba sano: la
 consulta de leads vencidos daba cero. **Un estado correcto pero invisible cuesta lo mismo
 que una avería**, y además gasta la confianza en el sistema. Ver

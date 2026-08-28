@@ -18,6 +18,73 @@
 
 ## ✅ Resuelto
 
+### 👁️ Reactivados los 10 leads `off_list_company` de Infinity — en observación  [28-ago-2026]
+
+Decisión del operador tras el diagnóstico P1. Se quitó `automation_paused` a los 10 leads
+que el data-fix del 17-ago había pausado por trabajar en empresas fuera de la lista.
+**`last_failure_reason='off_list_company'` se CONSERVA a propósito**: es el rastro de por
+qué se pausaron ([ADR-0005](adr/0005-escalera-de-severidad-del-lead.md) §4).
+
+Antes de escribir se verificó que **`off_list_company` no aparece en ningún código vivo**
+(cero coincidencias en `apps/`): fue un data-fix manual, no una regla recurrente, así que
+nada los vuelve a pausar solo. Los 10 estaban pausados en el mismo instante
+(`2026-08-17T23:21:35.568084+00`), confirmando el lote único.
+
+**Qué se dispara y qué no** — solo 3 de los 10 hacen algo pronto:
+
+| Lead | Estado | Qué pasa al reactivar |
+|---|---|---|
+| David Garcia Gomez (Director de Compras, Grupo Nexos de Acero) | `connected` | **FU1 sale ya** (paso 1, delay 0d) |
+| Amaro Morales (Gerente materiales y logística, MAHLE) | `follow_up_sent` paso 2, 12 d | **FU3 sale ya** (vencido) |
+| Sócrates Hernández (Gerente de logística de tramo) | `follow_up_sent` paso 2, 12 d | **FU3 sale ya** (vencido) |
+| Los otros 7 | `invite_sent` | Nada hasta que acepten la invitación |
+
+Los dos de MAHLE y tramo reciben un mensaje tras **12 días de silencio**. Es el riesgo
+asumido de la reactivación.
+
+**Query de seguimiento:**
+
+```sql
+select l.full_name, l.status, l.followup_step, l.last_followup_at, l.automation_paused,
+       l.last_failure_reason, l.replied_at
+from leads l
+where l.id in ('fdb2a51f-4993-4c6a-8080-7af4f0fb27d7','5e07764e-1392-4c05-9fcc-2cfd994d8f1b',
+               '6b88ec9b-7549-4413-8c79-22182cd3083a','b2273532-53b5-47a2-b625-ee682544181d',
+               '3e2bcf14-c7d5-42f0-b484-4467a15f60cb','5dffefac-8c77-4a36-a948-203f1523cb7f',
+               'ee9ee06b-67d5-4801-ba83-2e6ea23be017','04bd66a8-fd42-41f3-9af5-53ed5ab5ca4e',
+               '77a8e369-c23a-41e1-8b94-d5dadce585bb','cef24d57-947b-4c1a-a4a6-4a4813ff69dd')
+order by l.last_followup_at desc nulls last;
+```
+
+**Qué vigilar**: que los 3 reciban su mensaje sin `last_failure_reason` nuevo; que ninguno
+dispare `detected_not_first_degree` (señal de que la conexión no era real); y las
+respuestas — si alguien de una empresa fuera de la lista contesta bien, la política de
+pausar por `off_list_company` merece revisarse.
+
+**Rollback** (vuelve al estado exacto del 17-ago):
+
+```sql
+update leads set automation_paused = true,
+                 automation_paused_at = '2026-08-17T23:21:35.568084+00'
+where last_failure_reason = 'off_list_company'
+  and campaign_id = '781d93ae-4703-42b5-981a-f173469e21b5';
+```
+
+**Corrección al diagnóstico P1 del mismo día**: se afirmó que la pausa *"no se muestra en
+ninguna vista"*. Es inexacto. `crm/lead-drawer.tsx` **sí** pinta el badge
+"⏸️ AUTOMATIZACIÓN PAUSADA" con botón de reanudar. Lo que falta es el **motivo**: el
+drawer no renderiza `last_failure_reason`, `/dashboard/quarantine` (la única pantalla que
+traduce motivos) filtra por `quarantined_at is not null` y estos leads lo tienen en NULL,
+y `off_list_company` no está en el diccionario de `lib/quarantine-reasons.ts`. Además el
+badge solo se ve abriendo ese lead: ninguna vista de lista lo muestra.
+
+**La ruta que pausa sin motivo, encontrada** (caso Antonio Huerta): son dos, ambas en
+`scheduler-extension.js`. La del **cap de auto-reply loop** (~línea 1444) escribe
+`automation_paused` + `automation_paused_at` sin `last_failure_reason` — encaja con Huerta,
+pausado el 26-ago con el campo en NULL. La del **reclutador** (~línea 1598) es peor:
+escribe solo `automation_paused`, ni siquiera el timestamp.
+
+
 ### 🔍 P1 Infinity "el 2.º seguimiento nunca sale" — el motor está sano; los leads estaban pausados a propósito  [28-ago-2026, solo-diagnóstico]
 
 **Reporte** (Asana `ORION · Bugs 🐛`): *"Aduanas Infiniter no ha llegado al segundo seguimiento, está puesto para el 3er día y estos prospectos ya llevan más de 10 días"*.

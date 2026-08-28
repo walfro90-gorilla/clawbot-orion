@@ -51,8 +51,18 @@ Dos exigencias, y las dos son parte de la decisión:
 - **`last_failure_reason` es obligatorio al pausar.** Sin motivo, la pausa no se puede
   auditar ni revertir con criterio. Hoy hay al menos una ruta que lo incumple: Antonio
   Huerta, pausado el 26-ago con el campo en `NULL`.
-- **El motivo tiene que llegar a la UI.** Se persiste desde hace tiempo y no se muestra en
-  ninguna vista de leads ni de conversaciones. Persistir sin mostrar no cumple
+- **El motivo tiene que llegar a la UI, y hoy no llega.** Corregido el 28-ago-2026 tras
+  revisar el código: *la pausa sí se ve* — `crm/lead-drawer.tsx` pinta el badge
+  "⏸️ AUTOMATIZACIÓN PAUSADA" y ofrece "▶️ Reanudar". Lo que no aparece por ningún lado es
+  **el motivo**, y ahí se juntan tres huecos:
+  1. el drawer muestra el badge pero no renderiza `last_failure_reason`;
+  2. la única pantalla que sí traduce motivos, `/dashboard/quarantine`, filtra por
+     `.not('quarantined_at','is',null)` — estos leads tienen `quarantined_at` en NULL, así
+     que nunca salen ahí;
+  3. `off_list_company` ni siquiera está en el diccionario de `lib/quarantine-reasons.ts`.
+
+  Y el badge solo se ve **abriendo ese lead concreto**: ninguna vista de lista lo muestra,
+  que es justo por donde se busca trabajo pendiente. Persistir sin mostrar no cumple
   [ADR-0001](0001-degradacion-silenciosa.md) §2.
 
 ## Caminos descartados — no reintroducir
