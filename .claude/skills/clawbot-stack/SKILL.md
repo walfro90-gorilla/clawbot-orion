@@ -7,7 +7,13 @@ description: Contexto de arquitectura REAL del monorepo ClawBot (Prometheus + Or
 
 # ClawBot — arquitectura real (ground truth)
 
-> ⚠️ El `CLAUDE.md` del repo está **desactualizado** (describe Next 14 + arquitectura Voyager/inbox.js). Cuando contradiga lo de abajo, gana esta skill. Verifica afirmaciones del CLAUDE.md contra la realidad antes de actuar.
+> ⚠️ **Este resumen se verificó en jun-2026 y ha quedado atrás en varios puntos** (versión de
+> extensión, proveedor LLM, tablas del modelo de datos). **`CLAUDE.md` y `docs/adr/` mandan
+> sobre esta skill**; úsala como mapa rápido, no como ground truth. Si algo de aquí contradice
+> al `CLAUDE.md`, gana el `CLAUDE.md`; si contradice al código, gana el código.
+>
+> Las decisiones de arquitectura —y qué se rompió al intentar lo contrario— están en
+> [`docs/adr/README.md`](../../../docs/adr/README.md).
 
 ## Qué corre de verdad (verificado 2026-06-10)
 Código vivo = `/root/clawbot` (este repo git). **PM2 corre 4 procesos**, todos desde aquí:
