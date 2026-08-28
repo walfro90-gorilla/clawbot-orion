@@ -1,0 +1,60 @@
+# ADR-0005 · Matar un lead para siempre solo si el contacto nos eliminó
+
+- **Estado**: aceptado (4-jul-2026), ampliado (17-ago-2026)
+- **Contexto que lo detona**: un lead que ya había recibido seguimientos volvió a dar `not_first_degree`. No era un falso positivo de accept-detection: el contacto nos había eliminado de su red.
+- **Gobierna**: `apps/prometheus/extension-bridge.js`
+
+## El problema, dicho una sola vez
+
+Tres situaciones distintas producen **el mismo síntoma** — un lead que debería ser contacto y no responde como tal — y exigen tres respuestas opuestas:
+
+| Situación | Qué pasó de verdad | Respuesta correcta |
+|---|---|---|
+| Falso positivo de accept-detection | Nunca estuvo conectado; lo promovimos mal | Revertir a `invite_sent` y reintentar |
+| El contacto nos eliminó | Sí estuvo conectado y decidió sacarnos | `dead` irreversible, no volver a tocarlo nunca |
+| Trabaja en otra empresa que la pedida | El lead es válido, el targeting falló | Pausar, no matar |
+
+Tratarlas igual tiene dos formas de salir mal: reinvitar a quien nos eliminó (riesgo de denuncia y baneo), o dar por perdido a un prospecto sano porque el filtro de empresa se equivocó.
+
+## Decisión
+
+**La severidad se elige por lo que el lead FUE, no por lo que devuelve hoy.**
+
+`wasGenuinelyConnected()` (`extension-bridge.js:1448`) es el árbitro: mira si hubo seguimiento enviado, respuesta recibida o etapa post-conexión.
+
+### 1. Estuvo conectado de verdad y ahora no lo está → Super DEAD
+
+`markDisconnectedSuperDead()`: `status=dead`, `dead_reason='disconnected_by_contact'`, `disconnected_at`, y `automation_paused=true`. Ese último es **fail-closed a propósito**: bloquea cualquier ruta futura que filtre por `automation_paused` aunque olvide mirar `status`.
+
+Nunca se le vuelve a invitar ni escribir. Es anti-ban, no limpieza de datos.
+
+### 2. Nunca hubo evidencia de conexión → revertir a `invite_sent`
+
+Es el camino barato y reversible. Solo aplica a falsos positivos.
+
+### 3. Empresa equivocada, ya contactado → `automation_paused`, no `dead`
+
+Se usó pausa **a propósito**: es reversible y no da el lead por perdido. Un Director de Compras de otra automotriz puede seguir siendo prospecto válido para una agencia aduanal — el error fue de targeting, no del lead.
+
+## Caminos descartados — no reintroducir
+
+| Camino | Por qué se descartó | Dónde murió |
+|---|---|---|
+| **Un solo camino: revertir siempre a `invite_sent`** | Reinvita a quien nos eliminó. Riesgo de denuncia y baneo | `bb91b7f` (4-jul) |
+| **Marcar `dead` al lead de empresa equivocada** | Lo da por perdido siendo un prospecto sano. El fallo fue del filtro, no suyo | `f4c892f` (17-ago) |
+| **Unificar los dos caminos "porque hacen casi lo mismo"** | Hacen lo contrario. Se parecen en el síntoma y difieren en la causa | — (no hacer) |
+| **Confiar solo en `status=dead` sin `automation_paused`** | Cualquier consulta futura que filtre por pausa y no por estado vuelve a tocarlo | `bb91b7f` |
+
+## Consecuencias
+
+**A favor**: nunca se vuelve a escribir a alguien que nos sacó de su red. Los errores de targeting son recuperables sin intervención manual.
+
+**En contra**: desde fuera parece severidad arbitraria — dos leads con el mismo síntoma acaban uno muerto y otro pausado, y no hay nada en la fila que lo explique salvo el `dead_reason`. Y la cobertura es **incompleta a sabiendas**: solo la ruta compose dispara el guard (el de InMail actúa antes de enviar); la ruta thread, la de los seguimientos multi-paso, necesita el check de grado en la extensión y está pendiente.
+
+## Cómo se aplica
+
+1. ¿Vas a cambiar el estado de un lead por un fallo de mensajería? Pregunta primero `wasGenuinelyConnected()`. La respuesta decide la severidad.
+2. `dead` irreversible es **solo** para `disconnected_by_contact`. Cualquier otro motivo que se te ocurra: pausa.
+3. Si añades una ruta nueva que descarta leads, deja escrito por qué eligió matar en vez de pausar.
+
+Relacionado: [ADR-0004](0004-accepts-por-presencia.md) (de dónde salen los falsos positivos), [ADR-0006](0006-verificar-en-el-ingest.md) (de dónde salen los de empresa equivocada)

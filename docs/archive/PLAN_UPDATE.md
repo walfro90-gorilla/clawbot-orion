@@ -1,3 +1,10 @@
+> 🗄️ **ARCHIVADO (27-ago-2026) — no describe el sistema actual.**
+> Este documento es de **may-2026** y describe el plan de migración a Smart Hybrid. Fases 1 y 2 ejecutadas; la 3 nunca.
+> Su sección `Lo que NO haremos (y por qué)` se conservó: esas alternativas rechazadas viven ahora en [ADR-0002](../adr/0002-ejecutar-en-la-sesion-del-usuario.md).
+> Contexto del archivo: [`docs/archive/README.md`](README.md).
+
+---
+
 # PLAN_UPDATE — Smart Hybrid Architecture
 
 > **Fecha**: 20 de mayo, 2026

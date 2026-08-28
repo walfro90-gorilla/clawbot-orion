@@ -1,6 +1,7 @@
 # ADR-0001 · Nada degrada en silencio
 
 - **Estado**: aceptado (22-ago-2026)
+- **Gobierna**: `apps/prometheus/lib/ai-message.js`, `apps/orion-extension/content.js`, y todo camino que hable con LinkedIn
 - **Contexto que lo detona**: la cuenta de Rosy agotó el límite mensual de búsquedas de LinkedIn. El sistema no lo notó: siguió reportando búsquedas sanas con cero resultados.
 
 ## El problema, dicho una sola vez
@@ -23,7 +24,7 @@ En todos los casos la avería fue barata y **el silencio fue caro**: días de op
 
 ## Decisión
 
-**Ningún camino puede devolver un estado sano cuando en realidad está bloqueado.** De ahí salen cuatro reglas concretas.
+**Ningún camino puede devolver un estado sano cuando en realidad está bloqueado.** De ahí salen siete reglas concretas.
 
 ### 1. Cero resultados no es un estado terminal válido
 
@@ -97,8 +98,8 @@ La razón por la que este archivo existe. Cada uno se probó, dañó a un client
 
 | Camino | Por qué se descartó | Dónde murió |
 |---|---|---|
-| **Búsqueda title-only en `companyMode`** | Tira el filtro de empresa: trae competencia directa y, en SalesNav, otros países. Josh recibió un founder de India; Aduanas juntó 19 leads de agencias rivales | `a68dfd3`, `ecdad90` |
-| **Válvula anti-sequía `COMPANY_DRY_STREAK_ESCAPE`** | Era la puerta trasera al title-only | `a68dfd3` |
+| **Búsqueda title-only en `companyMode`** | Tira el filtro de empresa: trae competencia directa y, en SalesNav, otros países. Josh recibió un founder de India; Aduanas juntó 19 leads de agencias rivales | `89be071` (10-ago), `ecdad90` (15-ago) |
+| **Válvula anti-sequía `COMPANY_DRY_STREAK_ESCAPE`** | Era la puerta trasera al title-only | `89be071` (10-ago) |
 | **Grupo booleano `("A" OR "B")` en buscador free** | LinkedIn lo lee como texto literal → cero resultados | 31-jul |
 | **Copiar URNs del catálogo entre empresas de nombre parecido** | `alfa` apuntaba al slug `alfa-laval`: son empresas distintas. Atar la empresa equivocada es el peor resultado posible | 21-ago |
 | **Escribir `currentCompany` sin facet** | Inventa el dato. Regla `NO_INVENT_COMPANY_RULE` | 27-jul |

@@ -1,3 +1,10 @@
+> 🗄️ **ARCHIVADO (27-ago-2026) — no describe el sistema actual.**
+> Este documento es de **jun-2026** y describe una PROPUESTA contra el throttling de pestañas en segundo plano que nunca se aplicó.
+> Superada dos veces: la ext 0.9.1 hizo `runPhase` resistente al throttle, y la 0.10.11 (ago-2026) APAGÓ el focus-hack por innecesario para invite/FU/inbox.
+> Contexto del archivo: [`docs/archive/README.md`](README.md).
+
+---
+
 # Fix propuesto: timeout de tecleo → cuarentena (background-tab throttling)
 
 > Estado: **PROPUESTA para revisar** (no aplicada). El fix server-side ya está aplicado

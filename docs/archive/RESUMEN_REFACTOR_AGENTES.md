@@ -1,3 +1,10 @@
+> 🗄️ **ARCHIVADO (27-ago-2026) — no describe el sistema actual.**
+> Este documento es de **jun-2026** y describe un sprint de hard-testing sobre la extensión v0.7.28→0.7.42.
+> Dos versiones mayores atrás. Hoy: `docs/EVOLUTION.md` (línea de tiempo) y `docs/followups-flujo.md`.
+> Contexto del archivo: [`docs/archive/README.md`](README.md).
+
+---
+
 # 🤖 Refactorización de Agentes LinkedIn — Resumen para el equipo
 ### Stress testing tipo "armadora" · v0.7.28 → v0.7.42 · Junio 2026
 **5 agentes battle-tested · 20+ fixes · 2 envíos reales validados**
