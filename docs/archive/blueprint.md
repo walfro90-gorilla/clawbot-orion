@@ -1,3 +1,10 @@
+> 🗄️ **ARCHIVADO (27-ago-2026) — no describe el sistema actual.**
+> Este documento es de **abr-2026** y describe la arquitectura Playwright + Voyager, que MURIÓ.
+> Hoy: `CLAUDE.md` §2 y [ADR-0002](../adr/0002-ejecutar-en-la-sesion-del-usuario.md). El pipeline `search.js → worker.js` y la lectura de inbox por GraphQL ya no corren.
+> Contexto del archivo: [`docs/archive/README.md`](README.md).
+
+---
+
 # ClawBot — Blueprint Técnico
 
 > Documento de arquitectura completo. Creado: 2026-04-12.

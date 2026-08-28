@@ -36,7 +36,9 @@ Stack por app:
 - **orion-extension**: Chrome Extension Manifest V3, service worker módulo, content scripts en `*.linkedin.com`.
 - **packages/db-types**: `database.types.ts` generado por `supabase gen types`.
 
-README.md es una descripción rica y actualizada del producto y la arquitectura "Smart Hybrid" — buena lectura de contexto. **`docs/EVOLUTION.md`** = huella histórica con timing (cómo evolucionó la arquitectura por eras); actualízalo cuando aterrice un hito estructural.
+README.md es una descripción del producto y la arquitectura "Smart Hybrid" — buena lectura de contexto. **`docs/EVOLUTION.md`** = huella histórica con timing (cómo evolucionó la arquitectura por eras); actualízalo cuando aterrice un hito estructural.
+
+⚠️ **`docs/archive/` NO describe el sistema actual** — son documentos correctos en su fecha y falsos hoy (Playwright, Voyager, `worker.js` vivo). Si encuentras algo ahí que contradiga a este archivo, gana este archivo. Ver [`docs/archive/README.md`](docs/archive/README.md).
 
 ---
 

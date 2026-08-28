@@ -1,3 +1,10 @@
+> 🗄️ **ARCHIVADO (27-ago-2026) — no describe el sistema actual.**
+> Este documento es de **may-2026** y describe la capa de stealth del servidor (`lib/humanize.js`, `lib/browser.js`, proxies, fingerprint binding), que ya NO SE EJECUTA.
+> Hoy el anti-detección no es una capa de código: es [ADR-0002](../adr/0002-ejecutar-en-la-sesion-del-usuario.md) — las acciones corren en el navegador real del usuario. Sus fases 2/3/4 nunca se ejecutaron.
+> Contexto del archivo: [`docs/archive/README.md`](README.md).
+
+---
+
 # Anti-Detection Blueprint — ClawBot LinkedIn Automation
 
 > **Single source of truth para humanización, stealth y arquitectura de fingerprint.**

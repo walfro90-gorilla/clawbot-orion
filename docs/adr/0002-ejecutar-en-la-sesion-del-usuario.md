@@ -34,6 +34,17 @@ Dos navegadores con la extensión y la misma cuenta = comandos duplicados y carr
 | **Proxy residencial para disfrazar la IP del servidor** | Trata el síntoma. La sesión sigue viajando desde una red que no es la del usuario, y añade una dependencia de pago que falla sola | era 1 |
 | **Mover una cuenta al Chrome del VPS cuando necesita más horas activa** | Es literalmente el patrón baneado, con otro nombre | ago-2026 (caso Wal) |
 | **La misma cuenta en dos hosts a la vez** | Comandos duplicados, `duplicate_connection_race` | ago-2026 |
+| **Sesión partida (servidor con cookie A, extensión con cookie B)** | LinkedIn detecta "misma cuenta, dos dispositivos simultáneos" y mata la sesión. Las herramientas que lo intentaron reportaron 3-5× más baneos | `PLAN_UPDATE.md`, may-2026 |
+| **Navegadores anti-detect (Multilogin, GoLogin, Dolphin Anty)** | Diseñados para gestionar 100+ identidades. Para 2-3 cuentas es coste y complejidad sin retorno | may-2026 |
+| **Cambiar de proveedor de scraping (Apify, Bright Data)** | Es el mismo patrón headless en la nube con otro nombre. El problema era arquitectónico, no de proveedor | may-2026 |
+| **Seguir parcheando el comportamiento sin tocar la arquitectura** | 5 baneos en 2 semanas demostraron que el patrón ya estaba detectado. Más parches de humanización eran tirar piedras al mar | may-2026 |
+
+**Una nota honesta sobre la extensión pura.** En may-2026 se evaluó y se rechazó ir a
+**solo extensión, sin servidor**: perdía el 24/7 set-and-forget, porque obligaba al usuario
+a tener Chrome abierto siempre. La arquitectura que quedó conserva el servidor para
+orquestar, pero **no evitó ese coste**: la extensión sigue necesitando Chrome vivo. O sea,
+la objeción era correcta y hoy se paga igual — está en las consecuencias de abajo. Lo que
+el servidor sí salvó fue la planificación, los reintentos y la telemetría.
 
 ## Consecuencias
 

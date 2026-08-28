@@ -45,7 +45,9 @@ Arquitectura vigente = **Smart Hybrid v0.7.47**: extensión Chrome MV3 (`apps/or
 
 ## Recursos adicionales (leer bajo demanda)
 - Comandos operativos completos (PM2/resurrect, rebuild, types, env, reload extensión) → [commands-cheatsheet.md](commands-cheatsheet.md).
-- Modelo de datos: tablas, CHECK constraints reales, flujo de estados, tipos generados → [data-model.md](data-model.md).
+- Modelo de datos: tablas, CHECK constraints, flujo de estados y tipos generados → **`CLAUDE.md` §5**.
+  (El `data-model.md` que vivía aquí se archivó el 27-ago-2026: le faltaban `campaign_target_companies`,
+  `campaign_followups` y `extension_commands`, las tres tablas centrales de hoy.)
 
 ## Comandos rápidos
 - Rebuild Orion: `cd /root/clawbot/apps/orion && npm run build && pm2 restart orion`

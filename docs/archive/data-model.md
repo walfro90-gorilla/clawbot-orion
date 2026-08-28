@@ -1,3 +1,10 @@
+> 🗄️ **ARCHIVADO (27-ago-2026) — no describe el sistema actual.**
+> Este documento es de **jun-2026** y describe el modelo de datos de la skill `clawbot-stack`, INCOMPLETO.
+> Le faltan `campaign_target_companies`, `campaign_followups` y `extension_commands` —las tres tablas centrales de hoy— y el estado `follow_up_sent`. Hoy: `CLAUDE.md` §5.
+> Contexto del archivo: [`docs/archive/README.md`](README.md).
+
+---
+
 # ClawBot — modelo de datos (Supabase)
 
 Verifica el esquema real con el **MCP de Supabase** (`list_tables`) antes de cambiarlo; esto es el mapa, no la fuente de verdad.
