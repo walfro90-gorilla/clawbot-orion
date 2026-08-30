@@ -18,6 +18,39 @@
 
 ## ✅ Resuelto
 
+### 🔍 `wrong_page` en get_contact_info: diagnosticado + observabilidad (ext 0.10.41)  [30-ago-2026]
+
+Top error de la semana 23-29 ago: **24 `wrong_page`** en `get_contact_info` (~10% del scrape
+de contactos, todas las cuentas, Café la que más — máquina lenta). NO es regresión: es el
+**guard de identidad 0.10.39 funcionando** (`content.js`, aborta si el pathname no es el del
+lead en 10 s) — convierte el viejo bug de datos cruzados en error visible y retryable.
+
+**Dos poblaciones medidas** (19 leads afectados):
+- **Transitorios**: 7 se recuperaron solos con el reintento >24 h (ya tienen email/tel).
+  Causa: carga lenta — `waitForTabComplete` 15 s + guard 10 s no alcanzan en el host de Café.
+- **Permanentes (5)**: 2-3 intentos, siempre `wrong_page` (`carlosmervaz`,
+  `alejandra-s-235a4465`, `santiagogarzagonzalez`, `eduardo-r-86b5a858`,
+  `rafael-rendón-esquivel-12313067`). Hipótesis: LinkedIn redirige a un slug nuevo (perfil
+  renombrado) → el vanity guardado jamás matchea → reintento eterno.
+
+**Punto ciego cerrado**: el pathname real solo se veía en `console.warn` del host (inaccesible);
+`debug:true` tampoco sirve porque el guard aborta antes de la captura. **Fix 0.10.41**: el
+result de `wrong_page` ahora carga `where` = pathname donde aterrizó. Con una semana de datos
+se clasifica cada permanente y se decide si auto-corregir `linkedin_url` (decisión aparte).
+Pendiente operador: publicar extensión + reload por cuenta. Techo conocido: los permanentes
+seguirán reintentando (cadencia baja: solo cuando no hay leads frescos) hasta ese fix de raíz.
+
+### ⚡ Caída #5 de Supabase — 29-ago madrugada, ~7 h  [29-ago-2026]
+
+Instancia entera muda 04:47→~11:55 CDMX (postgres_logs y postgrest_logs en silencio,
+edge_logs vivo; último checkpoint 5 buffers en 10,5 s vs 0,5 s la hora previa — mismo
+acantilado del 27-ago). **Dato nuevo: cayó en madrugada de sábado, SIN pico de operación**
+⇒ refuerza agotamiento de créditos burstable, no tráfico. Prod se defendió solo (scheduler
+`tick_soft_timeout` + backoff; bridge en circuit breaker). Restart del dashboard por el
+operador ~11:55. Se perdió la mañana de automatización del sábado (scheduler arrancó 11:55
+en vez de 06:00; 162 jobs vs ~250 normales). Evidencia completa en la tarea Asana
+"P1 · Supabase — la instancia se cae por EXCESO DE USO". El fix sigue siendo el compute (#8).
+
 ### 👁️ Reactivados los 10 leads `off_list_company` de Infinity — en observación  [28-ago-2026]
 
 Decisión del operador tras el diagnóstico P1. Se quitó `automation_paused` a los 10 leads
