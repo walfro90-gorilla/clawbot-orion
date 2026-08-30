@@ -4860,7 +4860,7 @@ function _normForFilter(s) {
 // canónica). Ahora se puntúa por SEGUIDORES: la duplicada tiene decenas, la real
 // millones.
 const COMPANY_URN_RE = /urn:li:(?:fsd_company|organization|company):(\d+)/
-const CONTENT_VERSION = '0.10.40'
+const CONTENT_VERSION = '0.10.41'
 const DISTINCTIVE_HIT = 10   // puntaje de un token distintivo: el umbral de "sí es esta empresa"
 const FOLLOWERS_RE = /([\d][\d.,\s]*)\s*(mil|k|m|millones)?\s*(?:de\s+)?(?:seguidores|followers)/
 
@@ -6164,7 +6164,9 @@ async function scrapeContactInfo(payload = {}) {
     }
     if (!onTarget) {
       console.warn(`[Orion content] contact-info: la página NO es la del lead (${location.pathname}) — abortando`)
-      return fail('wrong_page')
+      // El pathname real viaja en el result: sin esto el server solo ve "wrong_page" y no
+      // distingue carga lenta (retryable) de slug renombrado por LinkedIn (permanente).
+      return { ...fail('wrong_page'), where: decodeURIComponent(location.pathname).slice(0, 200) }
     }
   }
 
