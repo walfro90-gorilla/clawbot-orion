@@ -6,7 +6,7 @@
 // Los asserts puros NO requieren .env (importan digest-format.js); los modos
 // --dry-run/--send-to sí (importan daily-digest.js dinámicamente → supabase).
 import assert from 'node:assert/strict'
-import { groupRows, buildDigestHtml, startOfYesterdayIso } from '../lib/digest-format.js'
+import { groupRows, buildDigestHtml, startOfYesterdayIso, splitPendingScrape } from '../lib/digest-format.js'
 import { resolveBcc } from '../lib/send-email.js'
 
 // ── Asserts puros ────────────────────────────────────────────────────────────
@@ -127,12 +127,48 @@ assert.deepEqual(resolveBcc('', ['a@x.com']), [])
 assert.deepEqual(resolveBcc(undefined, ['a@x.com']), [])
 assert.deepEqual(resolveBcc('a@x.com', 'a@x.com'), [], 'to puede venir como string')
 
+// mxHour a medianoche: node ≤20 formatea "24" con hour12:false (ciclo h24 del ICU)
+// — el digest salió SEMANAS a las 00:00 por esto (31-ago-2026). La fórmula viva
+// (mxTime, extension-dispatch.js) lleva % 24; aquí corre la MISMA fórmula contra
+// el ICU de ESTE node (extension-dispatch no se puede importar sin .env).
+const hourAt = iso => parseInt(new Intl.DateTimeFormat('es-MX', {
+  timeZone: 'America/Mexico_City', hour: 'numeric', hour12: false,
+}).format(new Date(iso))) % 24
+assert.equal(hourAt('2026-08-31T06:00:00Z'), 0, 'medianoche CDMX debe dar 0, no 24')
+assert.equal(hourAt('2026-08-31T18:00:00Z'), 12)
+assert.equal(hourAt('2026-08-31T05:59:00Z'), 23)
+
+// splitPendingScrape: retención de leads sin scrape de contacto (corte por prefijo)
+{
+  const NOW = new Date('2026-08-31T13:00:00Z').getTime()
+  const r = (name, connected_at, contact_info) => mkRow('Wal', 'Café', { full_name: name, connected_at, contact_info })
+  // todos con scrape resuelto → pasan enteros ({} = visitado sin datos, estado final)
+  let sp = splitPendingScrape([r('a', '2026-08-31T02:00:00Z', { email: 'a@x.com' }), r('b', '2026-08-31T03:00:00Z', {})], NOW)
+  assert.equal(sp.held, 0)
+  assert.equal(sp.send.length, 2)
+  // null fresco corta el prefijo — retiene TAMBIÉN los posteriores ya scrapeados (cursor monotónico)
+  sp = splitPendingScrape([r('a', '2026-08-31T02:00:00Z', { email: 'a@x' }), r('b', '2026-08-31T03:00:00Z', null), r('c', '2026-08-31T04:00:00Z', { email: 'c@x' })], NOW)
+  assert.equal(sp.send.length, 1, 'corta ANTES del primer pendiente')
+  assert.equal(sp.held, 2)
+  // {error} fresco también retiene (el retry >24h puede traer el dato)
+  sp = splitPendingScrape([r('a', '2026-08-31T03:00:00Z', { error: 'exec_hard_timeout' })], NOW)
+  assert.equal(sp.held, 1)
+  assert.equal(sp.send.length, 0)
+  // >24h sin scrape → sale igual (extensión muerta no calla el digest)
+  sp = splitPendingScrape([r('a', '2026-08-29T03:00:00Z', null)], NOW)
+  assert.equal(sp.held, 0)
+  assert.equal(sp.send.length, 1)
+  // lista vacía / null → no truena
+  assert.deepEqual(splitPendingScrape([], NOW), { send: [], held: 0 })
+  assert.deepEqual(splitPendingScrape(null, NOW), { send: [], held: 0 })
+}
+
 // startOfYesterdayIso: instante válido, entre 24h y 49h atrás (medianoche local de ayer)
 const since = new Date(startOfYesterdayIso('America/Mexico_City')).getTime()
 const ageH = (Date.now() - since) / 3_600_000
 assert.ok(ageH >= 24 && ageH <= 49, `startOfYesterdayIso fuera de rango: ${ageH.toFixed(1)}h`)
 
-console.log('✅ daily-digest OK (groupRows/buildDigestHtml/startOfYesterdayIso)')
+console.log('✅ daily-digest OK (groupRows/buildDigestHtml/splitPendingScrape/mxHour-medianoche)')
 
 // ── Modos con DB real ────────────────────────────────────────────────────────
 const arg = process.argv.find(a => a === '--dry-run' || a.startsWith('--send-to='))

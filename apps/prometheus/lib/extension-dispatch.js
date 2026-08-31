@@ -59,9 +59,14 @@ const DEFAULT_TZ = 'America/Mexico_City'
 
 export function mxTime(tz = DEFAULT_TZ) {
   const now = new Date()
+  // ⚠️ node ≤20 (ICU viejo): `hour12:false` en es-MX usa ciclo h24 ⇒ medianoche
+  // formatea "24", no "0". Sin el % 24, cualquier gate "mxHour >= H" abre a las
+  // 00:00 — el digest salió SEMANAS a medianoche por esto (31-ago-2026, prod
+  // node v20.20.2). En node ≥22 da "0" y el % 24 es no-op. Self-check en
+  // scripts/test-digest.js (corre la misma fórmula contra el ICU del node).
   const mxHour = parseInt(new Intl.DateTimeFormat('es-MX', {
     timeZone: tz, hour: 'numeric', hour12: false,
-  }).format(now))
+  }).format(now)) % 24
   const mxDay = new Intl.DateTimeFormat('es-MX', {
     timeZone: tz, weekday: 'long',
   }).format(now).toLowerCase()
