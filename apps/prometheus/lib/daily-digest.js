@@ -25,7 +25,7 @@ import { supabase } from './supabase.js'
 import { mxTime, mxDateStr } from './extension-dispatch.js'
 import { sendEmail } from './send-email.js'
 import { notifyOps } from './notify-ops.js'
-import { groupRows, buildDigestHtml, startOfYesterdayIso } from './digest-format.js'
+import { groupRows, buildDigestHtml, startOfYesterdayIso, splitPendingScrape } from './digest-format.js'
 
 const DEFAULT_SEND_HOUR = 7
 const DEFAULT_TZ = 'America/Mexico_City'
@@ -108,7 +108,8 @@ export async function maybeSendDailyDigest() {
   if (mxTime(tz).mxHour < sendHour) return { skipped: true, reason: 'too_early' }
 
   const since = state.high_water ?? startOfYesterdayIso(tz)
-  const rows = await fetchDigestRows(since)
+  const { send: rows, held } = splitPendingScrape(await fetchDigestRows(since))
+  if (held) console.log(`[digest] ${held} leads retenidos (scrape de contacto pendiente) — salen mañana con datos`)
   const total = rows.length
   const dateLabel = new Intl.DateTimeFormat('es-MX', {
     timeZone: tz, weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
@@ -170,7 +171,8 @@ export async function maybeSendCampaignDigests() {
       if (cs?.last_sent_date === today || _sentCampaignsMem[camp.id] === today) { skipped++; continue }  // ya enviado hoy
 
       const since = cs?.high_water ?? startOfYesterdayIso(tz)
-      const rows = await fetchDigestRows(since, camp.id)
+      const { send: rows, held } = splitPendingScrape(await fetchDigestRows(since, camp.id))
+      if (held) console.log(`[digest] "${camp.name}": ${held} leads retenidos (scrape pendiente) — salen mañana con datos`)
       const total = rows.length
 
       if (total === 0) {

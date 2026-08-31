@@ -79,6 +79,25 @@ export function flattenRows(groups) {
   return out.sort((a, b) => String(b.connected_at ?? '').localeCompare(String(a.connected_at ?? '')))
 }
 
+// Leads recién conectados cuyo scrape de contacto aún no corrió (contact_info null)
+// o quedó en error se RETIENEN: se envía solo el prefijo anterior al primero
+// retenido, para que el high-water no los rebase — mañana salen CON email/teléfono
+// en vez de hoy sin nada (31-ago-2026: 39 de 51 leads de Café 57 recibieron sus
+// datos DESPUÉS de su digest). El corte es prefijo, no filtro: el high-water es un
+// cursor monotónico sobre connected_at y saltar uno de en medio lo pierde para
+// siempre. A las 24h el lead sale tal cual esté — una extensión muerta no debe
+// callar el digest. `{}` (visitado, sin datos) NO retiene: ese es su estado final.
+// `rows` viene ascendente por connected_at (fetchDigestRows).
+export function splitPendingScrape(rows, now = Date.now()) {
+  const pending = r => {
+    const ci = r.contact_info
+    const sinScrape = ci == null || (typeof ci === 'object' && 'error' in ci)
+    return sinScrape && now - new Date(r.connected_at).getTime() < 86_400_000
+  }
+  const i = (rows ?? []).findIndex(pending)
+  return i === -1 ? { send: rows ?? [], held: 0 } : { send: rows.slice(0, i), held: rows.length - i }
+}
+
 function kpiCell(value, label, width) {
   return `<td width="${width}%" style="border:1px solid ${RULE};padding:16px 10px;text-align:center;vertical-align:middle">`
     + `<div style="font-family:${SANS};font-size:26px;font-weight:800;color:${RED};line-height:1.1">${esc(value)}</div>`

@@ -18,6 +18,36 @@
 
 ## ✅ Resuelto
 
+### 🕛 El digest salía a MEDIANOCHE, no a las 07:00 — el cliente recibía contactos sin datos  [31-ago-2026]
+
+Queja de semanas del cliente de Café 57 ("no llegan aun con datos completos") con causa raíz
+de reloj, no de scraper: **los datos SÍ se detectaban y SÍ se almacenaban** (147/173 conectados
+de su campaña con email/teléfono en DB), pero el digest llevaba semanas saliendo a las
+**00:00 CDMX** en vez de a las 07:00 — horas ANTES del scrape matinal de contactos. El
+high-water avanzaba y esos leads jamás se re-enviaban: **39 de 51 leads digesteados desde el
+13-ago recibieron sus datos DESPUÉS de su email** (76%).
+
+- **Causa raíz**: `Intl.DateTimeFormat` con `hour12:false` en el **node v20.20.2 de prod** usa
+  ciclo **h24** ⇒ medianoche formatea `"24"`. El gate del digest (`mxHour < send_hour` ⇒ skip)
+  daba `24 < 7 = false` y enviaba a las 00:00. En node ≥22 (laptop) da `"0"` — por eso nunca
+  se reprodujo en dev. Probado en ambos: `prod medianoche => 24`, laptop `=> 0`.
+- **Evidencia**: logs de prod `Tick @ sáb/dom/lun 12:00 a.m. CDMX` seguidos de
+  `📇 digests por-campaña enviados` 3 días seguidos; los 4 leads del screenshot del cliente
+  (conectados dom 20:50) digesteados lun 00:00 y scrapeados lun 06:17–06:40.
+- **Fix 1 (raíz)**: `% 24` al parsear `mxHour` en `mxTime` (`lib/extension-dispatch.js`) —
+  no-op en node ≥22. Los demás usos de `mxHour` (work/inbox-hours) quedaban bloqueados a
+  medianoche "por suerte" (24 fuera de todo rango) — sin cambio de comportamiento diurno.
+- **Fix 2 (anti-carrera)**: `splitPendingScrape` (`lib/digest-format.js`): el digest retiene
+  leads conectados hace <24h cuyo scrape no corrió (`contact_info` null) o quedó en `{error}`,
+  cortando por PREFIJO para no rebasar el high-water — salen al día siguiente CON datos.
+  `{}` (visitado, sin datos) no retiene. Cableado en digest global y per-campaña.
+- **Self-checks** en `scripts/test-digest.js` (encadenado a `npm run check`): la fórmula viva
+  de `mxHour` corrida contra el ICU del node (medianoche ⇒ 0) + 6 asserts de la retención.
+- **Remediación**: `scripts/diagnostics/remediation-digest-cafe57.js` — directorio consolidado
+  con los contactos ya completos para el cliente (dry-run / --send-to / --send). Enviado tras
+  aprobación del operador.
+- Pendiente estructural: el node de prod es v20 — subir a ≥22 mata la clase entera de bugs h24.
+
 ### 🔍 `wrong_page` en get_contact_info: diagnosticado + observabilidad (ext 0.10.41)  [30-ago-2026]
 
 Top error de la semana 23-29 ago: **24 `wrong_page`** en `get_contact_info` (~10% del scrape
