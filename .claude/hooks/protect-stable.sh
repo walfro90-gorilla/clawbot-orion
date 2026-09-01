@@ -14,9 +14,9 @@ import json, sys
 
 # archivo → ADRs que lo gobiernan (ver docs/adr/README.md, columna 'Gobierna')
 PROTECTED = {
-    'apps/prometheus/scheduler-extension.js':    ['0003', '0004', '0007'],
+    'apps/prometheus/scheduler-extension.js':    ['0003', '0004', '0007', '0009'],
     'apps/prometheus/lib/extension-dispatch.js': ['0003'],
-    'apps/prometheus/lib/ai-message.js':         ['0001'],
+    'apps/prometheus/lib/ai-message.js':         ['0001', '0009'],
     'apps/prometheus/extension-bridge.js':       ['0004', '0005', '0006'],
     'apps/orion-extension/background.js':        ['0001', '0002'],
     'apps/orion-extension/content.js':           ['0001', '0002'],
@@ -43,6 +43,7 @@ TITULOS = {
     '0005': 'Matar un lead para siempre solo si el contacto nos eliminó',
     '0006': 'La empresa y la geografía se verifican al ingerir, no en la URL de búsqueda',
     '0007': 'El picker de invitaciones ordena; filtrar es otra cosa',
+    '0009': 'Un dato de contacto solo se envía si venía en el prompt',
 }
 
 try:

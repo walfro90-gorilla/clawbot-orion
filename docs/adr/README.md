@@ -23,6 +23,7 @@ Registra **qué se eligió, qué se descartó y qué pasó cuando se intentó lo
 | [0006](0006-verificar-en-el-ingest.md) | La empresa y la geografía se verifican al ingerir, no en la URL de búsqueda | aceptado 11-ago-2026 | `extension-bridge.js`, `lib/company-match.js` |
 | [0007](0007-el-picker-ordena-no-filtra.md) | El picker de invitaciones ordena; filtrar es otra cosa | aceptado 26-ago-2026 | `lib/lead-score.js`, `scheduler-extension.js` |
 | [0008](0008-sin-framework-de-tests.md) | Sin framework de tests: seatbelt nativo y un self-check por incidente | aceptado 6-jul-2026 | `package.json`, `scripts/test-*.js`, `test/*.test.mjs` |
+| [0009](0009-contacto-solo-del-prompt.md) | Un dato de contacto solo se envía si venía en el prompt | aceptado 01-sep-2026 | `lib/ai-message.js`, `scheduler-extension.js` |
 
 ## Cuándo se escribe uno
 
