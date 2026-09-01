@@ -2769,7 +2769,11 @@ async function tick() {
 
     // AUTO-REPLY / FM (3.6) — antes que FU para no spamear con FU si ya respondió
     const replyRes = await tryAutoReplyForCampaign(campaign, account)
-    if (replyRes.dispatched) {
+    if (replyRes.exit) {
+      // El camino exit no trae fmStep/messagePreview — loggearlo con la plantilla FM
+      // imprimía "FMundefined ... undefined" y parecía un mensaje roto (01-sep-2026).
+      console.log(`[SCH-EXT]   💬 cierre cortés dispatched to ${replyRes.leadName} (exit: ${replyRes.reason})`)
+    } else if (replyRes.dispatched) {
       console.log(`[SCH-EXT]   💬 AI reply FM${replyRes.fmStep} dispatched to ${replyRes.leadName}: "${replyRes.messagePreview}..."`)
     } else if (replyRes.reason !== 'no_replies_pending' && replyRes.reason !== 'auto_reply_mode_off' && replyRes.reason !== 'auto_reply_mode_manual') {
       console.log(`[SCH-EXT]   ⏭️  auto-reply: ${replyRes.reason}`)
