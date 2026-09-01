@@ -1672,6 +1672,26 @@ async function tryAutoReplyForCampaign(campaign, account) {
         }
         continue  // próximo tick re-procesa este lead sin gastar gate
       }
+      // (01-sep) invented_contact: el lead pide un dato (teléfono, material) que la config
+      // NO tiene y el modelo lo inventa una y otra vez — reintentar cada tick es un loop
+      // silencioso. Pausar + alerta: un humano contesta con el dato real (o lo configura).
+      if (String(aiRes.error).startsWith('invented_contact')) {
+        await supabase.from('leads')
+          .update({ automation_paused: true, automation_paused_at: new Date().toISOString() })
+          .eq('id', lead.id)
+        console.warn(`[SCH-EXT]   📵 ${lead.full_name} → automation_paused: el modelo intentó inventar un dato de contacto (${aiRes.error})`)
+        try {
+          await supabase.from('account_alerts').insert({
+            linkedin_account_id: account.id,
+            campaign_id: campaign.id,
+            alert_type: 'manual_reply_needed',
+            severity: 'warning',
+            message: `${lead.full_name} pide un dato de contacto que no está configurado (la IA intentó inventarlo y se bloqueó) — contéstale a mano o configura cal_com_url/datos reales.`,
+            details: { lead_id: lead.id, error: String(aiRes.error).slice(0, 200) },
+          })
+        } catch { /* best-effort: la pausa es lo crítico */ }
+        continue
+      }
       console.warn(`[SCH-EXT]   AI reply gen failed (permanent): ${aiRes.error}`)
       // v0.7.13 P0-2: stamp insight para visibility — 403 perma no debe ser silencioso
       try {

@@ -98,6 +98,46 @@ export function isMetaOutput(text) {
   return REASONING_RE.some(re => re.test(t))
 }
 
+// (01-sep-2026) El FM le INVENTÓ un teléfono a un lead real ("+52 1 81 5555 1234" a
+// Jennifer Ferat cuando pidió número) y un link de calendario roto (calendly.com/cafe57/
+// 20min ×2, la cuenta tiene cal_com_url=null). Principio del guard: TODO dato de contacto
+// legítimo ya viene en el prompt (config de campaña, cal_com_url, historial del lead) —
+// un teléfono/email/URL en el output que NO aparece en el prompt es inventado.
+const CONTACT_PHONE_RE = /\+?\d[\d ()\-\.]{6,}\d/g
+const CONTACT_EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g
+const CONTACT_URL_RE = /https?:\/\/[^\s"')]+|www\.[^\s"')]+|\b[a-z0-9][a-z0-9-]*\.(?:com|mx|net|org|io|ai|co)\/[^\s"')]+/gi
+
+const _digits = s => String(s).replace(/\D/g, '')
+const _urlKey = s => String(s).toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').split('?')[0].replace(/[.,;:!?)]+$/, '')
+
+/** Devuelve el primer dato de contacto del texto que NO aparece en el corpus (= prompt), o null. */
+export function findUnapprovedContact(text, corpus) {
+  const t = String(text ?? '')
+  const c = String(corpus ?? '')
+  // Teléfonos: identidad = últimos 8 dígitos (los formatos varían: +52 1 81…, 81…, (81)…)
+  const corpusPhones = (c.match(CONTACT_PHONE_RE) ?? []).map(_digits).filter(d => d.length >= 8)
+  for (const m of t.match(CONTACT_PHONE_RE) ?? []) {
+    const d = _digits(m)
+    if (d.length < 8) continue  // fechas, horas, "20-30 min" no llegan a 8 dígitos
+    if (!corpusPhones.some(p => p.includes(d.slice(-8)))) return m.trim()
+  }
+  // Emails (se quitan del texto antes del scan de URLs: user@dominio.com no es un link)
+  const cLower = c.toLowerCase()
+  let rest = t
+  for (const m of t.match(CONTACT_EMAIL_RE) ?? []) {
+    rest = rest.replace(m, ' ')
+    if (!cLower.includes(m.toLowerCase())) return m
+  }
+  // URLs/dominios con path: legítimo si su base (sin query, el cal_url viaja con
+  // ?notes=LEAD_ID por lead) aparece en el prompt
+  const corpusUrls = (c.match(CONTACT_URL_RE) ?? []).map(_urlKey)
+  for (const m of rest.match(CONTACT_URL_RE) ?? []) {
+    const key = _urlKey(m)
+    if (!corpusUrls.some(u => u.includes(key) || key.includes(u))) return m.replace(/[.,;:!?)]+$/, '')
+  }
+  return null
+}
+
 const TYPE_RULES = {
   invite: {
     maxChars: 150,
@@ -225,6 +265,11 @@ export function calUrlWithLeadId(calUrl, leadId) {
 // puros ("Director de Operaciones") → sin esta regla Gemini podría inventar/usar el título
 // como si fuera el nombre de la empresa. La regex que lo evitaba vive en worker.js (MUERTO).
 const NO_INVENT_COMPANY_RULE = '🏢 EMPRESA: NUNCA inventes ni asumas el nombre de una empresa. Si el perfil NO incluye una línea "Empresa:" explícita, NO menciones ninguna empresa. NUNCA uses el cargo, título o rol de la persona (ej. "Director de Operaciones", "Gerente de Logística") como si fuera el nombre de su empresa — es un error grave.'
+
+// (01-sep-2026) Gemela de NO_INVENT_COMPANY_RULE tras el teléfono "+52 1 81 5555 1234"
+// inventado a un lead real. El guard determinista (findUnapprovedContact) es el candado;
+// esta regla reduce los retries quemados en outputs que igual se van a rechazar.
+const NO_INVENT_CONTACT_RULE = '📵 DATOS DE CONTACTO: NUNCA inventes teléfonos, emails, direcciones, links ni precios. Solo puedes compartir datos de contacto que aparezcan LITERALMENTE en estas instrucciones o en la conversación. NO prometas llamar, enviar material, presentaciones ni correos — tú solo conversas por este chat. Si te piden un dato que no tienes (ej. un teléfono), responde que se lo compartes en breve por este medio, sin inventarlo.'
 
 // (3-ago-2026) Políglota: el idioma lo marca el CONTACTO, no la campaña. Regla única
 // inyectada en los 3 caminos vivos con LLM (invite/FM/FU-LLM). El FU verbatim no pasa
@@ -377,6 +422,7 @@ export function buildSystemPrompt({ campaignPrompt, personaBlock, brainBlock, ty
   sections.push('', 'FORMATO DE RESPUESTA: SOLO el mensaje a enviar, texto plano. Sin comillas envolventes, sin prefijos tipo "Respuesta:", sin firma.')
   sections.push('', '🚫 PROHIBIDO: corchetes [ ], llaves { } o cualquier placeholder/instrucción de relleno (ej. "[menciona algo de su perfil]", "[Nombre]", "[empresa]"). Si te falta un dato del lead, OMÍTELO de forma natural — escribe la frase completa sin ese dato. El mensaje debe quedar 100% listo para enviarse tal cual, sin nada por rellenar.')
   sections.push('', NO_INVENT_COMPANY_RULE)
+  sections.push('', NO_INVENT_CONTACT_RULE)
   sections.push('', LANGUAGE_RULE)
   // Solo en replies: en invite/FU no hay mensaje del contacto que malinterpretar.
   if (String(type).startsWith('fm_reply')) sections.push('', WRONG_FIT_RULE)
@@ -651,6 +697,14 @@ async function callProvider(provider, systemPrompt, userPrompt, maxChars, opts) 
         if (attempt < retries) { await new Promise(r => setTimeout(r, 600)); continue }
         return { error: 'leftover_placeholder' }
       }
+      // 🛡️ GUARD ANTI-CONTACTO-INVENTADO: teléfono/email/URL que no venga del propio
+      // prompt (config + historial) es fabricado — jamás se envía. Ver findUnapprovedContact.
+      const invented = findUnapprovedContact(text, `${systemPrompt}\n${userPrompt}`)
+      if (invented) {
+        lastError = `invented_contact: ${invented.slice(0, 40)}`
+        if (attempt < retries) { await new Promise(r => setTimeout(r, 600)); continue }
+        return { error: `invented_contact: ${invented.slice(0, 40)}` }
+      }
       return { message: text }
     } catch (err) {
       lastError = err.message ?? String(err)
@@ -731,6 +785,7 @@ export async function personalizeFollowupMessage(campaign, lead, template, fuSte
     `- NO inventes datos numéricos (porcentajes, cifras).`,
     `- NO añadas información que no esté en el template o en el perfil del lead.`,
     `- ${NO_INVENT_COMPANY_RULE}`,
+    `- ${NO_INVENT_CONTACT_RULE}`,
     `- NO uses emojis a menos que el template original los tenga.`,
     `- NO incluyas tu firma o nombre.`,
     '',
