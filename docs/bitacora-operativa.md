@@ -18,6 +18,26 @@
 
 ## ✅ Resuelto
 
+### ⏸️ Caída #6 de Supabase: proyecto PAUSADO (~19 h) — y estreno verificado del fix del digest  [01-sep-2026]
+
+Distinta a las caídas #1-5: no fue sobrecarga sino **pausa administrativa** del proyecto
+(31-ago ~13:55 CDMX, minutos después del deploy de `dd83dc2`). `get_project` = `INACTIVE`,
+PostgREST respondía `Project paused. Please unpause the project before proceeding.`, Postgres
+directo en timeout. Sin email de Supabase con el motivo. El operador despausó desde el
+dashboard; recuperación observada 01-sep ~09:16 CDMX con esta secuencia (útil para la próxima):
+`000`/`503` → `PGRST002 Could not query the database for the schema cache. Retrying.`
+(PostgREST vivo, Postgres levantando) → `200`. Los 404 `PGRST205 Could not find the table` de
+esa ventana eran el cache vacío, NO pérdida de esquema.
+
+- **Sin pérdida de datos**: 2,686 leads, último accept 31-ago 11:56 CDMX intacto.
+- **Nada que reiniciar**: scheduler y bridge salieron solos del backoff; las 4 extensiones
+  reconectaron solas.
+- **Catch-up del digest funcionó como está diseñado**: el tick de las 09:20 envió el digest
+  del día (1/4 campañas con material) — primera corrida real post-fix a hora correcta, y la
+  retención estrenó: `"Transporte y Logística MX/US — Walfre": 1 leads retenidos (scrape
+  pendiente) — salen mañana con datos`.
+- Refuerza el pendiente #8: en Pro esta clase de pausa/estrangulamiento del Free desaparece.
+
 ### 🕛 El digest salía a MEDIANOCHE, no a las 07:00 — el cliente recibía contactos sin datos  [31-ago-2026]
 
 Queja de semanas del cliente de Café 57 ("no llegan aun con datos completos") con causa raíz
@@ -44,8 +64,9 @@ high-water avanzaba y esos leads jamás se re-enviaban: **39 de 51 leads digeste
 - **Self-checks** en `scripts/test-digest.js` (encadenado a `npm run check`): la fórmula viva
   de `mxHour` corrida contra el ICU del node (medianoche ⇒ 0) + 6 asserts de la retención.
 - **Remediación**: `scripts/diagnostics/remediation-digest-cafe57.js` — directorio consolidado
-  con los contactos ya completos para el cliente (dry-run / --send-to / --send). Enviado tras
-  aprobación del operador.
+  con los contactos ya completos para el cliente (dry-run / --send-to / --send). **Enviado
+  01-sep** tras la caída #6: 147 contactos con email/teléfono a 5 destinatarios (Resend
+  `bf3c96c2`), preview previo al buzón del operador.
 - Pendiente estructural: el node de prod es v20 — subir a ≥22 mata la clase entera de bugs h24.
 
 ### 🔍 `wrong_page` en get_contact_info: diagnosticado + observabilidad (ext 0.10.41)  [30-ago-2026]
