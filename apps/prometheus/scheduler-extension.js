@@ -1431,19 +1431,34 @@ async function tryAutoReplyForCampaign(campaign, account) {
       continue
     }
     // Rompe-loops de seguridad: un humano real no deja que le mandemos AUTO_REPLY_LOOP_CAP
-    // respuestas a un mismo hilo sin avanzar. Si pasa, es un loop → matar el lead.
+    // respuestas a un mismo hilo sin avanzar. Solo cuentan los outbound POSTERIORES al
+    // último inbound: un loop real es el bot insistiendo SIN respuesta. ⚠️ Bug 01-sep-2026:
+    // se contaba el hilo ENTERO (invite + FUs programados) ⇒ invite + 7 FUs = 8 ⇒ el PRIMER
+    // reply humano de cualquier lead que llegara al FU7 disparaba "loop" y lo pausaba en
+    // silencio (9 leads mudos, caso Jennifer Ferat / Ali Cisneros).
     const { count: convOutbound } = await supabase
       .from('conversation_events')
       .select('id', { count: 'exact', head: true })
       .eq('conversation_id', conv.id)
       .eq('direction', 'outbound')
+      .gt('sent_at', lastInbound.sent_at)
     if ((convOutbound ?? 0) >= AUTO_REPLY_LOOP_CAP) {
       // PAUSAR (no matar): puede ser una conversación real atascada. Reversible y
       // visible en CRM (badge "AUTOMATIZACIÓN PAUSADA") para que el humano revise.
       await supabase.from('leads')
         .update({ automation_paused: true, automation_paused_at: new Date().toISOString() })
         .eq('id', lead.id)
-      console.log(`[SCH-EXT]   🛑 ${lead.full_name} → automation_paused: auto-reply loop (${convOutbound} outbound a un hilo) — revisar en CRM`)
+      console.log(`[SCH-EXT]   🛑 ${lead.full_name} → automation_paused: auto-reply loop (${convOutbound} outbound sin respuesta) — revisar en CRM`)
+      try {
+        await supabase.from('account_alerts').insert({
+          linkedin_account_id: account.id,
+          campaign_id: campaign.id,
+          alert_type: 'manual_reply_needed',
+          severity: 'warning',
+          message: `${lead.full_name}: automatización pausada por posible loop de auto-reply (${convOutbound} mensajes sin respuesta) — revisa el hilo y contéstale a mano.`,
+          details: { lead_id: lead.id, reason: 'auto_reply_loop_cap' },
+        })
+      } catch { /* best-effort: la pausa es lo crítico */ }
       continue
     }
 
