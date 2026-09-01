@@ -11,7 +11,7 @@ import assert from 'node:assert/strict'
 process.env.SUPABASE_URL ||= 'https://selfcheck.supabase.co'
 process.env.SUPABASE_SERVICE_ROLE_KEY ||= 'selfcheck-key-not-real'
 
-const { isMetaOutput, inboundRoleBlock, buildSystemPrompt, resolveProvider } = await import('../lib/ai-message.js')
+const { isMetaOutput, inboundRoleBlock, buildSystemPrompt, resolveProvider, findUnapprovedContact } = await import('../lib/ai-message.js')
 
 // ── 0. Rarezas por proveedor que NO se pueden "limpiar" sin romper el envío ─────
 // Kimi devuelve 400 con cualquier temperature != 1, y sus tokens de razonamiento se
@@ -102,4 +102,29 @@ assert.ok(promptReply.trimEnd().endsWith(rec.trimEnd()), 'el bloque de rol va al
 const promptFu = buildSystemPrompt({ type: 'follow_up_1', roleBlock: rec })
 assert.ok(!promptFu.includes(PERFIL.github_url), 'un FU outbound NUNCA lleva el bloque de rol')
 
-console.log('✅ test-reply-guards: anti-meta + rol del inbound (recruiter/vendor/prospect) OK')
+// ── 5. Guard anti-contacto-inventado (01-sep-2026: "+52 1 81 5555 1234" a Jennifer) ─
+// El corpus del guard = system+user prompt: todo dato legítimo YA viene ahí.
+const CORPUS = [
+  'LINK DE CALENDARIO: https://cal.com/jorge-joshua-sanchez-dominguez-8mtqse/30min?notes=LEAD_ID%3Dabc',
+  'Historial: [lead] Gracias, favor de mándame email con tu Company Profile a carmedina@borgwarner.com',
+  'Datos: tel comercial +52 81 1234 5678.',
+].join('\n')
+
+// El caso real: teléfono placeholder inventado → detectado
+assert.equal(findUnapprovedContact('Mi número es +52 1 81 5555 1234; llámame.', CORPUS), '+52 1 81 5555 1234')
+// El caso real #2: calendly fabricado con el nombre de la empresa → detectado
+assert.ok(findUnapprovedContact('Reserva en https://calendly.com/cafe57/20min.', CORPUS))
+// Teléfono que SÍ está en la config pasa, aunque cambie el formato
+assert.equal(findUnapprovedContact('Márcanos al 81-1234-5678 cuando gustes.', CORPUS), null)
+// Email que el LEAD dio en el hilo se puede repetir
+assert.equal(findUnapprovedContact('Te envío el profile a carmedina@borgwarner.com.', CORPUS), null)
+// Email inventado → detectado
+assert.equal(findUnapprovedContact('Escríbeme a ventas@cafe57.mx.', CORPUS), 'ventas@cafe57.mx')
+// El cal_url configurado pasa con sus parámetros por-lead
+assert.equal(findUnapprovedContact('Agenda aquí: https://cal.com/jorge-joshua-sanchez-dominguez-8mtqse/30min?notes=LEAD_ID%3Dabc', CORPUS), null)
+// Cifras normales de un DM NO son teléfonos: horas, rangos, años, porcentajes
+assert.equal(findUnapprovedContact('¿Te parece 20-30 min el jueves a las 11:00? Llevamos desde 2001, 99% a tiempo.', CORPUS), null)
+// Texto sin datos de contacto pasa limpio
+assert.equal(findUnapprovedContact('Jennifer, hacemos ambos: cruces México-EE UU y doméstico.', CORPUS), null)
+
+console.log('✅ test-reply-guards: anti-meta + rol del inbound (recruiter/vendor/prospect) + anti-contacto-inventado OK')
