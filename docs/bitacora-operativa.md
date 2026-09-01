@@ -66,7 +66,11 @@ high-water avanzaba y esos leads jamás se re-enviaban: **39 de 51 leads digeste
 - **Remediación**: `scripts/diagnostics/remediation-digest-cafe57.js` — directorio consolidado
   con los contactos ya completos para el cliente (dry-run / --send-to / --send). **Enviado
   01-sep** tras la caída #6: 147 contactos con email/teléfono a 5 destinatarios (Resend
-  `bf3c96c2`), preview previo al buzón del operador.
+  `bf3c96c2`), preview previo al buzón del operador. Mismo día, generalizado por
+  `--campaign` (`cad049f`, renombrado a `remediation-digest.js`) y enviado a las otras 3
+  campañas: Wal 111/118 contactos (1 dest., `d79da15d`), Infinity 24/26 (2 dest.,
+  `eae9da2b`), Josh/CEOs 215/265 (2 dest., `06be91c9`) — 3 leads de Josh salen con link
+  SalesNav (su fuente original), válido.
 - Pendiente estructural: el node de prod es v20 — subir a ≥22 mata la clase entera de bugs h24.
 
 ### 🔍 `wrong_page` en get_contact_info: diagnosticado + observabilidad (ext 0.10.41)  [30-ago-2026]
