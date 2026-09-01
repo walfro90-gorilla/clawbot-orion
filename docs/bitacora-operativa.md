@@ -18,6 +18,37 @@
 
 ## ✅ Resuelto
 
+### 📵 La IA le INVENTÓ un teléfono a un lead — guard anti-contacto-inventado  [01-sep-2026, `ebf9554`]
+
+Jennifer Ferat pidió "pásame tu número" y el FM respondió con **`+52 1 81 5555 1234`**
+(placeholder fabricado — cero teléfonos en TODA la config de Café 57). Auditoría de los
+últimos 1,000 outbound destapó el segundo: **`calendly.com/cafe57/20min`** (×2 a Carlos
+Medina), link fabricado con el nombre de la empresa que da **404** — la cuenta tiene
+`cal_com_url=null`. Mismo patrón: el lead pide teléfono/cita/material, la config no tiene
+el dato real, el pitch empuja a cerrar y el modelo rellena el hueco.
+
+Fix en 3 capas (self-checks con los dos casos reales en `scripts/test-reply-guards.js`):
+1. **Guard determinista `findUnapprovedContact`** en `callProvider` (chokepoint de
+   invite/FU-LLM/FM): todo dato legítimo YA viene en el prompt (config de campaña,
+   `cal_com_url`, historial del lead) ⇒ teléfono/email/URL del output que no esté en el
+   prompt es fabricado. Retry → error `invented_contact` → template seguro o no se envía.
+   Teléfonos por identidad de últimos 8 dígitos; URLs por base sin query (el cal_url viaja
+   con `?notes=LEAD_ID`); los datos que el lead dio en el hilo sí se pueden repetir.
+2. **`NO_INVENT_CONTACT_RULE`** (gemela de `NO_INVENT_COMPANY_RULE`) en los 3 caminos:
+   tampoco prometer llamadas/materiales/correos que el bot no puede cumplir ("lamento no
+   haberte llamado aún", "te envío el company profile", "envío la presentación" — casos
+   reales de esta auditoría).
+3. En FM, `invented_contact` **pausa el lead + alerta `manual_reply_needed`** en vez de
+   reintentar en silencio cada tick: si el lead pide un dato que la config no tiene, lo
+   resuelve un humano.
+
+Remediación: **Josh contacta a mano a los 3 afectados** (Jennifer: número falso; Carlos:
+link roto ×2 + company profile prometido; Jorge A. L.: presentación prometida) — los 3
+quedaron `automation_paused` para que el bot no le choque; la alerta de paused-reply avisa
+si contestan. Pendiente de datos: `cal_com_url` + teléfono/email comercial reales de
+Café 57 y Rosy (Josh y Wal ya lo tienen). Hallazgo lateral: la persona de Café 57 tiene
+26k chars pero solo se inyectan 2,000 (cap anti-bloat) — destilarla.
+
 ### 🔇 9 leads que respondieron quedaron MUDOS: el rompe-loops contaba los FUs como "loop"  [01-sep-2026, `d242ef9` + `a15d288`]
 
 Queja del cliente de Café 57 ("responde mal / no sigue la conversación") con 3 screenshots.
