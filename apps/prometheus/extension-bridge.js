@@ -2186,7 +2186,7 @@ async function ingestCheckInbox(commandId, conversations) {
   // 2. Cargar leads activos de la cuenta para matchear
   const { data: leads } = await supabase
     .from('leads')
-    .select('id, full_name, status, linkedin_url, dead_reason, campaigns!inner(linkedin_account_id)')
+    .select('id, full_name, status, linkedin_url, dead_reason, automation_paused, campaign_id, campaigns!inner(linkedin_account_id)')
     .eq('campaigns.linkedin_account_id', cmd.account_id)
     .in('status', ['invite_sent', 'connected', 'follow_up_sent', 'replied'])
 
@@ -2463,6 +2463,22 @@ async function ingestCheckInbox(commandId, conversations) {
             content:         snippetTrimmed.slice(0, 4000),
             sent_at:         new Date().toISOString(),
           })
+        }
+
+        // Lead PAUSADO (manual desde CRM, rompe-loops, reclutador…) → el auto-reply no lo
+        // toca y sin esta alerta su reply muere en silencio: "Hola Edgar me interesa"
+        // esperó 6 días sin que nadie lo viera (caso Jorge Sanchez, 01-sep-2026).
+        // El dedup de arriba (alreadyRecorded) garantiza 1 alerta por mensaje nuevo.
+        if (lead.automation_paused) {
+          const { error: alertErr } = await supabase.from('account_alerts').insert({
+            linkedin_account_id: cmd.account_id,
+            campaign_id: lead.campaign_id,
+            alert_type: 'manual_reply_needed',
+            severity: 'warning',
+            message: `${lead.full_name} respondió pero su automatización está PAUSADA — contéstale a mano en LinkedIn.`,
+            details: { lead_id: lead.id, snippet: snippetTrimmed.slice(0, 200) },
+          })
+          if (alertErr) console.error(`[bridge] alerta paused-reply falló (${lead.full_name}): ${alertErr.message}`)
         }
 
         newReplies.push({ lead: lead.full_name, snippet: snippetTrimmed.slice(0, 100), threadId: convo.threadId })
