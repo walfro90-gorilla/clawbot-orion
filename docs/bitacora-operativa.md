@@ -18,6 +18,44 @@
 
 ## ✅ Resuelto
 
+### 🔇 9 leads que respondieron quedaron MUDOS: el rompe-loops contaba los FUs como "loop"  [01-sep-2026, `d242ef9` + `a15d288`]
+
+Queja del cliente de Café 57 ("responde mal / no sigue la conversación") con 3 screenshots.
+El diagnóstico real: **no respondía mal — no respondía NADA**. Tres causas encadenadas:
+
+- **Bug (raíz)**: el rompe-loops del auto-reply (`AUTO_REPLY_LOOP_CAP=8`) contaba TODOS los
+  outbound del hilo — invite + follow-ups programados — en vez de solo las respuestas del
+  bot sin avance. Con secuencias de 7+ FUs: invite + 7 FUs = 8 ⇒ **el PRIMER reply humano
+  de cualquier lead que llegara al FU7 disparaba "loop"** y lo pausaba a los 4-5 min, en
+  silencio (solo console.log, cero alertas). 9 leads mudos: Jennifer Ferat (pausada 5 min
+  después de escribir "pásame tu teléfono"), Ali Cisneros ("Tienes capacidad en USA?"
+  esperó 27 días), Jerry, Manuel, Jorge A. L., Victoria, Rafael, Miguel, Esteban.
+  **Fix**: contar solo outbound POSTERIORES al último inbound (`.gt('sent_at',
+  lastInbound.sent_at)`) — un loop real es el bot insistiendo sin respuesta; 7 FUs + 1
+  reply humano es un éxito, no un loop.
+- **Hueco de proceso**: Jorge Sanchez lo pausó A MANO el cliente desde el CRM (16-ago,
+  legítimo) y cuando el lead escribió "Hola Edgar me interesa" (26-ago) **nadie se enteró**:
+  no existía alerta de "reply en lead pausado". **Fix**: alerta `manual_reply_needed` en el
+  ingest del bridge cuando llega reply a lead con `automation_paused=true`, y también al
+  pausar por rompe-loops.
+- **Log engañoso**: el camino exit loggeaba `AI reply FMundefined … "undefined"` como si
+  se hubiera enviado un mensaje roto — era solo el log (el mensaje real era el cierre
+  cortés, verificado en `extension_commands.payload`). Corregido (`a15d288`).
+
+**Remediación (aprobada "despausalos e intenta de nuevo")**: los 9 despausados tras el
+deploy; a los 7 con reply fuera de la ventana `fm_max_age=7d` se les refrescó `replied_at`
+(sin tocar el historial real de `conversation_events`) — despausarlos a secas los habría
+matado el sweep `REPLIED_STALE_KILL_DAYS=21`. Resultado verificado por comando
+(`sent_confirmed`): **5 contestados con sustancia** (Ali capacidad USA, Jennifer
+crossborder+doméstico, Manuel, Miguel, Jorge A. L.) y **4 cerrados cortésmente por el
+exit-sensor** (Victoria, Rafael, Jerry, Esteban — habían declinado). Cero re-pausas con el
+fix vivo (Ali tiene 12 outbound históricos y pasó limpio).
+
+⚠️ Acciones humanas que quedaron: (1) el bot le prometió a **Jorge A. L.** enviarle "la
+presentación a ambos correos" — alguien tiene que mandarla de verdad; (2) **Jorge Sanchez**
+sigue pausado por decisión del cliente y su "me interesa" (26-ago) sigue sin contestar —
+avisar a Café 57 para que lo conteste a mano.
+
 ### ⏸️ Caída #6 de Supabase: proyecto PAUSADO (~19 h) — y estreno verificado del fix del digest  [01-sep-2026]
 
 Distinta a las caídas #1-5: no fue sobrecarga sino **pausa administrativa** del proyecto
