@@ -1197,6 +1197,35 @@ async function ingestCheckSentInvites(commandId, pending, statedTotal = null) {
     .single()
   if (!cmd?.account_id) return
 
+  // 👻 Detector de invites fantasma (pendiente desde el caso Josh 8-ago; el de 28-ago
+  // tardó 4 días en verse porque lo reportó el cliente): si la cuenta "envió" ≥5 invites
+  // en 24h y el contador de LinkedIn (statedTotal) no subió, los envíos NO están entrando
+  // — cuenta descartada en silencio, o loop de duplicados. El cierre de modal no prueba
+  // envío; statedTotal sí. Umbral 5: accepts del día pueden comerse 1-2 de subida real.
+  if (Number.isFinite(statedTotal)) {
+    try {
+      const since = new Date(Date.now() - 24 * 3_600_000).toISOString()
+      const [{ count: sends24h }, { data: prevCheck }] = await Promise.all([
+        supabase.from('extension_commands')
+          .select('id', { count: 'exact', head: true })
+          .eq('account_id', cmd.account_id).eq('action', 'send_invite')
+          .eq('status', 'completed').gt('created_at', since),
+        supabase.from('extension_commands')
+          .select('result').eq('account_id', cmd.account_id)
+          .eq('action', 'check_sent_invites').eq('status', 'completed')
+          .lt('created_at', since)
+          .order('created_at', { ascending: false }).limit(1).maybeSingle(),
+      ])
+      const prevTotal = prevCheck?.result?.statedTotal
+      if ((sends24h ?? 0) >= 5 && Number.isFinite(prevTotal) && statedTotal <= prevTotal) {
+        console.warn(`[bridge] 👻 GHOST INVITES cuenta ${cmd.account_id.slice(0,8)}: ${sends24h} invites "sent" en 24h y statedTotal ${prevTotal}→${statedTotal} — los envíos NO están entrando`)
+        notifyOps('ghost_invites', `${sends24h} invites "enviados" en 24h y el contador de LinkedIn no sube (${prevTotal}→${statedTotal}) — envíos descartados o loop de duplicados`, { extra: { accountId: cmd.account_id, sends24h, prevTotal, statedTotal } }).catch(() => {})
+      }
+    } catch (err) {
+      console.warn(`[bridge] ghost-invite check falló: ${err.message}`)
+    }
+  }
+
   // Cargar leads invite_sent de campañas de esta cuenta.
   // Excluimos leads marcados con flag detected_not_first_degree para evitar
   // ping-pong (un FU detectó 2do grado y revirtió → no re-marcar como connected).
@@ -2109,8 +2138,36 @@ async function ingestSendInvite(commandId, result) {
   // funcionan (antes quedaba /sales/lead/ y el FU entraba en loop).
   const updatePayload = { status: 'invite_sent', sent_at: new Date().toISOString() }
   const resolvedIn = result?._debugRedirect?.resolvedInUrl
-  if (resolvedIn && /linkedin\.com\/in\//.test(resolvedIn)) updatePayload.linkedin_url = resolvedIn
-  await supabase.from('leads').update(updatePayload).eq('id', leadId)
+  if (resolvedIn && /linkedin\.com\/in\//.test(resolvedIn)) {
+    // (02-sep-2026, caso Josh) Si OTRA fila de la misma campaña ya posee ese /in/, esta
+    // fila es un DUPLICADO del search SalesNav (el dedup del ingest compara URL exacta y
+    // /sales/lead/… nunca matchea /in/…). Antes: el update de abajo chocaba con el UNIQUE
+    // y moría en silencio → la fila seguía 'scraped' → el picker la re-elegía cada slot →
+    // 12 invites/día quemados 4 días seguidos en 5 personas ya conectadas/invitadas
+    // (statedTotal plano en 189 — LinkedIn no crea nada al re-invitar a un conectado).
+    const { data: self } = await supabase
+      .from('leads').select('campaign_id').eq('id', leadId).maybeSingle()
+    const { data: original } = self?.campaign_id ? await supabase
+      .from('leads').select('id, status')
+      .eq('campaign_id', self.campaign_id).eq('linkedin_url', resolvedIn)
+      .neq('id', leadId).limit(1).maybeSingle() : { data: null }
+    if (original) {
+      await supabase.from('leads')
+        .update({ status: 'dead', dead_reason: 'duplicate_salesnav_row' }).eq('id', leadId)
+      console.warn(`[bridge] 🧬 lead ${leadId.slice(0,8)} es DUPLICADO de ${original.id.slice(0,8)} (${original.status}) vía ${resolvedIn} → dead(duplicate_salesnav_row)`)
+      notifyOps('duplicate_invite_loop', `invite a duplicado SalesNav detectado y matado (el original está en '${original.status}')`, { extra: { leadId, originalId: original.id } }).catch(() => {})
+      return
+    }
+    updatePayload.linkedin_url = resolvedIn
+  }
+  const { error: updErr } = await supabase.from('leads').update(updatePayload).eq('id', leadId)
+  if (updErr) {
+    // NUNCA dejar la fila sin marcar en silencio: sin 'invite_sent' el picker re-invita en loop.
+    console.error(`[bridge] ❌ send_invite update falló (${updErr.message}) — reintento sin linkedin_url`)
+    const { error: retryErr } = await supabase.from('leads')
+      .update({ status: 'invite_sent', sent_at: updatePayload.sent_at }).eq('id', leadId)
+    if (retryErr) console.error(`[bridge] ❌ send_invite update reintento también falló: ${retryErr.message}`)
+  }
 
   // Incrementar daily_activity (CDMX date-aligned vía RPC)
   // RPC error capture (2026-05-29 fix): visibilidad si counter silenciosamente falla.
