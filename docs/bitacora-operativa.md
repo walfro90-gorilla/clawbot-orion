@@ -18,6 +18,30 @@
 
 ## ✅ Resuelto
 
+### ⚙️ Caída #7 (02:30 CDMX, ~8h): "ya es Pro" pero el COMPUTE seguía siendo el mismo — resuelta subiendo a Micro  [02-sep-2026]
+
+Misma firma que #1/#3/#4 (madrugada muerta, PostgREST timeout, Postgres directo instantáneo,
+checkpoint `wrote 3 buffers... total=31.71 s`), pero con lección nueva: **el plan Pro NO
+cambia el compute**. Pro compró backups y sin-pausas; el motor siguió en el compute mínimo
+(add-on separado) y el banner del dashboard lo decía literal: "Upgrade your compute".
+Disparador probable de las 02:30: el pico de DISK IO de un job de plataforma (candidato:
+primer backup diario del Pro estrenado la víspera) sobre un compute que no da.
+
+**Cerrada también la medición pendiente del 20-ago** (reparto de CPU en estado
+estacionario, por fin con 24h limpias de uptime): TODO nuestro SQL = **12.7 minutos de
+ejecución en 24h = 0.9% de un core** (la query más cara, la lista del CRM: 2.26 min/24h,
+646 llamadas). El CPU al 100% es plataforma + tamaño de instancia; optimizar queries no
+mueve esa aguja. ⚠️ En Postgres 17 `pg_stat_statements` se consulta como
+`extensions.pg_stat_statements` (sin schema da "does not exist" — no está en el search_path
+del MCP).
+
+Fix: operador subió compute a **Micro** (Settings → Compute and Disk, restart ~2 min).
+Recuperación verificada: REST 200/185ms estable, 4 extensiones reconectaron solas, digest
+catch-up enviado, cero intervención en procesos (el breaker contuvo, como diseñado).
+Criterio de suficiencia: 48h de panel — CPU <50% estable ⇒ Micro alcanza; >70% sostenido o
+una caída más ⇒ Small. Cada cliente nuevo empuja el suelo (la curva de la Nano despegó el
+día que entró la 4ª cuenta).
+
 ### 👻 "Josh invita 8/día" pero LinkedIn no ve ninguno: loop de duplicados SalesNav quemándose TODO el cupo  [01-sep-2026, `24a8a26`]
 
 Reporte del cliente: el popup decía "Hoy 8 invites" pero su lista de enviadas de LinkedIn
@@ -45,7 +69,9 @@ este episodio tardó 4 días en verse porque lo reportó el cliente. Remediació
 duplicados muertos a mano; auditoría por nombre en la campaña = cero duplicados vivos
 restantes (los 8 `scraped` SalesNav en cola no tienen homónimo `/in/`). El
 `search_limit_reached` del screenshot era real pero independiente (tope mensual, se
-reseteó el 1-sep).
+reseteó el 1-sep). **Verificado end-to-end el 02-sep**: primer invite post-fix fue a
+persona real (Cesar Avelar, marcado `invite_sent` con `sent_at`) y `statedTotal`
+despegó **189 → 190** — los invites de Josh ENTRAN otra vez.
 
 ### 📵 La IA le INVENTÓ un teléfono a un lead — guard anti-contacto-inventado  [01-sep-2026, `ebf9554`]
 
