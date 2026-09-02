@@ -18,6 +18,35 @@
 
 ## ✅ Resuelto
 
+### 👻 "Josh invita 8/día" pero LinkedIn no ve ninguno: loop de duplicados SalesNav quemándose TODO el cupo  [01-sep-2026, `24a8a26`]
+
+Reporte del cliente: el popup decía "Hoy 8 invites" pero su lista de enviadas de LinkedIn
+llevaba 4 días sin un invite nuevo. **Los dos tenían razón.** La cadena, con evidencia:
+
+1. **La búsqueda SalesNav re-insertó como leads nuevos a 5 personas que YA existían** por
+   su URL `/in/` (2 CONECTADAS desde julio, 3 con invite real pendiente) — el dedup del
+   ingest compara `linkedin_url` exacta y `/sales/lead/ACwAAA…` nunca matchea `/in/…`.
+2. El picker eligió los duplicados (`scraped`, score alto). Al re-invitar a un conectado
+   LinkedIn **no crea invitación** (el modal cierra igual ⇒ `sent/modal_closed`):
+   `statedTotal` plano en 189 cuatro días mientras las otras 3 cuentas subían normal.
+3. **La pistola humeante**: `ingestSendInvite` marcaba `invite_sent` + persistía el `/in/`
+   resuelto SIN chequear el error del update — chocaba con el UNIQUE de la fila original y
+   moría en silencio ⇒ la fila seguía `scraped` ⇒ re-elegida cada slot. **Jorge Moura: 12
+   comandos "sent" en 5 días.** Los 12 invites/día de Josh del 28-ago al 01-sep fueron
+   TODOS a las mismas 5 personas. `daily_activity` sí incrementaba ⇒ el "8 invites" del
+   popup.
+
+Fixes (`24a8a26`): (a) `ingestSendInvite` detecta el duplicado al resolver el `/in/`
+(otra fila de la campaña ya lo posee ⇒ `dead(duplicate_salesnav_row)` + alerta, 1 intento
+máximo, no loop) y el update de `invite_sent` **ya chequea error** con retry sin
+`linkedin_url`; (b) detector 👻 `ghost_invites` en `ingestCheckSentInvites`: ≥5 invites
+"sent" en 24h con `statedTotal` sin subir ⇒ notifyOps — pendiente desde el caso 8-ago;
+este episodio tardó 4 días en verse porque lo reportó el cliente. Remediación: los 5
+duplicados muertos a mano; auditoría por nombre en la campaña = cero duplicados vivos
+restantes (los 8 `scraped` SalesNav en cola no tienen homónimo `/in/`). El
+`search_limit_reached` del screenshot era real pero independiente (tope mensual, se
+reseteó el 1-sep).
+
 ### 📵 La IA le INVENTÓ un teléfono a un lead — guard anti-contacto-inventado  [01-sep-2026, `ebf9554`]
 
 Jennifer Ferat pidió "pásame tu número" y el FM respondió con **`+52 1 81 5555 1234`**
