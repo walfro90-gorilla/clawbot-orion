@@ -18,6 +18,33 @@
 
 ## ✅ Resuelto
 
+### 🏭 "¿Subir los límites de Infinity?" — el freno no eran los límites: 61 empresas con URN varado desde antes del fix 0.10.31  [02-sep-2026]
+
+Pedido del operador: más volumen para Aduanas Infinity (cuenta Rosy). El diagnóstico dio
+la vuelta completa: cap efectivo era min(target 12, **override cuenta 8**, rampa 18) = 8,
+pero Rosy enviaba 1-7/día con solo **4 leads invitables** en cola — el freno era la
+COSECHA, no el cap. Causas de la sequía: (a) Rosy también agotó el **tope MENSUAL del
+buscador free** (`search_limit_reached` 29-31 ago, reset día 1 — igual que Josh); (b) las
+búsquedas degradadas rendían 0-6 perfiles porque **11 de sus 44 empresas estaban
+`unresolved` sin URN — y eran los peces gordos** (BMW, GM de México, BYD, Mazda,
+thyssenkrupp Presta): quedaron varadas ANTES del fix del resolver (ext 0.10.31, 21-ago,
+URN desde la página de empresa) y `unresolved` es terminal — nada las re-encola.
+
+Aplicado:
+- Rosy: `daily_connection_limit` 8→**12**, `warmup_status` cold→**warm** — lo segundo
+  desactiva la **bomba del día 30** (12-sep): la rampa expira a null y el cap habría
+  colapsado a `cold=5` (el cliff que estranguló a Wal en julio, fix nunca aplicado).
+- **Requeue de las `unresolved`** (`status='pending', resolve_attempts=0`): 11 de
+  Infinity + 22 de Café 57 + 28 de Josh = **61 empresas**. Primer lote verificado en
+  ~6 min: Infinity **6/11 URNs conseguidos (39/44 ready)**, Café 7/12, Josh 1/12 (siguen
+  lotes de 12/tick). Con URN el facet nativo reemplaza al "nombre exacto" decorativo.
+- Censo anti-cliff del resto: Café warming/82d/12, Josh hot/172d/25, Wal warming/103d/18
+  (nota: el legacy `warming` capa a Wal en 12 aunque su límite diga 18 — subir a `warm`
+  si se quiere usar el 18).
+
+La palanca que queda es de negocio: **SalesNav para Rosy** mata el tope mensual del
+buscador free y ve la plantilla completa.
+
 ### ⚙️ Caída #7 (02:30 CDMX, ~8h): "ya es Pro" pero el COMPUTE seguía siendo el mismo — resuelta subiendo a Micro  [02-sep-2026]
 
 Misma firma que #1/#3/#4 (madrugada muerta, PostgREST timeout, Postgres directo instantáneo,
