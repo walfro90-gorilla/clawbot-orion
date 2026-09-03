@@ -18,6 +18,56 @@
 
 ## ✅ Resuelto
 
+### 🚪 "¿Por qué Rosy no envía invites?" — tenía 7 leads en cola y el whitelist rechazaba a los 7  [03-sep-2026]
+
+Reporte del operador. **No era anti-ban ni la cuenta**: `active`, warm, **0 de 12 invites
+usados**, sin `invites_paused_until`, sin pausa de extensión, ext 0.10.41 vista minutos
+antes, y el gap de 90 min llevaba 10 h cumplido (último invite 00:47Z, Karla Rivera).
+
+El picker moría en `no_leads_pass_whitelist`: los **7 leads `scraped` fallaban el filtro de
+títulos**. Cinco eran rechazos correctos (RH, turismo, ingeniería de procesos, analista de
+demanda, relaciones laborales). **Dos eran fallas nuestras:**
+
+| Lead | Headline | Por qué se caía |
+|---|---|---|
+| Florentino Martínez | `Material Planner at Thyssenkrupp Metalúrgica` | whitelist traía `materiales`/`materials`, **no `material`** — se perdía por una "s" |
+| Verónica Zavala | `--` | el placeholder de LinkedIn; el guard de "sin headline" comparaba `length === 0` |
+
+El segundo es el interesante y era **bug de código, no de config**: `passesTitleFilters`
+perdona a propósito el headline vacío (la query de búsqueda ya filtró por puesto), pero
+LinkedIn renderiza `--` cuando el perfil no tiene titular y el scraper lo guarda literal
+⇒ un lead **SIN dato quedaba peor tratado que uno sin el campo**. Ahora "sin letras ni
+dígitos" = sin headline. 4 leads así en toda la DB.
+
+**Y el suministro se estrangulaba solo.** El requeue del 02-sep sí funcionó (**39 de 44
+empresas con URN**, facet nativo, búsqueda buena). El problema es el rendimiento: 02-sep =
+9 búsquedas → 16 perfiles → 12 leads → **5** pasan whitelist → 4 invites; 03-sep = 3
+búsquedas → 3 perfiles → 0 leads nuevos. Solo **34% de lo que entra pasa el whitelist**
+(14 de 41 leads en 7 días) porque con facet LinkedIn free devuelve la plantilla de la
+empresa y el keyword de puesto no filtra fuerte. Encima `dry_search_streak=4` tenía el
+backoff en su tope: **6 h entre búsquedas**. Sequía → menos búsquedas → menos leads.
+
+**Aplicado (`79d592b`, prod `3ac7276`, scheduler + bridge reiniciados):**
+1. **Whitelist de Infinity** (DB, sin deploy): `materiales`+`materials` → **`material`** —
+   el substring cubre las tres formas. 31→30 términos. Era la única campaña con el hueco.
+2. **`passesTitleFilters`**: placeholder = sin headline. Self-check nuevo
+   `scripts/test-title-filters.js` (16 checks) encadenado a `npm run check`.
+3. **Backoff de drought: cap 360→180 min.** El streak es POR CAMPAÑA pero la sequía es por
+   combinación **empresa×puesto**: con 45 empresas y 24 puestos, 4 búsquedas secas no dicen
+   nada del siguiente par. ⚠️ El techo duro de LinkedIn **no lo pone este backoff** —
+   `search_limit_reached` ya pausa 24 h y alerta, así que bajarlo no quema el cupo mensual
+   en silencio.
+
+**Efecto medido al instante**: el pool invitable pasó de **0 a 2** (Florentino por
+`material`, Verónica por el placeholder) sin tocar un solo lead a mano.
+
+**Lección**: "la cuenta no invita" tiene DOS familias de causa y se diagnostican en este
+orden — primero los **gates** (cap, gap, pausas: todos visibles en `linkedin_accounts` +
+`daily_activity`), y solo si están limpios, el **pool**. Con 0/12 del cap usado, el
+culpable nunca es el anti-ban. Y un filtro que rechaza al 100% del pool no es un filtro
+bien calibrado: vale la pena mirar los headlines rechazados uno por uno antes de asumir
+que el problema es la cosecha.
+
 ### 🏭 "¿Subir los límites de Infinity?" — el freno no eran los límites: 61 empresas con URN varado desde antes del fix 0.10.31  [02-sep-2026]
 
 Pedido del operador: más volumen para Aduanas Infinity (cuenta Rosy). El diagnóstico dio
