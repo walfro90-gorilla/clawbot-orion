@@ -413,10 +413,15 @@ async function trySearchForCampaign(campaign, account) {
   const criticalDrought = eligibleCount <= criticalPending
   // #3 (2026-07-03): backoff yield-aware del piso de drought. Si las últimas búsquedas
   // vinieron SECAS (dry_search_streak, seteado en ingestSearch al no traer leads netos),
-  // multiplicamos el piso para no martillar un pool agotado cada 30min: 30→60→120→240→cap
-  // 360min. Se resetea a 0 en cuanto una búsqueda trae leads netos nuevos.
+  // multiplicamos el piso para no martillar un pool agotado cada 30min: 30→60→120→cap.
+  // Se resetea a 0 en cuanto una búsqueda trae leads netos nuevos.
+  // (03-sep-2026) Cap 360→180min. El streak es POR CAMPAÑA pero la sequía es por
+  // combinación empresa×puesto: con 45 empresas y 24 puestos, que 4 búsquedas seguidas
+  // vengan secas no dice nada del siguiente par — y el castigo de 6h dejaba a Aduanas
+  // Infinity en 3 búsquedas/día con 0 leads invitables. El techo duro de LinkedIn no lo
+  // pone este backoff: `search_limit_reached` ya pausa 24h y alerta (extension-bridge).
   const dryStreak = campaign.dry_search_streak ?? 0
-  const critFloorMin = Math.min(CRIT_FLOOR_MIN * (2 ** Math.min(dryStreak, 4)), 360)
+  const critFloorMin = Math.min(CRIT_FLOOR_MIN * (2 ** Math.min(dryStreak, 4)), 180)
   const effGapMin = criticalDrought ? critFloorMin : searchGapHours * 60
   if (minsSince < effGapMin) {
     return { skipped: true, reason: criticalDrought ? 'search_crit_floor_not_met' : 'search_gap_not_met', eligibleCount, minsSince: Math.floor(minsSince), dryStreak, effGapMin: Math.round(effGapMin) }

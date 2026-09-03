@@ -612,7 +612,11 @@ export function passesTitleFilters(headline, whitelist = [], blacklist = []) {
     // El search query ya filtró por los keywords correctos del campaign — no es
     // necesario refilter aquí cuando no tenemos headline data. Esto desbloquea
     // pools donde el scrape no captura headlines (~80% de leads tienen null).
-    if (h.length === 0) return true
+    // (03-sep-2026) "sin headline" incluye el PLACEHOLDER: LinkedIn renderiza "--" cuando
+    // el perfil no tiene titular y el scraper lo guarda literal. Con `length === 0` ese
+    // lead quedaba PEOR tratado que uno sin el campo — el whitelist lo rechazaba siempre
+    // (Verónica Zavala @Isringhausen, campaña Aduanas Infinity). Sin letras ni dígitos = sin dato.
+    if (!/[\p{L}\p{N}]/u.test(h)) return true
     // Substring permisivo a propósito ("Director" caza "Directores"), pero insensible
     // a acentos. NOTA: variantes de OTRA raíz ("Directivo") requieren añadir el término
     // al whitelist (config) — el substring no las alcanza por diseño.
