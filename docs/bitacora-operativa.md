@@ -18,6 +18,105 @@
 
 ## ✅ Resuelto
 
+### 🃏 "Ni Josh ni Rosy invitan": tres cosas distintas, y solo una era un fallo  [04-sep-2026]
+
+Reporte del operador con la tarjeta HOY en pantalla: Josh 0/25 y Rosy 0/12, mientras Café
+57 iba 4/12 y Wal 9/18. **Los gates estaban limpios en las 4 cuentas** (sin pausas, ext
+0.10.41 viva, cap sin usar), así que el culpable no era el anti-ban.
+
+**1. El 0 del instante: pausa de comida deliberada.** El log mostraba las 5 campañas
+saltando a la vez con `outside_business_hours` a las 13:00 CDMX. No es un bug de hora:
+`isBusinessHours` (`lib/extension-dispatch.js`) corta de 13:00 a 13:59 para todas las
+cuentas. Se desactiva con `SKIP_LUNCH_PAUSE=true`, hoy sin configurar.
+
+**2. El 0 del día en Josh: su whitelist rechazaba a su propio target.** El picker repetía
+`no_leads_pass_whitelist` 64 ticks seguidos con **17 leads disponibles**. La lista tenía
+`CEO` pero **"Chief Executive Officer" no contiene la subcadena "ceo"**. Estaba tirando al
+CEO y al presidente de Gentor y al CFO de Xignux. Medido sobre su historial completo antes
+de tocar nada: `president` cazaba 81 headlines (65 hoy rechazados), `chief` 44 (31), con
+precisión alta (CEO de La Comer, de Nowports, de Dalton Motors). Añadidos `chief`,
+`president`, `cfo`, `vp`, `owner`, `gerente general`, `country manager`; **`head of` se
+dejó fuera a propósito** (alinea peor con "Directores Generales/CEO" y amplía targeting del
+cliente). De paso, dos términos **muertos** corregidos: `human resourses manager` y `key
+acount manager` — erratas que no podían casar nunca. Verificado en vivo: Josh invitó al
+**CEO de Gentor** (20:03Z), al **President de Gentor** (20:37Z) y al **CFO/VP de Xignux**
+(21:16Z), los tres que el filtro tiraba.
+
+**3. Rosy: sigue siendo la cosecha, no el filtro.** Sus 3 leads en cola son rechazos
+correctos (RH, relaciones laborales, capacitación) y sus búsquedas devuelven 0 perfiles. Es
+el techo del 34% del 03-sep. La palanca sigue siendo SalesNav.
+
+### 🃏 El headline no era el headline: los scrapers guardaban chrome de la tarjeta  [04-sep-2026, `4c8f9f9`]
+
+Salió tirando del hilo anterior: 3 de los 17 leads de Josh tenían como headline **"6
+contactos en común"**. Investigado con 14 agentes en paralelo (6 investigadores, 2
+sintetizadores, 6 verificadores adversarios); el censo real resultó **mucho peor** que el
+síntoma reportado.
+
+Los dos scrapers **ADIVINAN** el headline: recogen el `textContent` de todos los
+`span`/`div` de la tarjeta y eligen por regex, así que los paneles de la propia UI de
+LinkedIn compiten como candidatos de primera clase. Sobre 2.841 leads:
+
+| Patrón | Filas | Por qué gana |
+|---|---|---|
+| `Experiencia: 2017 - 2022 ( 5 años ) ABB Director de marketing` | 39 | casa `director` **legítimamente** — es un puesto PASADO en una empresa PASADA |
+| `6 contactos en común` | 28 | el regex de rol no lleva `\b` ⇒ `cto` casa dentro de "conta-**cto**-s" |
+| `N mil seguidores` | 15 | en las **cuatro** cuentas, no solo SalesNav |
+
+**19 leads recibieron contacto real** (12 `invite_sent`, 4 `follow_up_sent`, 1 `replied` —
+se sostuvo una conversación entera con ficción como contexto de perfil). Y el daño no
+paraba en la seniority inflada: `tryEnrichCompanies` extrajo la empresa de esos textos y
+estampó `currentCompany` con empleadores de hace 10 años (CEMEX, Accenture, OXXO,
+Cargolux), que es el campo que alimenta `{empresa}` en el mensaje. **`NO_INVENT_COMPANY_RULE`
+no podía atraparlo porque el dato no está alucinado**: es una extracción correcta de un
+texto que nunca debió ser el headline.
+
+Río abajo no había red: la única defensa que mira el headline (`headlineNamesCompany`) vive
+dentro de `if (targetCompanyName && !companyIsCertain)`, y las búsquedas de Josh llevan
+`companyUrn` ⇒ **el gate apagaba la defensa justo para la población afectada**.
+
+**Fix en dos mitades, como reparte [ADR-0006](adr/0006-verificar-en-el-ingest.md):**
+- **El servidor contiene**: `isCardChrome` (`lib/company-match.js`) aplicado en
+  `ingestSearch` ANTES de geo/empresa/scoreLead/profile_data. `null` es "no sé" y toda la
+  cadena ya lo contempla; el dato **FALSO** se colaba justo por donde el **AUSENTE** se
+  difiere para revisión. Cubre free Y SalesNav y protege a las cuentas con la extensión
+  rezagada de versión.
+- **La extensión recupera**: el `NOISE_RE` de `extractSalesNavProfiles` no tenía los
+  términos de "contactos en común" que el extractor **FREE sí tenía 85 líneas más abajo**.
+  Sacarlos de la sopa deja que gane el titular de verdad — el guard server-side solo puede
+  anular, no recuperar. Ext **0.10.42** (`814a03c`), requiere reinstalar + recargar por máquina.
+
+⚠️ **`Experiencia:` y `Acerca de:` van ANCLADOS al inicio**: sueltos tumbaban un headline
+humano real de Rosy (`"FVL Gerente Sr. | Experiencia: Mazda + Glovis + Isuzu + BMW Group"`).
+Ese caso es el ancla de regresión del self-check `test-company-match.js`.
+
+**Limpieza de las 85 filas, NO destructiva**: el valor malo se movió a
+`profile_data.headline_card_chrome` (y la empresa rancia a `currentCompany_stale`) en vez
+de borrarse, para poder censarlas después. Las 66 con empresa venida del facet la
+conservan. Verificado: **0 headlines chrome vivos**.
+
+### 📉 La tarjeta decía "vs ayer (0)" en las 4 cuentas — truncamiento silencioso de PostgREST  [04-sep-2026, `4c8f9f9`]
+
+No era un bug de fechas ni de zona horaria. La tarjeta junta dos números de **dos fuentes
+distintas**: "hoy" sale de `v_account_today` (que lee `daily_activity`), pero "ayer" se
+recontaba a mano desde `conversation_events`, traduciendo `conversation_id → cuenta` con un
+Map construido con un `.select()` **SIN `.limit()`** sobre `conversations`.
+
+**PostgREST corta en 1000 filas y hay 1911**, y el prefijo son las MÁS VIEJAS: de los 28
+invites de ayer, **0** caían en el mapa. El `if (!acctId) continue` se los tragaba sin
+error ⇒ 0 en las cuatro cuentas a la vez con los datos de origen intactos. La racha 🔥
+estaba rota por lo mismo (ausente en las 4 tarjetas).
+
+**Fix**: leer `daily_activity`, la MISMA fuente que el número de hoy, ya agregada por
+(cuenta, día CDMX). Desaparecen el join en memoria, el bucketing con `Intl` y dos variables
+muertas. Verificado con el service role de prod: Café 57 ayer=9, Josh=4, Rosy=3, Wal=12, y
+`activeDays` 13-15 días. Lint del archivo baja de 52 a 50 errores.
+
+> 🪤 **La misma trampa casi muerde dos veces el mismo día**: el script de limpieza de las 85
+> filas usaba `.limit(5000)` y devolvió 1000 — el tope del servidor no lo levanta el
+> `.limit()` del cliente. **Cualquier `.select()` que espere más de 1000 filas necesita
+> `.range()` paginado**, y el modo de fallo es silencioso: no hay error, solo faltan datos.
+
 ### 💾 Backups propios cada 6 h en el box — el script del FODA llevaba 7 semanas sin activarse  [04-sep-2026, `dafd663`]
 
 Detonante: mail de Supabase ofreciendo PITR a **$100/mes** ("your project is now serving 2.4 million
