@@ -88,6 +88,17 @@ npm run types
 - **DB**: inspecciona y consulta con el **MCP de Supabase** (`list_tables`, `execute_sql`, `get_advisors`, `get_logs`). Project id: `cjbvutiugmehrhdnfeta`.
 - **Extensión**: tras editar `apps/orion-extension/{background,content}.js` o `manifest.json`, hay que **recargar la extensión** en `chrome://extensions` y recargar la pestaña LinkedIn por cada cuenta.
 
+### 3.1 Checkout compartido: varias sesiones trabajan en el MISMO árbol
+
+`/home/walfro90/Desktop/codes/clawbot-orion` lo comparten varios agentes a la vez. Un `git checkout -b` ahí **se lleva los commits sin pushear del otro** y un `git push origin main` puede empujar un main viejo sin quejarse. Pasó dos veces el 04-sep-2026, en las dos direcciones.
+
+1. **El árbol compartido se queda SIEMPRE en `main`.** Nadie hace `git checkout <rama>` ahí.
+2. **Rama = worktree**, y nace de `origin/main`, no del HEAD que te encuentres:
+   `git worktree add ../clawbot-orion-<rama> -b <rama> origin/main`. Se trabaja, se mergea y se borra desde ahí (`git worktree remove`).
+3. **Commits directos en el árbol compartido: solo docs**, y siempre con `git add <archivos>` explícitos. **Nunca `git add -A`** — hay cambios sin commitear de otra sesión en el mismo árbol.
+4. **Antes de commitear**: `git branch --show-current`. **Antes de pushear**: `git push origin <rama>` explícito, y confirmar con `git ls-remote origin refs/heads/main`.
+5. **Antes de un `pm2 restart` en prod, avisa a la otra sesión por `SendMessage`** — además del protocolo de deploy de §4.
+
 ---
 
 ## 4. PM2 / despliegue (producción `/root/clawbot`)
