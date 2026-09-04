@@ -29,7 +29,7 @@ import { sanitizeForJsonb } from './lib/jsonb-sanitize.js'
 import { isGroupConversationName } from './lib/group-conversation.js'
 import { applyLeadAttemptOutcome, isNonFaultError } from './lib/lead-failure.js'
 import { noteDbResult, dbCircuitOpen } from './lib/db-circuit.js'
-import { headlineNamesCompany } from './lib/company-match.js'
+import { headlineNamesCompany, isCardChrome } from './lib/company-match.js'
 import { scoreLead } from './lib/lead-score.js'
 
 dotenv.config()
@@ -1615,8 +1615,23 @@ async function ingestSearch(commandId, result) {
   const { data: camp } = await supabase.from('campaigns').select('search_location, title_preferred').eq('id', campaignId).maybeSingle()
   const geoRaw = camp?.search_location ?? ''
   const preferred = camp?.title_preferred ?? []   // whitelist BLANDA: sube el score, nunca rechaza
+  // (04-sep) CHROME DE LA TARJETA. Los scrapers adivinan el headline entre el texto de
+  // toda la tarjeta y a veces entregan la UI de LinkedIn en su lugar: "6 contactos en
+  // común", "Experiencia: … ABB Director de marketing" (un puesto PASADO que puntúa
+  // seniority alta y se gana una invitación), "N mil seguidores". Se anula ANTES de todo
+  // lo que ramifica por esos campos — geo, empresa, scoreLead, profile_data — porque el
+  // dato FALSO se cuela justo por donde el AUSENTE se difiere para revisión.
+  let chromeNulled = 0
+  let profiles = rawProfiles.map(p => {
+    const headline = isCardChrome(p.headline) ? null : p.headline
+    const location = isCardChrome(p.location) ? null : p.location
+    if (headline !== p.headline || location !== p.location) chromeNulled++
+    return { ...p, headline, location }
+  })
+  if (chromeNulled > 0) console.log(`[bridge] search ${commandId.slice(0,8)}: 🧹 ${chromeNulled} perfiles con chrome de tarjeta anulado (headline/location)`)
+
   let droppedGeo = 0
-  let profiles = rawProfiles.filter(p => {
+  profiles = profiles.filter(p => {
     if (matchesCampaignGeo(p.location, geoRaw)) return true
     droppedGeo++; return false
   })
@@ -1700,7 +1715,7 @@ async function ingestSearch(commandId, result) {
       // (26-ago) Puntuación con lo que YA está en la mano aquí: cero llamadas LLM, cero
       // navegación extra. El picker la usa para gastar las ~25 invitaciones diarias en los
       // mejores. Ver lib/lead-score.js — `fromList` NO entra al número a propósito.
-      const { score, reasons } = scoreLead({ headline: p.headline, companyIsCertain, preferred })
+      const { score, reasons } = scoreLead({ headline: p.headline ?? '', companyIsCertain, preferred })
       return { ...baseRow(p), status: 'scraped', lead_score: score, score_reasons: reasons }
     })
 

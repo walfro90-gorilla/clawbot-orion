@@ -1,4 +1,8 @@
-// Verificación de empresa en el ingest — post-mortem 2026-08-17 (Aduanas Infinity).
+// Verificación de lo que trae el scraper, en el ingest.
+//   · headlineNamesCompany — post-mortem 2026-08-17 (Aduanas Infinity)
+//   · isCardChrome         — post-mortem 2026-09-04 (Josh / SalesNav)
+//
+// Verificación de empresa — post-mortem 2026-08-17 (Aduanas Infinity).
 //
 // PROBLEMA: desde que LinkedIn dejó de exponer el company URN (12-ago), toda empresa nueva
 // entra "degradada": sin URN no hay facet `currentCompany`, así que el nombre viaja como
@@ -49,4 +53,40 @@ export function headlineNamesCompany(headline, companyName) {
   const h = norm(headline)
   if (!h) return false
   return tokens.every(t => h.includes(t))
+}
+
+// ── Chrome de la tarjeta de búsqueda — post-mortem 2026-09-04 (Josh / SalesNav) ──────
+//
+// Los dos scrapers ADIVINAN el headline: recogen el textContent de todos los span/div de
+// la tarjeta y eligen por regex. Los paneles de la propia UI entran a esa sopa como
+// candidatos de primera clase. Medido sobre 2.838 leads:
+//   · 39 filas "Experiencia: 2017 - 2022 ( 5 años ) ABB Director de marketing" — casa el
+//     regex de rol LEGÍTIMAMENTE. Es un puesto PASADO en una empresa PASADA: pasa el
+//     whitelist, saca seniority alta y se lleva un turno de invitación (medido:
+//     "… Siemens CEO Executive Assistant" ⇒ lead_score 85, invite_sent).
+//   · 28 filas "6 contactos en común" — el regex de rol de content.js no lleva `\b`, así
+//     que `cto` casa dentro de "conta-CTO-s" y gana como match POSITIVO.
+//   · 15 filas "N mil seguidores" — en las CUATRO cuentas, no solo en SalesNav.
+// 19 de esos leads recibieron contacto real (12 invite_sent, 4 follow_up_sent, 1 replied).
+//
+// El dato FALSO es peor que el ausente: los guards de aguas abajo están escritos para
+// "sin dato" (passesTitleFilters pasa con headline vacío, toDefer captura el nulo), así
+// que el chrome se cuela justo por donde el hueco se difiere para revisión.
+//
+// Chokepoint hermano de matchesCampaignGeo/headlineNamesCompany (ADR-0006): server-side,
+// cubre free Y SalesNav, y protege a las cuentas con la extensión rezagada de versión.
+//
+// "Experiencia:" y "Acerca de:" van ANCLADOS al inicio a propósito: sueltos tumbaban un
+// headline humano REAL de la cuenta Rosy ("FVL Gerente Sr. | Experiencia: Mazda + Glovis
+// + Isuzu + BMW Group"). Medido contra las 2.838 filas antes de aceptar el patrón.
+//
+// ponytail: blocklist de las cadenas de UI medidas en prod, no un clasificador. Panel
+// nuevo de LinkedIn (o cuenta con la UI en inglés) ⇒ entrada nueva aquí. El fix de raíz
+// —que el extractor lea el nodo del titular en vez de adivinar— vive en la extensión y
+// no puede cubrir las versiones ya instaladas; este guard sí.
+const CARD_CHROME_RE = /contactos?\s+(m[aá]s\s+)?en\s+com[uú]n|grupos?\s+en\s+com[uú]n|^\s*(acerca de|experiencia)\s*:|guarda este posible cliente|[uú]ltima conexi[oó]n de|^\s*\d[\d.,]*\s*(mil\s+)?(seguidores?|followers?)\s*$/i
+
+/** ¿El texto es chrome de la tarjeta de búsqueda en vez de un dato del perfil? */
+export function isCardChrome(text) {
+  return CARD_CHROME_RE.test(String(text ?? ''))
 }

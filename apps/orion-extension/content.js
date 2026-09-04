@@ -5745,7 +5745,12 @@ async function scrapeSalesNavPeople(payload = {}) {
 // nombre + headline + location y RESUELVE el /in/ público (a[href*="/in/"] dentro del card),
 // imprescindible para invitar. Sin /in/ → fuera + contado. Devuelve { profiles, droppedNoPublic }.
 function extractSalesNavProfiles() {
-  const NOISE_RE = /conectar|connect|mensaje|message|guardar|save|seguir|follow|grado|degree|premium|inmail|a[ñn]adir|selecci[óo]n|disponible|available|en l[íi]nea|online|est[áa] en l|a11y/i
+  // (04-sep-2026) Los paneles de insight de la tarjeta entraban a `texts` como candidatos
+  // de primera clase: "6 contactos en común" ganaba el `.find()` de abajo porque el regex
+  // de rol no lleva `\b` y `cto` casa dentro de "conta-CTO-s". El extractor FREE ya los
+  // filtraba (`extractProfilesFromPage`); este se quedó sin ellos. Sacarlos de la sopa deja
+  // que gane el titular de verdad — el guard server-side `isCardChrome` solo puede anular.
+  const NOISE_RE = /conectar|connect|mensaje|message|guardar|save|seguir|follow|grado|degree|premium|inmail|a[ñn]adir|selecci[óo]n|disponible|available|en l[íi]nea|online|est[áa] en l|a11y|contactos? (m[áa]s )?en com[úu]n|grupos? en com[úu]n|other mutual connections|mutual connection|^\s*(acerca de|experiencia)\s*:|guarda este posible cliente|[úu]ltima conexi[óo]n de/i
   const seen = new Set()
   const profiles = []
   let droppedNoPublic = 0  // ahora = filas sin nombre extraíble (el /in/ ya no se exige)

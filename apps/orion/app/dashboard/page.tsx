@@ -235,8 +235,6 @@ export default async function DashboardPage({
   }
   const todayStartUtc     = `${todayCDMX}T06:00:00.000Z`
   const todayEndUtc       = `${addOneDayIso(todayCDMX)}T06:00:00.000Z`
-  const yesterdayStartUtc = `${yesterdayCDMX}T06:00:00.000Z`
-  const yesterdayEndUtc   = `${addOneDayIso(yesterdayCDMX)}T06:00:00.000Z`
   const last14StartUtc    = new Date(Date.now() - 14 * 86_400_000).toISOString()
 
   const acctFilter = (q: any) => (isRestricted && linkedAccountId)
@@ -303,49 +301,39 @@ export default async function DashboardPage({
   }
 
   // ── Hero gamificado: invites de ayer + streak por cuenta ─────────────────
-  // invites_sent_today ya viene de v_account_today.
-  // Aquí calculamos: invites ayer (comparación) + activeDays últimos 14d (streak).
-  const heroAccountIds = (await (async () => {
-    const cq = admin.from("conversations").select("linkedin_account_id")
-    const { data } = isRestricted && linkedAccountId
-      ? await cq.eq("linkedin_account_id", linkedAccountId)
-      : await cq
-    return Array.from(new Set((data ?? []).map((c: any) => c.linkedin_account_id).filter(Boolean)))
-  })()) as string[]
-
+  // MISMA fuente que el número de HOY (v_account_today también lee daily_activity), que
+  // ya viene agregada por (cuenta, día CDMX) — increment_daily_activity usa
+  // (now() at time zone 'America/Mexico_City')::date. Así "hoy" y "ayer" quedan en la
+  // misma escala y el delta deja de comparar peras con manzanas.
+  //
+  // (04-sep-2026) Antes esto se recontaba desde conversation_events, mapeando
+  // convo→cuenta con un select SIN .limit() sobre conversations: PostgREST corta en
+  // 1000 filas y hay 1911, así que el mapa se quedaba con las convos MÁS VIEJAS y
+  // NINGÚN evento reciente caía en él. El `continue` de la línea siguiente se lo tragaba
+  // sin error ⇒ "vs ayer (0)" y racha 0 en las CUATRO cuentas a la vez, con los datos de
+  // origen intactos. Truncamiento silencioso, no un bug de fechas.
+  // ponytail: filas = cuentas × 15 días; si eso llega a cientos, agregar en SQL.
   const heroByAccount: Record<string, { yesterday: number; activeDays: Set<string> }> = {}
-  for (const id of heroAccountIds) heroByAccount[id] = { yesterday: 0, activeDays: new Set() }
+  {
+    const daq = admin
+      .from("daily_activity")
+      .select("linkedin_account_id, date, invites_sent")
+      .gte("date", last14StartUtc.slice(0, 10))
+    const { data: daily } = isRestricted && linkedAccountId
+      ? await daq.eq("linkedin_account_id", linkedAccountId)
+      : await daq
 
-  if (heroAccountIds.length > 0) {
-    // Convos del usuario para mapear event → cuenta (sin .in con cientos de UUIDs)
-    const { data: convoMap } = await admin
-      .from("conversations")
-      .select("id, linkedin_account_id")
-      .in("linkedin_account_id", heroAccountIds)
-    const convoToAcct = new Map<string, string>()
-    for (const c of convoMap ?? []) convoToAcct.set((c as any).id, (c as any).linkedin_account_id)
-
-    // Invite events últimos 14d para esas convos
-    const { data: inviteEvents } = await admin
-      .from("conversation_events")
-      .select("conversation_id, sent_at")
-      .eq("event_type", "invite_sent")
-      .gte("sent_at", last14StartUtc)
-      .order("sent_at", { ascending: false })
-      .limit(1000)
-
-    for (const ev of inviteEvents ?? []) {
-      const acctId = convoToAcct.get((ev as any).conversation_id)
-      if (!acctId) continue
-      const bucket = heroByAccount[acctId]
-      if (!bucket) continue
-      const sentAt = (ev as any).sent_at as string
-      // Día CDMX
-      const dayCDMX = new Intl.DateTimeFormat("en-CA", {
-        timeZone: "America/Mexico_City", year: "numeric", month: "2-digit", day: "2-digit",
-      }).format(new Date(sentAt))
-      bucket.activeDays.add(dayCDMX)
-      if (sentAt >= yesterdayStartUtc && sentAt < yesterdayEndUtc) bucket.yesterday++
+    for (const d of daily ?? []) {
+      const id  = (d as any).linkedin_account_id as string
+      const day = (d as any).date as string          // "YYYY-MM-DD", ya en día CDMX
+      const n   = (d as any).invites_sent ?? 0
+      if (!id) continue
+      if (!heroByAccount[id]) heroByAccount[id] = { yesterday: 0, activeDays: new Set<string>() }
+      const bucket = heroByAccount[id]
+      // daily_activity guarda filas con invites_sent = 0 (una cuenta que solo mandó
+      // mensajes ese día). Sin este guard, la racha contaría días muertos.
+      if (n > 0) bucket.activeDays.add(day)
+      if (day === yesterdayCDMX) bucket.yesterday = n
     }
   }
 
