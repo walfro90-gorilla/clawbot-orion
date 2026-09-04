@@ -95,6 +95,33 @@ Ese caso es el ancla de regresión del self-check `test-company-match.js`.
 de borrarse, para poder censarlas después. Las 66 con empresa venida del facet la
 conservan. Verificado: **0 headlines chrome vivos**.
 
+✅ **VERIFICADO EN PRODUCCIÓN (04-sep 22:28Z)** — el guard MORDIÓ en una búsqueda SalesNav
+real de Josh a Grupo Topaz (cmd `aa11a3e6`, log `🧹 1 perfiles con chrome de tarjeta
+anulado`). La cadena completa, por identificador:
+
+| Momento | Dato |
+|---|---|
+| Lo que mandó la extensión | `"Experiencia: 2016 - 2026 ( 9 años 11 meses ) TALISIS Founder & CEO"` |
+| Lo que se guardó en el lead | `headline = null` |
+| `currentCompany` | `Grupo Topaz` — **conservado** (vino del facet, evidencia dura) |
+| `lead_score` | **10** |
+
+Ese 10 es la prueba fina: sin el guard el texto casaba `founder` y `ceo` en el whitelist y
+habría puntuado ~85 (seniority 5), mandando al lead al **top** del picker con un puesto
+sacado de un panel de experiencia. Cerró al fondo de la fila, que es lo correcto para un
+lead sin título verificado.
+
+⚠️ Josh seguía en ext **0.10.41** cuando esto pasó: su scraper **sigue generando** el chrome
+y lo está conteniendo el guard server-side. Cuando actualice a 0.10.42 el `NOISE_RE` lo
+corta en origen y el titular real tiene oportunidad de ganar. Rollout 2/4 (Rosy y Wal ya en
+0.10.42). Eso es exactamente el reparto "la extensión recupera, el servidor contiene"
+funcionando por separado.
+
+> El valor crudo queda auditable en `extension_commands.result` mientras la fila viva; el
+> guard del ingest **no** lo copia a `headline_card_chrome` (esa clave la puso solo la
+> limpieza retroactiva). Si algún día se purgan comandos viejos, se pierde la muestra del
+> markup — no se construyó preservación nueva por no especular.
+
 ### 📉 La tarjeta decía "vs ayer (0)" en las 4 cuentas — truncamiento silencioso de PostgREST  [04-sep-2026, `4c8f9f9`]
 
 No era un bug de fechas ni de zona horaria. La tarjeta junta dos números de **dos fuentes
