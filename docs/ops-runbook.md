@@ -49,6 +49,8 @@ docker exec pg-restore psql -U postgres -c 'select count(*) from public.leads'
 ```
 Para volver a un proyecto Supabase: restaurar `public` con `psql` sobre la connection string del proyecto nuevo (los `CREATE EXTENSION` y roles ya existen ahí — ignorar esos errores).
 
+**Cobertura de datos efímeros (04-sep-2026)**: `extension_commands.result` guarda el markup CRUDO del scrape (única muestra para depurar el guard `isCardChrome`), pero pg_cron job 5 (`30 3 * * *`) purga esa tabla a los 7 días — no está en el código de prometheus, por eso un grep ahí no lo encuentra (censo completo de los 4 jobs pg_cron en la bitácora, `14e114a`). Como `--schema=public` se lleva `extension_commands` con su `result`, cada fila cae en ~28 dumps antes de la purga y sigue recuperable de los `.sql.gz` (retención 14 d) ~3 semanas. O sea: purgar comandos viejos NO pierde la muestra del markup mientras haya un dump de por medio. (Ojo: un dump es anterior a las filas creadas después; la fila de las 22:27Z entró recién en la foto de las 00:07Z.)
+
 ### Pendientes NO urgentes (decidido 04-sep-2026: documentar y hacer después)
 
 Lo crítico ya está: la DB tiene backup diario (Pro) + dumps cada 6 h probados con restore. Estos tres
