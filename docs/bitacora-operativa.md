@@ -117,10 +117,23 @@ corta en origen y el titular real tiene oportunidad de ganar. Rollout 2/4 (Rosy 
 0.10.42). Eso es exactamente el reparto "la extensión recupera, el servidor contiene"
 funcionando por separado.
 
-> El valor crudo queda auditable en `extension_commands.result` mientras la fila viva; el
-> guard del ingest **no** lo copia a `headline_card_chrome` (esa clave la puso solo la
-> limpieza retroactiva). Si algún día se purgan comandos viejos, se pierde la muestra del
-> markup — no se construyó preservación nueva por no especular.
+> **Dónde vive la muestra del markup crudo** (el guard del ingest anula, **no** copia a
+> `headline_card_chrome` — esa clave la puso solo la limpieza retroactiva de las 85):
+> `extension_commands.result` la conserva **7 días**, que no es "para siempre" como parecía:
+> el **pg_cron job 5** (`30 3 * * *`) borra los comandos `completed|error|timeout` con más
+> de 7 días. Por eso la tabla solo tiene 2.425 filas y su fila más antigua es del 28-ago.
+> No lo hace `cleanupExpired` del bridge — ese solo cambia el status a `timeout`, no borra;
+> buscar el purge en el código de prometheus no lo encuentra.
+>
+> Aun así la muestra **no se pierde**: el `pg_dump` cada 6 h (`7 */6`, `--schema=public`,
+> retención 14 d) congela `extension_commands` con su `result` jsonb, así que una fila que
+> vive 7 días queda en ~28 dumps y sigue recuperable desde `/root/clawbot-backups/` bastante
+> después de que la purguen. No hizo falta construir preservación dedicada.
+>
+> 📌 De paso, el censo de retención que nadie tenía junto: **pg_cron corre 4 jobs activos** —
+> alta diaria de `daily_activity` (`5 0`), y purga a 7 días de `cron.job_run_details`
+> (`0 3`), `scheduler_log` (`15 3`) y `extension_commands` (`30 3`). El job 1
+> (`messages_queue`) está **inactivo**: es de la arquitectura muerta.
 
 ### 📉 La tarjeta decía "vs ayer (0)" en las 4 cuentas — truncamiento silencioso de PostgREST  [04-sep-2026, `4c8f9f9`]
 
