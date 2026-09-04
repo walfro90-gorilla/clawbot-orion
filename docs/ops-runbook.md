@@ -49,7 +49,42 @@ docker exec pg-restore psql -U postgres -c 'select count(*) from public.leads'
 ```
 Para volver a un proyecto Supabase: restaurar `public` con `psql` sobre la connection string del proyecto nuevo (los `CREATE EXTENSION` y roles ya existen ahí — ignorar esos errores).
 
-**Pendiente:** copiar los dumps fuera del box (S3/Backblaze) — un backup en el mismo servidor no protege contra "muere el box". Requiere credenciales nuevas (el IAM `clawbot-dns` es solo Route 53).
+### Pendientes NO urgentes (decidido 04-sep-2026: documentar y hacer después)
+
+Lo crítico ya está: la DB tiene backup diario (Pro) + dumps cada 6 h probados con restore. Estos tres
+cierran huecos secundarios; ninguno protege datos que hoy estén sin copia.
+
+**a) Snapshot del box en Upcloud** — cubre "muere el server" (código en git, keys regenerables; los
+dumps del box son la 2ª copia de la DB, no la única).
+Hub → Servers → el server → pestaña **Backups** → *Simple Backup* plan **Daily** (7 d basta). El precio
+sale antes de confirmar (proporcional al disco de 60 GB). *Take backup* = uno manual para probar.
+Verificación: el snapshot aparece listado con hora.
+
+**b) Check en healthchecks.io para el cron** — cubre "el cron dejó de correr y nadie lo supo" (el script
+solo alerta cuando **él** falla). Misma cuenta del check `clawbot-orion-box`:
+*Add Check* → nombre `clawbot-db-backup` · Period **6 h** · Grace **1 h** → copiar la ping URL.
+
+```bash
+# guardar la URL en el .env de prod sin que pase por el chat (la pegas cuando pida)
+ssh -t orion 'printf "ping URL: "; read -r U; F=/root/clawbot/apps/prometheus/.env; grep -q "^BACKUP_HEARTBEAT_URL=" $F && echo "ya existía, no toqué" || printf "BACKUP_HEARTBEAT_URL=%s\n" "$U" >> $F; echo "claves BACKUP_HEARTBEAT_URL: $(grep -c "^BACKUP_HEARTBEAT_URL=" $F)"'
+# primer ping: un backup a mano (el script lee el .env con grep en cada corrida; nada que reiniciar)
+ssh orion 'bash /root/clawbot/apps/prometheus/scripts/backup-db.sh'
+```
+Verificación: el check pasa a **Up** en segundos.
+
+**c) Entrecomillar `DIGEST_FROM` en el `.env` de prod** — fix de raíz de que `set -a; . .env` truene.
+Cosmético: solo afecta a humanos en shell; el script y los procesos (dotenv) no lo sufren.
+
+```bash
+ssh orion 'cd /root/clawbot/apps/prometheus && cp -p .env .env.bak-$(date +%F) && sed -i "s|^DIGEST_FROM=Orion Lead Connections <digest@ebooms.com>\$|DIGEST_FROM=\"Orion Lead Connections <digest@ebooms.com>\"|" .env && grep -n "^DIGEST_FROM=" .env'
+# verificación doble: dotenv devuelve el valor SIN comillas y source ya no truena
+ssh orion 'cd /root/clawbot/apps/prometheus && node -e "require(\"dotenv\").config(); console.log(JSON.stringify(process.env.DIGEST_FROM))" && (set -a; . ./.env; set +a; echo "source OK")'
+```
+Esperado: `"Orion Lead Connections <digest@ebooms.com>"` y `source OK`. Sin reinicio (mismo valor en
+memoria). Si difiere: `cp .env.bak-<fecha> .env`.
+
+**d) (más adelante) copia off-site de los dumps** (S3/Backblaze) — requiere credenciales nuevas; el IAM
+`clawbot-dns` es solo Route 53. El snapshot Upcloud de (a) cubre el 90 % del caso mientras tanto.
 
 ---
 
