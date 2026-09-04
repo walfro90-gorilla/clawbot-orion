@@ -126,6 +126,8 @@ pm2 resurrect        # ✅ recuperación real tras reboot (depende de pm2 save)
 
 Verifica el esquema real con el MCP de Supabase antes de cambiarlo.
 
+**Backups (04-sep-2026)**: Pro da el diario gestionado; además un cron `pg_dump` cada 6 h en el box (`apps/prometheus/scripts/backup-db.sh` → `/root/clawbot-backups`, `public`+`auth`, alerta ntfy si falla). Credencial en `/root/.pgpass`; **ningún proceso usa conexión directa a Postgres**, así que resetear la password de la DB no rompe nada. Activación y drill de restore: `docs/ops-runbook.md §1`.
+
 | Tabla | Rol |
 |-------|-----|
 | `linkedin_accounts` | cuentas LinkedIn: cookie, proxy, estado, `extension_api_key` |
@@ -264,6 +266,7 @@ Auth: Supabase Auth + RLS. Roles `god_admin > admin > user`. Proxy de Next prote
 
 - **prometheus**: `apps/prometheus/.env` → `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `GEMINI_API_KEY`, **`GROQ_API_KEY`** (LLM primario), **`MOONSHOT_API_KEY`** (Kimi, respaldo de pago). Ops del watchdog (opcionales): `OPS_WEBHOOK_URL` (alertas Slack/Telegram/ntfy), `OPS_HEARTBEAT_URL` (dead-man's-switch Healthchecks.io). Digest diario (11-ago): `RESEND_API_KEY` + `DIGEST_FROM` (remitente `Nombre <email@dominio-verificado-en-Resend>`; sin key el digest es no-op con alerta). Tuning: `LLM_PROVIDERS`, `GROQ_MODEL`, `EXTENSION_POLL_INTERVAL_MS`, `CONFIG_CACHE_TTL_MS`.
 - **orion**: `apps/orion/.env.local` → vars de Supabase + auth.
+- ⚠️ **No hagas `set -a; . .env` en un shell**: `DIGEST_FROM` lleva `<` sin comillas y `source` truena (`syntax error near unexpected token 'newline'`). Los procesos no lo sufren (dotenv). Para leer UNA clave: `grep -m1 '^KEY=' .env | cut -d= -f2-`.
 
 ---
 

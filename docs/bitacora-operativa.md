@@ -18,6 +18,30 @@
 
 ## ✅ Resuelto
 
+### 💾 Backups propios cada 6 h en el box — el script del FODA llevaba 7 semanas sin activarse  [04-sep-2026, `dafd663`]
+
+Detonante: mail de Supabase ofreciendo PITR a **$100/mes** ("your project is now serving 2.4 million
+requests a month"). Auditoría previa (03-sep, con el MCP ya de vuelta): esos 2.4M req/mes son
+**nuestro propio polling** (~75k/día: `extension_commands` 22k, `leads` 12k, `runtime_config` 9k…),
+el SQL total usa **0.3% de un core**, el WAL real es **112 MB en 2 días** (los "48 MB cada 5 min" de
+los checkpoints son padding de rotación de segmentos para el archivado, no workload), egress ~1 MB/día,
+DB 56 MB. Nada que optimizar mueve dinero. Pro (activo desde 01-sep) ya da backup diario; PITR
+descartado. En su lugar, el cron de `pg_dump`: RPO 6 h por $0 y una copia **fuera** de Supabase.
+
+Lo que apareció al activarlo:
+- `backup-db.sh` existía desde jul (FODA) pero **nunca corrió**: sin cron, sin credencial, sin directorio.
+- La receta del runbook (`set -a; . .env`) está **rota desde el 11-ago**: `DIGEST_FROM=Orion Lead Connections <digest@ebooms.com>` sin comillas hace que `source` truene con `syntax error near unexpected token 'newline'`. El scheduler no lo sufre (dotenv); cualquier shell sí. El script ahora lee lo que necesita con `grep`.
+- El `pg_dump` 16 de Ubuntu 24.04 aborta contra PG 17 (`server version mismatch`) → `postgresql-client-17` desde PGDG.
+- La 1ª prueba del camino de fallo murió **muda**: `envval` terminaba en `grep` sin match, `pipefail` pasó el 1 al assignment y `set -e` cortó antes de `die`. Fix `|| true`. Repetida: exit 1 + alerta **verificada en ntfy** (`"title":"backup-db FALLO"`).
+- La password de la DB del operador no era la vigente (`password authentication failed` con `.pgpass` bien formado: 5 campos, sin `:`/`\`). Reset desde el dashboard — seguro: **ningún proceso usa conexión directa** (cero claves `DATABASE`/`POSTGRES`/`SUPABASE_DB_URL` en los `.env`).
+
+Verificado:
+- Dump 4.8 MB (`public` + `auth`), gzip + trailer + tamaño OK, <1 s; sha256 igual en box y laptop.
+- **Drill de restore** en `postgres:17` (Docker, laptop): conteos **idénticos** al vivo — leads 2838, conversations 1908, conversation_events 6237, campaigns 12, accounts 4, followups 53, `auth.users` 6 con `encrypted_password`. 17 errores, todos esperados fuera de Supabase (roles `service_role`/`authenticated`; extensiones `vector`/`pg_trgm` ausentes en la imagen vanilla → caen `brain_memory` y un índice GIN). En un proyecto Supabase real esas dependencias existen.
+- Cron `7 */6 * * *` junto al watchdog; log `/root/.pm2/logs/backup-db.log`; retención 14 d ≈ 56 dumps × 5 MB.
+
+Pendiente: (a) copia fuera del box (snapshot Upcloud o S3 — el IAM `clawbot-dns` es solo Route 53); (b) `BACKUP_HEARTBEAT_URL` en healthchecks.io para cazar el cron que **no** corre; (c) entrecomillar `DIGEST_FROM` en el `.env` de prod (fix de raíz del `source`).
+
 ### 🚪 "¿Por qué Rosy no envía invites?" — tenía 7 leads en cola y el whitelist rechazaba a los 7  [03-sep-2026]
 
 Reporte del operador. **No era anti-ban ni la cuenta**: `active`, warm, **0 de 12 invites
