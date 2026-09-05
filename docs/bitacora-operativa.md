@@ -18,6 +18,63 @@
 
 ## ✅ Resuelto
 
+### 🔐 Dos agujeros de la capa de datos cerrados: escalada a `god_admin` y fuga de la cookie `li_at` a cualquier anónimo  [05-sep-2026]
+
+Salieron de la auditoría de seguridad post-incidente (16 agentes, solo lectura). Los dos
+estaban **abiertos en producción** y se verificaron en vivo antes y después del fix.
+
+**1. Cualquier usuario registrado podía ascenderse a `god_admin`.** `profiles` tenía GRANT
+de tabla completa a `authenticated` (`relacl: authenticated=arwdDxtm`) y la política
+`profiles_update_own` tiene `USING (auth.uid() = id)` pero **`with_check` NULL**. Sin
+`WITH CHECK`, la fila se valida al LEERLA, no al escribirla ⇒ `UPDATE profiles SET
+role='god_admin' WHERE id = auth.uid()` pasaba. Con ese rol se leen `linkedin_accounts`
+(las 4 cookies `li_at` y las `extension_api_key`) y los 2.856 leads.
+
+⚠️ **Trampa de diagnóstico**: `information_schema.table_privileges` y `column_privileges`
+devolvieron **vacío** para `authenticated` — solo muestran privilegios visibles al rol que
+consulta. La fuente de verdad es `pg_class.relacl` y `pg_attribute.attacl`. Consultar la
+primera y concluir "no hay grant" habría dejado el agujero abierto dando por hecho lo
+contrario.
+
+**2. `get_campaign_account(uuid)` entregaba la sesión de LinkedIn a un anónimo.**
+`SECURITY DEFINER` (corre como `postgres`, se salta RLS) con `anon=X` y `=X` (PUBLIC) en su
+ACL. Devuelve `li_at_cookie` y `proxy_url`: con la cookie se secuestra la cuenta sin
+contraseña ni 2FA, y con el proxy se sale por la misma IP para no disparar la detección —
+justo el foso del producto ([ADR-0002](adr/0002-ejecutar-en-la-sesion-del-usuario.md)).
+
+**Fix** (migración `cierra_escalada_role_y_rpc_credenciales`), en la capa de PRIVILEGIOS y
+no en la política, para no arriesgar recursión en RLS:
+
+```sql
+REVOKE UPDATE ON public.profiles FROM authenticated, anon;
+GRANT  UPDATE (onboarded_at) ON public.profiles TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.get_campaign_account(uuid) FROM anon, authenticated, PUBLIC;
+```
+
+El `GRANT` de columna es obligatorio: se auditó cada escritura a `profiles` y la **única**
+en contexto de usuario (`createClient`, no `createAdminClient`) es
+`app/api/tour/complete/route.ts` → `.update({ onboarded_at })`. Todo lo demás
+(`users/page.tsx`, `onboarding/activate`) usa `service_role`, que no se toca. Un `REVOKE`
+liso habría roto el tour en silencio.
+
+La función NO se dropeó pese a que su único llamador (`apps/prometheus/batch.js:259`) es
+arquitectura muerta: durante un incidente no se destruye nada. El `DROP` queda de limpieza.
+
+**Verificado en vivo contra el PostgREST real, antes 200 / después:**
+
+| Prueba como anónimo | Resultado |
+|---|---|
+| `POST /rpc/get_campaign_account` | `401` · `42501 permission denied for function` |
+| `PATCH /profiles` con `role=god_admin` | `401` · `42501 permission denied for table` |
+| `pg_attribute.attacl` de `onboarded_at` | `{authenticated=w/postgres}` — el tour sigue vivo |
+| Orion tras el cambio | 5 procesos PM2, login 200, **cero `42501` en su log** |
+
+**Pendientes de la misma auditoría, NO aplicados** (necesitan decisión o ventana): registro
+abierto en Supabase Auth (cualquiera se hace `authenticated`, que es la precondición del
+hallazgo 1), las 16 vistas `v_*` que se saltan RLS con `SELECT` para `authenticated`
+(2.856 leads con 640 emails y 266 teléfonos), ausencia total de TLS en producción, e
+instalador de la extensión por `curl http | bash` sin checksum.
+
 ### 🃏 "Ni Josh ni Rosy invitan": tres cosas distintas, y solo una era un fallo  [04-sep-2026]
 
 Reporte del operador con la tarjeta HOY en pantalla: Josh 0/25 y Rosy 0/12, mientras Café
